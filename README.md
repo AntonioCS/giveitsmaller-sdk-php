@@ -59,6 +59,32 @@ foreach ($downloads->getDownloads() as $job) {
 }
 ```
 
+## Streaming workflow events
+
+`streamEvents($workflowId)` opens an SSE stream against `/api/workflows/{id}/events` and yields one `GislSseEvent` per parsed frame. The generator holds the connection open until the server closes the stream OR the caller `break`s out of the foreach.
+
+```php
+use Gisl\Sdk\GislSseEvent;
+
+foreach ($client->streamEvents($workflow->getWorkflowId()) as $event) {
+    /** @var GislSseEvent $event */
+    match ($event->event) {
+        'progress' => printf("  %d%% — %s\n", $event->data['percent'] ?? 0, $event->data['stage'] ?? ''),
+        'complete' => printf("Done: %s\n", json_encode($event->data)),
+        'error'    => printf("Error: %s\n", $event->data['message'] ?? 'unknown'),
+        default    => null, // unknown event — ignore
+    };
+
+    if ($event->event === 'complete' || $event->event === 'error') {
+        break; // caller-initiated close — connection is released by PHP's GC
+    }
+}
+```
+
+`GislSseEvent` carries exactly two readonly fields: `$event` (string, defaults to `"message"` if the server omits the `event:` field) and `$data` (the JSON-decoded payload as an associative array — snake_case keys preserved). `id:` and `retry:` SSE fields are deliberately not exposed: the SDK does not implement Last-Event-ID reconnection nor honour server-suggested retry intervals.
+
+Frames whose `data:` body fails to JSON-decode are dropped silently rather than throwing — long-running consumers should not break on a single garbled frame. Non-2xx responses (e.g. 401 with an auth envelope) route through the same typed-error tree as the JSON endpoints, so `try { ... } catch (GislAuthError $e) { ... }` works for SSE just like `createWorkflow()`.
+
 ## Webhook verification
 
 ```php

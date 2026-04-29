@@ -554,6 +554,215 @@ final class GislClient
         return $this->hydrate(WorkflowDownloadResponse::class, $data);
     }
 
+    /**
+     * Stream Server-Sent Events for a workflow, yielding one
+     * {@see GislSseEvent} per parsed frame.
+     *
+     * Mirrors `streamEvents()` at `packages/typescript/src/client.ts:1104`
+     * and the SSE parser at `packages/typescript/src/sse.ts`. Wire details:
+     *
+     *   - `GET /api/workflows/{rawurlencode($workflowId)}/events`
+     *   - The connection is held open by the server; the generator
+     *     yields events as they arrive. The connection closes when the
+     *     server ends the stream OR the caller `break`s out of the
+     *     foreach (PHP destructs the generator and releases the body).
+     *   - Comment lines (`:` prefix) are skipped — keep-alives.
+     *   - `id:` and `retry:` are explicitly IGNORED (NOT surfaced on
+     *     {@see GislSseEvent}). The SDK does not implement
+     *     Last-Event-ID reconnection nor honour server-suggested retry
+     *     intervals.
+     *   - Each frame's `data:` body is JSON-decoded as an associative
+     *     array. Frames whose body fails to parse are SKIPPED — the
+     *     stream does NOT throw mid-flight on a single garbled frame,
+     *     because long-running consumers should stay up across
+     *     transient server hiccups. (TS reference falls back to a
+     *     plain string; PHP rejects entirely so the typed `data`
+     *     contract holds.)
+     *
+     * Non-2xx responses are routed through {@see unwrapEnvelope} so
+     * the typed-error dispatch (auth, balance, validation, …) shipped
+     * in B2.1 surfaces the same exceptions for SSE as for JSON
+     * endpoints.
+     *
+     * @return \Generator<int, GislSseEvent, void, void>
+     * @throws GislNetworkError on transport failure.
+     * @throws GislApiError     on a non-2xx envelope (typed subclass
+     *                          where the dispatch matches).
+     */
+    public function streamEvents(string $workflowId): \Generator
+    {
+        $encoded = \rawurlencode($workflowId);
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: "/api/workflows/{$encoded}/events",
+        );
+
+        try {
+            $response = $this->httpClient->sendRequest($request);
+        } catch (ClientExceptionInterface $e) {
+            throw new GislNetworkError(
+                "HTTP transport failed: {$e->getMessage()}",
+                $e,
+            );
+        }
+
+        $statusCode = $response->getStatusCode();
+        if ($statusCode < 200 || $statusCode >= 300) {
+            // Route through the JSON envelope dispatcher — let the
+            // typed-error tree (GislAuthError, GislBalanceExhaustedError,
+            // …) throw. unwrapEnvelope always throws on non-success here:
+            // a non-2xx with a `success: true` envelope is malformed and
+            // the early-empty-body path also throws. Either way we never
+            // return a plain "data" payload for a non-2xx wire response.
+            $this->unwrapEnvelope($response);
+            // Defense-in-depth — should be unreachable.
+            throw new GislError(
+                "SSE stream returned status {$statusCode} with a success envelope.",
+            );
+        }
+
+        return $this->parseSseStream($response->getBody());
+    }
+
+    /**
+     * Generator-internal SSE parser. Reads the PSR-7 body in chunks,
+     * splits on \n / \r\n / \r per the SSE spec, accumulates `data:`
+     * lines into one frame, joins multiple `data:` lines with `\n`,
+     * JSON-decodes on blank-line boundaries, and yields a
+     * {@see GislSseEvent} per successfully-parsed frame.
+     *
+     * @return \Generator<int, GislSseEvent, void, void>
+     */
+    private function parseSseStream(\Psr\Http\Message\StreamInterface $body): \Generator
+    {
+        $buffer = '';
+        $eventType = '';
+        /** @var list<string> $dataLines */
+        $dataLines = [];
+
+        while (!$body->eof()) {
+            $chunk = $body->read(self::SSE_READ_CHUNK_BYTES);
+            if ($chunk === '') {
+                // Some PSR-7 streams return '' before EOF on slow
+                // network reads. Don't busy-loop: if we're not at EOF,
+                // the next read() attempt should block until bytes
+                // arrive. If we ARE at EOF the while() exits cleanly.
+                continue;
+            }
+            $buffer .= $chunk;
+
+            // SSE spec: lines terminated by \n, \r\n, or \r. Normalise
+            // so a single split produces canonical lines.
+            $buffer = \str_replace(["\r\n", "\r"], "\n", $buffer);
+            $lines = \explode("\n", $buffer);
+            // Last entry is potentially incomplete (no terminator yet);
+            // hold it back into the buffer for the next read.
+            $buffer = (string) \array_pop($lines);
+
+            foreach ($lines as $line) {
+                if ($line === '') {
+                    // Blank line = frame terminator. Flush.
+                    $event = $this->flushSseFrame($eventType, $dataLines);
+                    $eventType = '';
+                    $dataLines = [];
+                    if ($event !== null) {
+                        yield $event;
+                    }
+                    continue;
+                }
+
+                if ($line[0] === ':') {
+                    // Comment / keep-alive. Skip.
+                    continue;
+                }
+
+                $colonIndex = \strpos($line, ':');
+                if ($colonIndex === false) {
+                    // Field with no value — SSE spec treats the whole
+                    // line as the field name with empty value. Only
+                    // `event` / `data` matter to us; both are useless
+                    // empty, so drop the line.
+                    continue;
+                }
+
+                $field = \substr($line, 0, $colonIndex);
+                // Strip a single optional space after the colon per the SSE spec.
+                $valueStart = ($colonIndex + 1 < \strlen($line) && $line[$colonIndex + 1] === ' ')
+                    ? $colonIndex + 2
+                    : $colonIndex + 1;
+                $fieldValue = \substr($line, $valueStart);
+
+                switch ($field) {
+                    case 'event':
+                        $eventType = $fieldValue;
+                        break;
+                    case 'data':
+                        $dataLines[] = $fieldValue;
+                        break;
+                    case 'id':
+                    case 'retry':
+                        // Intentionally ignored — see GislSseEvent
+                        // class docblock for rationale.
+                        break;
+                    default:
+                        // Unknown field — drop per SSE spec.
+                        break;
+                }
+            }
+        }
+
+        // Flush any final frame at stream end (server closed without a
+        // trailing blank line).
+        if ($dataLines !== []) {
+            $event = $this->flushSseFrame($eventType, $dataLines);
+            if ($event !== null) {
+                yield $event;
+            }
+        }
+    }
+
+    /**
+     * Read-chunk size for SSE. 8 KiB is large enough that typical
+     * progress / status frames (<1 KiB) come back in one read, while
+     * still being small enough that the buffer never grows unbounded
+     * if the server keeps the connection open for hours.
+     */
+    private const SSE_READ_CHUNK_BYTES = 8192;
+
+    /**
+     * Build one {@see GislSseEvent} from the accumulated frame state
+     * or return null if the frame should be dropped (no data lines, or
+     * malformed JSON).
+     *
+     * @param list<string> $dataLines
+     */
+    private function flushSseFrame(string $eventType, array $dataLines): ?GislSseEvent
+    {
+        if ($dataLines === []) {
+            return null;
+        }
+        $rawData = \implode("\n", $dataLines);
+        try {
+            /** @var mixed $decoded */
+            $decoded = \json_decode($rawData, associative: true, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            // Skip malformed frames. Long-running consumers must not
+            // break on a single garbled payload — server-side glitches
+            // / partial flushes happen in the wild.
+            if (\defined('PHP_DEBUG') && PHP_DEBUG) {
+                \error_log(
+                    "GISL SDK: dropping SSE frame with non-JSON data: {$e->getMessage()}",
+                );
+            }
+            return null;
+        }
+
+        // Per SSE spec: an event with no `event:` field defaults to
+        // "message". Mirrors the TS reference at sse.ts:50.
+        $name = $eventType !== '' ? $eventType : 'message';
+        return new GislSseEvent(event: $name, data: $decoded);
+    }
+
     // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
