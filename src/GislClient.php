@@ -7,8 +7,13 @@ namespace Gisl\Sdk;
 use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorType;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
+use Gisl\Generated\OpenApi\Model\ContactRequest;
+use Gisl\Generated\OpenApi\Model\CreditsBalanceResponse;
+use Gisl\Generated\OpenApi\Model\CreditsUsageResponse;
 use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
+use Gisl\Generated\OpenApi\Model\LoginUser200ResponseData;
+use Gisl\Generated\OpenApi\Model\LoginUserRequest;
 use Gisl\Generated\OpenApi\Model\MetadataResponse;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateResponse;
 use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
@@ -60,6 +65,22 @@ use Psr\Http\Message\StreamFactoryInterface;
  * workflow lifecycle methods: {@see cancelWorkflow}, {@see resumeWorkflow},
  * {@see retryOperation}, {@see waitForWorkflow}, and {@see getMetadata}.
  *
+ * Sub-card `VOxtu0RZ-B2.4` (`zxGUQSmI`) adds auth + credits + contact:
+ * {@see login}, {@see logout}, {@see submitContact}, {@see getCreditsBalance},
+ * {@see getCreditsUsage}.
+ *
+ * **Threading / concurrency note.** When constructed with
+ * `GislClientConfig::$useSessionCookie === true`, the client holds
+ * per-instance mutable session state (the `gisl_session` cookie value
+ * captured from {@see login}'s `Set-Cookie` response header). Sharing one
+ * GislClient instance across concurrent execution contexts — Swoole fibers,
+ * ReactPHP loops, parallel PHPUnit processes, etc. — is **unsupported** in
+ * that mode: a logout on context A clears the cookie observed by context B
+ * mid-request. With `useSessionCookie === false` (the default), every
+ * GislClient call is stateless and safe to share. Callers running concurrent
+ * workloads under cookie auth should construct one GislClient per fiber /
+ * worker.
+ *
  * Multipart routing is sequential in v0.x: chunks are PUT to S3 one at a
  * time regardless of `GislClientConfig::$multipartConcurrency`. The config
  * field is recorded for forward compatibility — concurrent multipart uploads
@@ -77,6 +98,15 @@ final class GislClient
     private readonly ClientInterface $httpClient;
     private readonly RequestFactoryInterface $requestFactory;
     private readonly StreamFactoryInterface $streamFactory;
+
+    /**
+     * Captured `gisl_session` cookie value when
+     * `GislClientConfig::$useSessionCookie === true`. Mutated only by
+     * {@see login} (set) and {@see logout} (cleared). See the threading-
+     * unsafety note on this class's docblock — sharing one GislClient
+     * across concurrent contexts under cookie auth is unsupported.
+     */
+    private ?string $sessionCookie = null;
 
     public function __construct(
         public readonly GislClientConfig $config,
@@ -941,6 +971,218 @@ final class GislClient
     }
 
     // ---------------------------------------------------------------------
+    // Auth (VOxtu0RZ-B2.4)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Authenticate with email/password and (when configured) capture the
+     * session cookie for subsequent requests.
+     *
+     * On success the server issues a `gisl_session` cookie via
+     * `Set-Cookie`. When `GislClientConfig::$useSessionCookie === true`,
+     * this method extracts the cookie value and stores it on the client
+     * instance so {@see buildRequest} can forward it as a `Cookie:` header
+     * on every following call. With `useSessionCookie === false`, the
+     * `Set-Cookie` header is ignored and the typed user-payload is returned
+     * unchanged — bearer-token-only flows never opt in to cookie capture.
+     *
+     * Failure modes per ticket FX6mbTJD (mirrors TS):
+     *  - **401** `invalid_credentials` → {@see GislAuthError}.
+     *  - **403** account-state failures (`account_locked`,
+     *    `account_disabled`, `account_deleted`,
+     *    `account_deletion_expired`) → {@see GislAuthError}.
+     *  - **429** rate-limit → {@see GislApiError}.
+     *
+     * Mirrors `packages/typescript/src/client.ts::login`.
+     */
+    public function login(LoginUserRequest $credentials): LoginUser200ResponseData
+    {
+        $jsonBody = $this->jsonEncode(
+            (array) ObjectSerializer::sanitizeForSerialization($credentials),
+        );
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/auth/login',
+            body: $this->streamFactory->createStream($jsonBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+
+        // Drop down to sendRaw so we can inspect Set-Cookie before the body
+        // is consumed by unwrapEnvelope. PSR-7 streams are typically forward-
+        // only; reading the body for envelope decoding does not invalidate
+        // headers, but capturing the cookie BEFORE unwrap means a
+        // 200-with-malformed-envelope cannot leave the client in a half-
+        // authenticated state with a captured cookie but no returned DTO.
+        $response = $this->sendRaw($request);
+
+        if ($this->config->useSessionCookie) {
+            $cookieValue = $this->extractSessionCookie($response);
+            if ($cookieValue !== null) {
+                $this->sessionCookie = $cookieValue;
+            }
+        }
+
+        /** @var array<string, mixed> $data */
+        $data = $this->unwrapEnvelope($response);
+        return $this->hydrate(LoginUser200ResponseData::class, $data);
+    }
+
+    /**
+     * Invalidate the current session.
+     *
+     * **Idempotent.** Calling logout without an active session returns 401,
+     * but the SDK collapses both 200 and 401 into a single "logged out"
+     * outcome — `logout()` returns `void` in either case so caller cleanup
+     * paths do not need to special-case the not-currently-authenticated
+     * branch. Other errors (5xx, network failures) still throw.
+     *
+     * When `useSessionCookie === true`, the captured cookie is cleared on
+     * BOTH outcomes (success and the 401-already-logged-out swallow) so a
+     * subsequent request never carries a stale `Cookie:` header.
+     *
+     * Mirrors `packages/typescript/src/client.ts::logout` — the 401-swallow
+     * pattern lives in this method's catch arm, not in the lower-level
+     * envelope decode path, so other endpoints that legitimately surface
+     * 401 (`getWorkflowStatus`, etc.) keep throwing as before.
+     */
+    public function logout(): void
+    {
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/auth/logout',
+        );
+
+        try {
+            $this->sendAndExpectVoid($request);
+        } catch (GislApiError $e) {
+            // 401 = already-logged-out per the contract. Swallow as success.
+            // Note: the bare logout-401 envelope may surface as the typed
+            // {@see GislAuthError} or as the base {@see GislApiError}
+            // depending on whether `error_type` is set; both subclasses
+            // satisfy `instanceof GislApiError`, so this catch-by-base is
+            // correct without a sibling branch on GislAuthError.
+            if ($e->statusCode !== 401) {
+                throw $e;
+            }
+        } finally {
+            // Clear local cookie state on every outcome — including the
+            // 401-swallow path. Leaving a stale cookie after logout would
+            // make subsequent requests carry an invalid session token and
+            // fail at the server with 401, which is precisely what
+            // logout's contract is meant to avoid.
+            $this->sessionCookie = null;
+        }
+    }
+
+    /**
+     * Read the `gisl_session` value out of the response's `Set-Cookie`
+     * header(s). Returns null when the response does not set the cookie.
+     *
+     * Per RFC 6265 §4.1.1 the cookie value is everything between the
+     * `=` and the first `;` — the SDK does not parse `Path`, `HttpOnly`,
+     * or `SameSite` attributes since the value is forwarded verbatim
+     * back to the same origin via {@see buildRequest}.
+     */
+    private function extractSessionCookie(ResponseInterface $response): ?string
+    {
+        foreach ($response->getHeader('Set-Cookie') as $headerValue) {
+            // PSR-7 returns each Set-Cookie as its own array entry; the
+            // RFC 6265 prefix is `gisl_session=<value>;...`. Match the
+            // first attribute pair and ignore the rest.
+            if (\preg_match('/^gisl_session=([^;]*)/', $headerValue, $matches) === 1) {
+                return $matches[1];
+            }
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------------
+    // Contact (VOxtu0RZ-B2.4)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Submit a contact-form message. The endpoint returns 204 No Content on
+     * success, so this method resolves to `void`.
+     *
+     * Validation errors (e.g. missing `email`, non-empty honeypot
+     * `website`) surface as {@see GislValidationError} from the standard
+     * error envelope.
+     *
+     * Mirrors `packages/typescript/src/client.ts::submitContact`.
+     */
+    public function submitContact(ContactRequest $payload): void
+    {
+        $jsonBody = $this->jsonEncode(
+            (array) ObjectSerializer::sanitizeForSerialization($payload),
+        );
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/contact',
+            body: $this->streamFactory->createStream($jsonBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+
+        $this->sendAndExpectVoid($request);
+    }
+
+    // ---------------------------------------------------------------------
+    // Credits (VOxtu0RZ-B2.4)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fetch the caller's current credit position. The canonical billing-
+     * state surface — UIs should drive spend-now affordances and tier-
+     * upgrade prompts off this endpoint, NOT off the
+     * {@see GislBalanceExhaustedError} (402) envelope which only surfaces
+     * during workflow creation.
+     *
+     * Note the path: `/api/v2/credits/balance` (NOT `/api/credits/...`).
+     *
+     * Mirrors `packages/typescript/src/client.ts::getCreditsBalance`.
+     */
+    public function getCreditsBalance(): CreditsBalanceResponse
+    {
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: '/api/v2/credits/balance',
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(CreditsBalanceResponse::class, $data);
+    }
+
+    /**
+     * Fetch a paginated page of credit-transaction history. Server defaults
+     * are `limit=20`, `offset=0`, most-recent first. The SDK forwards each
+     * option only when set so server-side defaults remain authoritative.
+     *
+     * Note the path: `/api/v2/credits/usage` (NOT `/api/credits/...`).
+     *
+     * Mirrors `packages/typescript/src/client.ts::getCreditsUsage`.
+     */
+    public function getCreditsUsage(?CreditsUsageOptions $options = null): CreditsUsageResponse
+    {
+        $params = [];
+        if ($options !== null && $options->limit !== null) {
+            $params['limit'] = (string) $options->limit;
+        }
+        if ($options !== null && $options->offset !== null) {
+            $params['offset'] = (string) $options->offset;
+        }
+        $query = $params === [] ? '' : '?' . \http_build_query($params);
+
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: '/api/v2/credits/usage' . $query,
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(CreditsUsageResponse::class, $data);
+    }
+
+    // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
 
@@ -964,6 +1206,14 @@ final class GislClient
 
         if ($this->config->apiKey !== null) {
             $request = $request->withHeader('Authorization', "Bearer {$this->config->apiKey}");
+        }
+
+        // When configured for cookie auth and login() has captured a session
+        // cookie, forward it on every subsequent request so the server's
+        // session middleware can identify the caller. Mirrors the TS client's
+        // `credentials: 'include'` fetch flag — same effect, different transport.
+        if ($this->config->useSessionCookie && $this->sessionCookie !== null) {
+            $request = $request->withHeader('Cookie', "gisl_session={$this->sessionCookie}");
         }
 
         foreach ($this->config->headers as $name => $value) {
@@ -998,16 +1248,67 @@ final class GislClient
      */
     private function sendAndUnwrap(RequestInterface $request): mixed
     {
+        $response = $this->sendRaw($request);
+        return $this->unwrapEnvelope($response);
+    }
+
+    /**
+     * Send the request via the PSR-18 client and return the raw PSR-7
+     * response, normalising transport failures into {@see GislNetworkError}.
+     * Used by callers that need to read response headers (e.g. {@see login}
+     * extracting the `Set-Cookie` header) before envelope decoding, and as
+     * the underlying primitive for {@see sendAndUnwrap} and
+     * {@see sendAndExpectVoid}.
+     *
+     * @throws GislNetworkError
+     */
+    private function sendRaw(RequestInterface $request): ResponseInterface
+    {
         try {
-            $response = $this->httpClient->sendRequest($request);
+            return $this->httpClient->sendRequest($request);
         } catch (ClientExceptionInterface $e) {
             throw new GislNetworkError(
                 "HTTP transport failed: {$e->getMessage()}",
                 $e,
             );
         }
+    }
 
-        return $this->unwrapEnvelope($response);
+    /**
+     * Send a request whose contract returns a void result. The endpoint
+     * MAY return either:
+     *   - 204 No Content with an empty body (the contract default for
+     *     {@see submitContact}); short-circuited here without going
+     *     through {@see unwrapEnvelope}.
+     *   - 200 with a `{ success: true, data: ... }` envelope (some
+     *     gateways bridge 204 to 200 for compatibility); routed through
+     *     {@see unwrapEnvelope} so the `data` field is parsed but
+     *     discarded.
+     *
+     * Failure envelopes at any status route through {@see unwrapEnvelope}
+     * so typed-error dispatch (validation, auth, balance, etc.) keeps
+     * working unchanged. {@see logout}'s 401 swallow lives at the public-
+     * method layer, not here.
+     *
+     * @throws GislNetworkError
+     * @throws GislApiError
+     * @throws GislError
+     */
+    private function sendAndExpectVoid(RequestInterface $request): void
+    {
+        $response = $this->sendRaw($request);
+
+        if ($response->getStatusCode() === 204) {
+            // Per the contract, 204 carries no body. Skip the envelope
+            // decode so a void endpoint never trips the empty-body guard
+            // inside unwrapEnvelope.
+            return;
+        }
+
+        // Delegate to unwrapEnvelope for both 200-success-with-body and
+        // failure-at-any-status. The decoded data field is ignored by
+        // design — the public method's return type is void.
+        $this->unwrapEnvelope($response);
     }
 
     /**

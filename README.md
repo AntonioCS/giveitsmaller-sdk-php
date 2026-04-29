@@ -123,6 +123,87 @@ try {
 }
 ```
 
+## Auth, credits, and contact
+
+`VOxtu0RZ-B2.4` adds the auth surface and the credits / contact endpoints.
+
+### Login / logout (cookie-credentialled SPAs)
+
+```php
+use Gisl\Generated\OpenApi\Model\LoginUserRequest;
+use Gisl\Sdk\GislClient;
+use Gisl\Sdk\GislClientConfig;
+
+// Cookie-auth flows MUST opt in via useSessionCookie: true. With it set,
+// login() captures the gisl_session token from Set-Cookie and forwards it
+// as Cookie: on every subsequent request from the same client instance.
+$client = new GislClient(new GislClientConfig(
+    baseUrl: 'https://api.giveitsmaller.com',
+    useSessionCookie: true,
+));
+
+$session = $client->login(new LoginUserRequest([
+    'email' => 'alice@example.com',
+    'password' => '...',
+]));
+echo $session->getUser()->getEmail();
+
+// Authenticated calls follow.
+$balance = $client->getCreditsBalance();
+
+// Idempotent: 401 "already logged out" is collapsed onto void.
+$client->logout();
+```
+
+> **Threading note.** `useSessionCookie: true` makes the `GislClient`
+> instance hold per-instance mutable state (the captured cookie). Sharing a
+> single client across concurrent execution contexts — Swoole fibers,
+> ReactPHP loops, parallel PHPUnit processes — is **unsupported** in that
+> mode: a logout on context A clears the cookie observed by context B
+> mid-request. Construct one client per fiber/worker for concurrent
+> workloads. With `useSessionCookie: false` (the default), the client is
+> stateless and safe to share.
+
+`logout()` is idempotent — a 401 "already logged out" envelope is collapsed onto a void return so caller cleanup paths do not need to special-case the not-currently-authenticated branch. 5xx and network failures still throw.
+
+### Contact form
+
+```php
+use Gisl\Generated\OpenApi\Model\ContactRequest;
+
+$client->submitContact(new ContactRequest([
+    'name' => 'Alice',
+    'email' => 'alice@example.com',
+    'subject' => 'general_enquiry', // ContactSubject enum value
+    'message' => 'Hello, support team!',
+    'website' => '', // honeypot — leave empty
+]));
+// Server returns 204 No Content on success; void.
+```
+
+Validation failures (missing email, non-empty honeypot) surface as `GislValidationError` with the typed `ValidationErrorEnvelope` payload.
+
+### Credits balance and usage
+
+```php
+use Gisl\Sdk\CreditsUsageOptions;
+
+// Snapshot of current credit position. Use this for spend-now affordances
+// and tier-upgrade prompts — NOT the GislBalanceExhaustedError envelope
+// (which only surfaces during workflow creation).
+$balance = $client->getCreditsBalance();
+echo $balance->getAvailableCredits();
+echo $balance->getTier()->value; // UserTier enum
+
+// Paginated transaction history. Server defaults: limit=20, offset=0.
+$page = $client->getCreditsUsage(new CreditsUsageOptions(limit: 50, offset: 0));
+foreach ($page->getTransactions() as $tx) {
+    echo "{$tx->getCreatedAt()->format(DATE_RFC3339)}: {$tx->getDelta()}\n";
+}
+```
+
+Both `/api/v2/credits/balance` and `/api/v2/credits/usage` live on the v2 API path — passing the wrong `baseUrl` (e.g. dropping the `/api/v2/` segment) is the most common configuration error.
+
 ## Typed errors
 
 The SDK throws a typed exception tree mirroring `packages/typescript/src/errors.ts`. Catch the base `GislError` to handle any SDK failure; catch a subclass for narrowed handling.

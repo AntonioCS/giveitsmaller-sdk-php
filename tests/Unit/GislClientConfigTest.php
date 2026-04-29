@@ -152,14 +152,19 @@ final class GislClientConfigTest extends TestCase
         self::assertSame(5_000, $config->timeoutMs);
     }
 
-    public function testUseSessionCookieRejectedUntilLandingInVOxtu0RZB(): void
+    public function testUseSessionCookieIsAcceptedNow(): void
     {
-        $this->expectException(\Gisl\Sdk\Errors\GislConfigError::class);
-        $this->expectExceptionMessageMatches('/useSessionCookie is not yet implemented/');
-        new GislClientConfig(
+        // Until VOxtu0RZ-B2.4 (zxGUQSmI) the constructor rejected
+        // `useSessionCookie: true` because login()/logout() did not yet
+        // exist. With those methods landing alongside the cookie-capture
+        // wiring on `GislClient`, the rejection is removed and the field
+        // simply round-trips. Threading-unsafety is documented on
+        // GislClient's class docblock — config does not enforce it.
+        $config = new GislClientConfig(
             baseUrl: 'https://api.example.com',
             useSessionCookie: true,
         );
+        self::assertTrue($config->useSessionCookie);
     }
 
     public function testCustomHeadersStored(): void

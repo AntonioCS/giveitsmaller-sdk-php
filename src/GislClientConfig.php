@@ -82,15 +82,10 @@ final class GislClientConfig
         $this->headers = $headers;
 
         // useSessionCookie wires up cookie-credentialled fetches for browser
-        // SPA flows (login() / logout()). The auth/login + auth/logout
-        // methods themselves land in VOxtu0RZ-B2, so accepting `true` here
-        // would silently ship unauthenticated requests until B lands —
-        // fail-open footgun. Reject loudly until the auth surface arrives.
-        if ($useSessionCookie === true) {
-            throw new \Gisl\Sdk\Errors\GislConfigError(
-                'GislClientConfig::$useSessionCookie is not yet implemented in this scaffold; lands with login/logout in VOxtu0RZ-B2.',
-            );
-        }
+        // SPA flows (login() / logout()). When true, the GislClient holds
+        // per-instance mutable session state captured from the login
+        // response's Set-Cookie header — see the threading-unsafety note on
+        // GislClient's class docblock. Activated in VOxtu0RZ-B2.4 (zxGUQSmI).
         $this->useSessionCookie = $useSessionCookie;
 
         $this->timeoutMs = $timeout !== null && $timeout >= 1
