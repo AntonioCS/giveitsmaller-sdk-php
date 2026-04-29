@@ -11,7 +11,7 @@ use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
 use Gisl\Sdk\Errors\GislError;
 use Gisl\Sdk\Errors\GislNetworkError;
-use Gisl\Sdk\Errors\GislValidationError;
+use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\JobDefinitionPayload;
@@ -156,7 +156,7 @@ final class GislClientTest extends TestCase
             $resource = \fopen($tmp, 'rb');
             self::assertNotFalse($resource);
             try {
-                $this->expectException(GislValidationError::class);
+                $this->expectException(GislConfigError::class);
                 $this->expectExceptionMessageMatches('/Stream-resource uploadFile/');
                 $client->uploadFile($resource);
             } finally {
@@ -174,7 +174,7 @@ final class GislClientTest extends TestCase
         $captured = [];
         $client = $this->makeClient($this->stubClient([], $captured));
 
-        $this->expectException(GislValidationError::class);
+        $this->expectException(GislConfigError::class);
         $this->expectExceptionMessageMatches('/File not found/');
         $client->uploadFile('/nonexistent/path/photo.jpg');
     }
@@ -201,7 +201,7 @@ final class GislClientTest extends TestCase
     {
         $captured = [];
         $client = $this->makeClient($this->stubClient([], $captured));
-        $this->expectException(GislValidationError::class);
+        $this->expectException(GislConfigError::class);
         $this->expectExceptionMessageMatches('/expected a string filesystem path or a stream resource/');
         $client->uploadFile($bogus);
     }
@@ -216,7 +216,7 @@ final class GislClientTest extends TestCase
         try {
             $captured = [];
             $client = $this->makeClient($this->stubClient([], $captured));
-            $this->expectException(GislValidationError::class);
+            $this->expectException(GislConfigError::class);
             $this->expectExceptionMessageMatches('/illegal characters for multipart Content-Disposition/');
             $client->uploadFile($tmp);
         } finally {

@@ -76,6 +76,45 @@ try {
 }
 ```
 
+## Typed errors
+
+The SDK throws a typed exception tree mirroring `packages/typescript/src/errors.ts`. Catch the base `GislError` to handle any SDK failure; catch a subclass for narrowed handling.
+
+| Class | When | Typed payload |
+|---|---|---|
+| `GislConfigError` | Client-side / SDK input validation (unreadable file, illegal config). Thrown before reaching the wire. | — |
+| `GislNetworkError` | PSR-18 transport failure (DNS, TLS, mid-stream EOF). Wraps the underlying exception as `getPrevious()`. | — |
+| `GislTimeoutError` | Per-request deadline elapsed (enforced by the injected PSR-18 client). | — |
+| `GislApiError` | Generic 4xx / 5xx wire failure that doesn't match a typed branch below. | — |
+| `GislAuthError` | 401 / 403 with a recognised auth `error_type`. Falls through to a typed-payload-less variant for legacy 401s. | `?AuthErrorResponse` |
+| `GislValidationError` | 4xx with a list of `details[].message` entries (server-side validation envelope). | `ValidationErrorEnvelope` |
+| `GislBalanceExhaustedError` | 402 + `error_type: balance_exhausted`. | `BalanceExhaustedResponse` |
+| `GislTierRestrictedError` | 403 + `error_type: tier_restriction`. | `TierRestrictionResponse` |
+| `GislFeatureTierRestrictedError` | 403 + `error_type: feature_tier_restricted`. | `FeatureTierRestrictedResponse` |
+| `GislFeatureNotAvailableError` | 422 + `error_type: feature_not_available`. | `FeatureNotAvailableResponse` |
+| `GislWorkflowExpiredError` | 422 + `error_type: workflow_expired`. | `WorkflowExpiredResponse` |
+
+Every `GislApiError` subclass carries the I26 localisation triple (`messageKey`, `locale`, `messageParams`) for client-side i18n catalogs. `errorCode` is the wire-stable machine code from the `error` field — switch on this for control flow; never parse `getMessage()` (changes per locale).
+
+```php
+use Gisl\Sdk\Errors\GislBalanceExhaustedError;
+use Gisl\Sdk\Errors\GislError;
+
+try {
+    $client->createWorkflow($payload);
+} catch (GislBalanceExhaustedError $e) {
+    // Typed payload exposes the contract-pinned shape directly.
+    $action = $e->typedPayload->getRequiredAction();    // e.g. 'top_up'
+    $links = $e->typedPayload->getLinks();              // upgrade / billing URLs
+    redirectTo($links?->getTopUpUrl());
+} catch (GislError $e) {
+    // Catch-all for any other SDK-originated failure.
+    log($e->getMessage());
+}
+```
+
+If the server emits a malformed typed envelope (missing required field, etc.) the dispatch falls through to the generic `GislApiError` rather than handing back a half-constructed typed payload — defense-in-depth mirroring the TS reference.
+
 ## Multipart upload concurrency
 
 `GislClientConfig::$multipartConcurrency` is recorded but currently **advisory** — multipart uploads in v0.x run sequentially (one chunk in flight at a time). This keeps the SDK abstraction PSR-18-compatible across every supported HTTP client. Concurrent multipart for shops on Guzzle or Symfony HttpClient is tracked separately as [lv43MVSl](https://trello.com/c/lv43MVSl) and will detect the concrete client at runtime, falling back to sequential for other PSR-18 implementations.

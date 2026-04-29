@@ -154,7 +154,7 @@ final class GislClientConfigTest extends TestCase
 
     public function testUseSessionCookieRejectedUntilLandingInVOxtu0RZB(): void
     {
-        $this->expectException(\Gisl\Sdk\Errors\GislValidationError::class);
+        $this->expectException(\Gisl\Sdk\Errors\GislConfigError::class);
         $this->expectExceptionMessageMatches('/useSessionCookie is not yet implemented/');
         new GislClientConfig(
             baseUrl: 'https://api.example.com',

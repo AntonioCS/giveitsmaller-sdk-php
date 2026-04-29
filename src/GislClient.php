@@ -4,18 +4,32 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk;
 
+use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
+use Gisl\Generated\OpenApi\Model\AuthErrorType;
+use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
+use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
+use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateResponse;
 use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
+use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
 use Gisl\Generated\OpenApi\Model\UploadResponse;
+use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowDownloadResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\ObjectSerializer;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
+use Gisl\Sdk\Errors\GislBalanceExhaustedError;
+use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislError;
+use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
+use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislNetworkError;
+use Gisl\Sdk\Errors\GislTierRestrictedError;
 use Gisl\Sdk\Errors\GislValidationError;
+use Gisl\Sdk\Errors\GislWorkflowExpiredError;
 use Http\Discovery\Psr17FactoryDiscovery;
 use Http\Discovery\Psr18ClientDiscovery;
 use Psr\Http\Client\ClientExceptionInterface;
@@ -83,24 +97,24 @@ final class GislClient
         ?UploadOptions $options = null,
     ): UploadResponse {
         if (\is_resource($filePathOrResource)) {
-            throw new GislValidationError(
+            throw new GislConfigError(
                 'Stream-resource uploadFile() is deferred to VOxtu0RZ-B2; pass a filesystem path for now.',
             );
         }
         if (!\is_string($filePathOrResource)) {
-            throw new GislValidationError(
+            throw new GislConfigError(
                 'uploadFile expected a string filesystem path or a stream resource; got ' . \get_debug_type($filePathOrResource) . '.',
             );
         }
 
         $filePath = $filePathOrResource;
         if (!\is_file($filePath) || !\is_readable($filePath)) {
-            throw new GislValidationError("File not found or not readable: {$filePath}");
+            throw new GislConfigError("File not found or not readable: {$filePath}");
         }
 
         $size = \filesize($filePath);
         if ($size === false) {
-            throw new GislValidationError("Unable to stat file: {$filePath}");
+            throw new GislConfigError("Unable to stat file: {$filePath}");
         }
 
         $fileName = \basename($filePath);
@@ -476,7 +490,7 @@ final class GislClient
             return;
         }
         if (!\is_callable($cb)) {
-            throw new GislValidationError(
+            throw new GislConfigError(
                 'UploadOptions::$onProgress must be callable when set.',
             );
         }
@@ -662,13 +676,301 @@ final class GislClient
             ? $decoded['message']
             : "Request failed with status {$statusCode} ({$errorCode}).";
 
-        $errorClass = $statusCode === 401 ? GislAuthError::class : GislApiError::class;
-        throw new $errorClass(
+        // Localisation triple per ticket I26 — surfaced on every typed error so
+        // consumers can drive client-side i18n catalogs without unwrapping the
+        // typed payload. Wire keys are snake_case; the typed-payload subclasses
+        // also carry camelCase copies on the typed DTO. Mirrors
+        // packages/typescript/src/client.ts:495-503.
+        $messageKey = isset($decoded['message_key']) && \is_string($decoded['message_key'])
+            ? $decoded['message_key']
+            : null;
+        $locale = isset($decoded['locale']) && \is_string($decoded['locale'])
+            ? $decoded['locale']
+            : null;
+        /** @var array<string, mixed>|null $messageParams */
+        $messageParams = isset($decoded['message_params']) && \is_array($decoded['message_params'])
+            ? $decoded['message_params']
+            : null;
+
+        $errorType = isset($decoded['error_type']) && \is_string($decoded['error_type'])
+            ? $decoded['error_type']
+            : null;
+
+        // Validation-envelope branch first — preserve the TS dispatch order so
+        // a future caller matching on `instanceof GislValidationError` keeps
+        // working. Detection is shape-based on `details`: each entry must be
+        // an array with a `message` string. Envelopes whose `details` use a
+        // different key (legacy `reason` from v1) fall through to the generic
+        // GislApiError path so existing callers reading `$e->payload['details']`
+        // keep working.
+        $details = $decoded['details'] ?? null;
+        if (\is_array($details) && $details !== [] && $this->isValidationDetails($details)) {
+            $typedValidation = $this->tryDeserialize(ValidationErrorEnvelope::class, $decoded);
+            if ($typedValidation instanceof ValidationErrorEnvelope) {
+                throw new GislValidationError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typedValidation,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        // Dispatch by (statusCode, errorType) onto the structured envelope shapes
+        // emitted by the v2 contracts. Each typed branch builds the typed DTO
+        // via ObjectSerializer::deserialize; if construction throws OR the
+        // resulting DTO fails the per-branch validity check, fall through to
+        // the generic GislApiError rather than handing the caller a
+        // half-constructed typed error. Mirrors
+        // packages/typescript/src/client.ts:517-621.
+        if (($statusCode === 401 || $statusCode === 403)
+            && $errorType !== null
+            && \in_array($errorType, AuthErrorType::getAllowableEnumValues(), true)
+        ) {
+            $typed = $this->tryDeserialize(AuthErrorResponse::class, $decoded);
+            if ($typed instanceof AuthErrorResponse && \is_string($typed->getErrorType())) {
+                throw new GislAuthError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                    $typed,
+                );
+            }
+        }
+
+        if ($statusCode === 402 && $errorType === 'balance_exhausted') {
+            $typed = $this->tryDeserialize(BalanceExhaustedResponse::class, $decoded);
+            if ($typed instanceof BalanceExhaustedResponse && \is_string($typed->getRequiredAction())) {
+                throw new GislBalanceExhaustedError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        if ($statusCode === 403 && $errorType === 'tier_restriction') {
+            $typed = $this->tryDeserialize(TierRestrictionResponse::class, $decoded);
+            if ($typed instanceof TierRestrictionResponse
+                && \is_string($typed->getRestrictionKind())
+                && \is_string($typed->getCurrentTier())
+            ) {
+                throw new GislTierRestrictedError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        if ($statusCode === 403 && $errorType === 'feature_tier_restricted') {
+            $typed = $this->tryDeserialize(FeatureTierRestrictedResponse::class, $decoded);
+            if ($typed instanceof FeatureTierRestrictedResponse && $this->areFeatureViolations($typed->getViolations())) {
+                throw new GislFeatureTierRestrictedError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        if ($statusCode === 422 && $errorType === 'feature_not_available') {
+            $typed = $this->tryDeserialize(FeatureNotAvailableResponse::class, $decoded);
+            if ($typed instanceof FeatureNotAvailableResponse && $this->areFeatureViolations($typed->getViolations())) {
+                throw new GislFeatureNotAvailableError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        if ($statusCode === 422 && $errorType === 'workflow_expired') {
+            $typed = $this->tryDeserialize(WorkflowExpiredResponse::class, $decoded);
+            if ($typed instanceof WorkflowExpiredResponse && $typed->getExpiredAt() instanceof \DateTimeInterface) {
+                throw new GislWorkflowExpiredError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        // Generic fallback.
+        //
+        // **PHP-only divergence from TS.** TS routes 401 with no recognised
+        // `error_type` to base `GislApiError` (`packages/typescript/src/client.ts`
+        // `tryThrowStructured` falls through, then line ~623 throws the base
+        // class). PHP retains a 401-always-`GislAuthError` shortcut here so
+        // legacy callers matching on `instanceof GislAuthError` for the
+        // pre-typed `invalid_api_key` envelope (`GislClientTest::testFailureEnvelope401ThrowsGislAuthError`,
+        // shipped in B1 scaffold) keep working. The typed payload is `null`
+        // in this fallback path. 403 has no symmetric fallback — TS doesn't
+        // either.
+        if ($statusCode === 401) {
+            throw new GislAuthError(
+                $message,
+                $statusCode,
+                $errorCode,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+                null,
+            );
+        }
+
+        throw new GislApiError(
             $message,
             $statusCode,
             $errorCode,
             $decoded,
+            $messageKey,
+            $locale,
+            $messageParams,
         );
+    }
+
+    /**
+     * Shape check for the `details` array of a validation envelope. Each
+     * entry must be an associative array carrying at least a `message`
+     * string — the only field marked required on
+     * `ValidationErrorEnvelopeDetailsInner` in the v2 contract. `field`,
+     * `operation`, `option`, plus the localisation triple are all optional.
+     *
+     * Envelopes whose `details` use a different key (e.g. legacy `reason`
+     * from the v1 contract used in `testFailureEnvelope4xxThrowsGislApiErrorWithPayload`)
+     * intentionally return false here so the dispatch falls through to the
+     * generic {@see GislApiError} path.
+     *
+     * @param array<int|string, mixed> $details
+     */
+    private function isValidationDetails(array $details): bool
+    {
+        // Reject associative shapes — validation envelopes always emit a list.
+        if (!\array_is_list($details)) {
+            return false;
+        }
+        foreach ($details as $entry) {
+            if (!\is_array($entry)) {
+                return false;
+            }
+            if (!isset($entry['message']) || !\is_string($entry['message'])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Validity check for the `violations` array carried by
+     * {@see FeatureTierRestrictedResponse} and {@see FeatureNotAvailableResponse}.
+     * Both contracts require a non-empty list of {@see FeatureViolation}
+     * with a string `feature` field — anything less means the typed DTO
+     * deserialised but won't carry the contract-pinned shape, so we fall
+     * through to the generic `GislApiError`.
+     *
+     * @param mixed $violations
+     */
+    private function areFeatureViolations(mixed $violations): bool
+    {
+        // Note on empty-array divergence from TS: TS dispatches to the typed
+        // subclass even with `violations: []` (`[].every(...) === true`). PHP
+        // cannot match — the generated DTO's `setViolations` throws on
+        // `count < 1` (the contract pins `minItems: 1`), so `tryDeserialize`
+        // returns null upstream and we never reach this check. Empty
+        // violations is a malformed-envelope case anyway: the server
+        // contract guarantees at least one violation when the envelope
+        // exists, so falling through to base `GislApiError` is the correct
+        // behaviour for that wire shape. Code-reviewer round 2 flagged the
+        // divergence; this comment is the agreed resolution.
+        if (!\is_array($violations) || $violations === []) {
+            return false;
+        }
+        foreach ($violations as $violation) {
+            if (!\is_object($violation)) {
+                return false;
+            }
+            if (!\method_exists($violation, 'getFeature')) {
+                return false;
+            }
+            if (!\is_string($violation->getFeature())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Defense-in-depth wrapper around {@see ObjectSerializer::deserialize}.
+     * Returns null on any throwable so callers can fall through to the
+     * generic dispatch instead of throwing a half-constructed typed error.
+     *
+     * @template T of object
+     * @param class-string<T>      $modelClass
+     * @param array<string, mixed> $data
+     * @return T|null
+     */
+    private function tryDeserialize(string $modelClass, array $data): ?object
+    {
+        // The generated typed-error DTOs (`BalanceExhaustedResponse`, etc.)
+        // emit `getSuccessAllowableValues() === ['false']` — the openapi-
+        // generator's representation of the contract's `const: false` literal
+        // is a string-enum, NOT a bool. Real server envelopes carry the bool
+        // `success: false`; ObjectSerializer::deserialize coerces it to PHP
+        // bool, then the setter rejects it via `in_array(false, ['false'], true) === false`
+        // and throws `InvalidArgumentException`. That bubbles up here and
+        // causes EVERY typed-error branch to silently fall through to base
+        // `GislApiError` — defeating the entire purpose of typed dispatch.
+        //
+        // Strip `success` before deserializing. The field is only a contract
+        // marker; nothing downstream reads it from the typed DTO. Tracked as
+        // contracts-generator card `09eNib6R` (string-enum should be a bool
+        // literal const). Removal-trigger test in
+        // `tests/Unit/GislClientTypedErrorsTest.php::testTypedDtoStillRejectsBoolSuccessWithoutWorkaround`
+        // — when that test flips, this `unset` line can be removed.
+        unset($data['success']);
+
+        try {
+            /** @var T $instance */
+            $instance = ObjectSerializer::deserialize($data, $modelClass, []);
+            return $instance;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
@@ -721,7 +1023,7 @@ final class GislClient
         // loudly rather than silently sanitising — bad filenames are bugs in
         // the caller's data pipeline that should surface clearly.
         if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
-            throw new GislValidationError(
+            throw new GislConfigError(
                 'Filename contains illegal characters for multipart Content-Disposition '
                 . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
             );
@@ -729,7 +1031,7 @@ final class GislClient
 
         $contents = \file_get_contents($filePath);
         if ($contents === false) {
-            throw new GislValidationError("Unable to read file: {$filePath}");
+            throw new GislConfigError("Unable to read file: {$filePath}");
         }
 
         // Single FormData field named "file" with filename. Mirrors the TS
@@ -766,7 +1068,7 @@ final class GislClient
         ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
     ): \Psr\Http\Message\StreamInterface {
         if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
-            throw new GislValidationError(
+            throw new GislConfigError(
                 'Filename contains illegal characters for multipart Content-Disposition '
                 . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
             );

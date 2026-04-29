@@ -87,7 +87,7 @@ final class GislClientConfig
         // would silently ship unauthenticated requests until B lands —
         // fail-open footgun. Reject loudly until the auth surface arrives.
         if ($useSessionCookie === true) {
-            throw new \Gisl\Sdk\Errors\GislValidationError(
+            throw new \Gisl\Sdk\Errors\GislConfigError(
                 'GislClientConfig::$useSessionCookie is not yet implemented in this scaffold; lands with login/logout in VOxtu0RZ-B2.',
             );
         }
