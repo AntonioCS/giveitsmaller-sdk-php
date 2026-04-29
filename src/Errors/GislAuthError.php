@@ -9,7 +9,7 @@ namespace Gisl\Sdk\Errors;
  *
  * Mirrors `packages/typescript/src/errors.ts:GislAuthError` — extends
  * {@see GislApiError} (NOT {@see GislError} directly), so the typed-error tree
- * stays consistent with the TS reference and VOxtu0RZ-B can add further API
+ * stays consistent with the TS reference and VOxtu0RZ-B2 can add further API
  * subclasses (balance / tier / feature) as siblings of GislAuthError without
  * forcing a re-parent.
  */

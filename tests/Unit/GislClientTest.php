@@ -224,16 +224,32 @@ final class GislClientTest extends TestCase
         }
     }
 
-    public function testUploadFileRejectsOversizeForScaffold(): void
+    public function testUploadFileRoutesOversizeToMultipart(): void
     {
-        // 11 MB > 10 MB default threshold (decimal, per SINGLE_SHOT_MAX_BYTES).
+        // VOxtu0RZ-B1 enabled multipart routing for files above the threshold.
+        // Detailed multipart wire-shape coverage lives in
+        // GislClientMultipartTest; this assertion is just a smoke test that
+        // routing leaves the single-shot path. The stub deliberately does not
+        // pre-load any responses, so the moment the multipart path tries to
+        // call `/api/uploads/multipart/initiate` we observe the queue
+        // exhaustion as a `RuntimeException` from the stub. A regression that
+        // re-routed back to single-shot would surface an `application/json`
+        // POST against `/api/uploads` instead.
         $tmp = $this->writeTempFile(\str_repeat('a', 11_000_000));
         try {
             $captured = [];
             $client = $this->makeClient($this->stubClient([], $captured));
-            $this->expectException(GislValidationError::class);
-            $this->expectExceptionMessageMatches('/multipart upload arrives in VOxtu0RZ-B/');
-            $client->uploadFile($tmp);
+            try {
+                $client->uploadFile($tmp);
+                self::fail('Expected stub queue exhaustion');
+            } catch (\RuntimeException $e) {
+                self::assertStringContainsString('queue exhausted', $e->getMessage());
+            }
+
+            self::assertCount(1, $captured);
+            $request = $captured[0];
+            self::assertSame('POST', $request->getMethod());
+            self::assertStringEndsWith('/api/uploads/multipart/initiate', (string) $request->getUri());
         } finally {
             @\unlink($tmp);
         }

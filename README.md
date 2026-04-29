@@ -2,7 +2,7 @@
 
 Customer-facing PHP SDK for the GISL (Give It Smaller) file compression service.
 
-> **Status:** scaffold (sub-card `VOxtu0RZ-A`). Single-shot upload + workflow create + status only. Multipart, SSE, webhook verification, downloads, polling, and the full method surface land in `VOxtu0RZ-B`.
+> **Status:** v0.2 (sub-cards `VOxtu0RZ-A` + `VOxtu0RZ-B1`). Single-shot upload, sequential multipart upload (>10 MB), workflow create + status, workflow downloads, and webhook verification. SSE, polling helpers, and the rest of the method surface land in `VOxtu0RZ-B2` (`bf68ju2r`). Concurrent multipart for Guzzle / Symfony HttpClient is tracked separately as `lv43MVSl`.
 
 ## Install
 
@@ -29,7 +29,9 @@ $client = new GislClient(new GislClientConfig(
     apiKey: 'sk_...',
 ));
 
-// Single-shot upload (files at-or-below 10 MB).
+// Single-shot upload (files at-or-below 10 MB) or sequential multipart for
+// larger files. The same call routes both — pass an `UploadOptions` to
+// receive progress callbacks.
 $upload = $client->uploadFile('/path/to/photo.jpg');
 
 // Build and submit a compression workflow.
@@ -44,10 +46,39 @@ $workflow = $client->createWorkflow(new WorkflowCreatePayload(
 ));
 
 // Single-shot status poll. (Polling helper `waitForWorkflow` arrives in
-// VOxtu0RZ-B.)
+// VOxtu0RZ-B2.)
 $status = $client->getWorkflowStatus($workflow->getWorkflowId());
 echo $status->getStatus(); // 'pending' | 'in_progress' | 'completed' | ...
+
+// Once the workflow finishes, fetch download URLs.
+$downloads = $client->getWorkflowDownloads($workflow->getWorkflowId());
+foreach ($downloads->getDownloads() as $job) {
+    foreach ($job->getFiles() as $file) {
+        echo $file->getUrl(), "\n";
+    }
+}
 ```
+
+## Webhook verification
+
+```php
+use Gisl\Sdk\Webhook;
+use Gisl\Sdk\Errors\GislError;
+
+try {
+    Webhook::verify(
+        secret: $_ENV['GISL_WEBHOOK_SECRET'],   // returned by createWorkflow()
+        signature: $request->getHeaderLine('X-GIS-Signature'),
+        body: (string) $request->getBody(),     // RAW bytes — do NOT re-encode JSON
+    );
+} catch (GislError $e) {
+    // Reject the webhook — body did not match the signature.
+}
+```
+
+## Multipart upload concurrency
+
+`GislClientConfig::$multipartConcurrency` is recorded but currently **advisory** — multipart uploads in v0.x run sequentially (one chunk in flight at a time). This keeps the SDK abstraction PSR-18-compatible across every supported HTTP client. Concurrent multipart for shops on Guzzle or Symfony HttpClient is tracked separately as [lv43MVSl](https://trello.com/c/lv43MVSl) and will detect the concrete client at runtime, falling back to sequential for other PSR-18 implementations.
 
 ## Generated DTOs
 
@@ -88,8 +119,10 @@ make project/sdk/php/check
 
 | Card | Scope |
 |---|---|
-| `VOxtu0RZ-A` (this) | Scaffold + single-shot upload + workflow create + status |
-| `VOxtu0RZ-B` | Multipart upload, SSE consumer, webhook verification, full method surface, parity runner |
+| `VOxtu0RZ-A` | Scaffold + single-shot upload + workflow create + status |
+| `VOxtu0RZ-B1` (this) | Sequential multipart upload + webhook verification + workflow downloads |
+| `VOxtu0RZ-B2` (`bf68ju2r`) | SSE consumer, remaining method surface, full error tree, parity runner |
+| `lv43MVSl` | Concurrent multipart upload (Guzzle Pool / Symfony HttpClient) |
 | `Wwcrdi73` | Packagist publish (mirror repo + auto-build) |
 
 ## License

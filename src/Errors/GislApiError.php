@@ -10,7 +10,7 @@ namespace Gisl\Sdk\Errors;
  *
  * Mirrors `packages/typescript/src/errors.ts:GislApiError`. The full subclass
  * tree (balance, tier, feature-not-available, workflow-expired) lands with
- * the i18n triple support in VOxtu0RZ-B; this scaffold ships the base class
+ * the i18n triple support in VOxtu0RZ-B2; this scaffold ships the base class
  * + {@see GislAuthError} only.
  */
 class GislApiError extends GislError

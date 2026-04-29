@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk;
 
+use Gisl\Generated\OpenApi\Model\MultipartInitiateResponse;
+use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
 use Gisl\Generated\OpenApi\Model\UploadResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowDownloadResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\ObjectSerializer;
 use Gisl\Sdk\Errors\GislApiError;
@@ -29,12 +32,17 @@ use Psr\Http\Message\StreamFactoryInterface;
  * scaffold (sub-card `VOxtu0RZ-A`) ships the constructor, the request loop,
  * envelope unwrapping, error mapping, and three core methods:
  *
- *   - {@see uploadFile}            single-shot upload (POST /api/uploads)
+ *   - {@see uploadFile}            single-shot or multipart upload (POST /api/uploads)
  *   - {@see createWorkflow}        POST /api/workflows
  *   - {@see getWorkflowStatus}     GET /api/workflows/{id}/status
+ *   - {@see getWorkflowDownloads}  GET /api/workflows/{id}/downloads
  *
- * Multipart upload, SSE consumer, webhook verification, downloads, polling,
- * and the full method surface arrive in `VOxtu0RZ-B`.
+ * Multipart routing is sequential in v0.x: chunks are PUT to S3 one at a
+ * time regardless of `GislClientConfig::$multipartConcurrency`. The config
+ * field is recorded for forward compatibility — concurrent multipart uploads
+ * (Guzzle Pool / Symfony HttpClient) arrive in a separate follow-up card
+ * (`lv43MVSl`). SSE, the rest of the method surface, and the parity runner
+ * arrive in `VOxtu0RZ-B2` (`bf68ju2r`).
  *
  * The HTTP transport is PSR-18 abstract — callers may inject their own
  * client / factories, or let php-http/discovery resolve installed
@@ -59,23 +67,24 @@ final class GislClient
     }
 
     /**
-     * Upload a file. Single-shot only in this scaffold; multipart routing
-     * arrives in VOxtu0RZ-B.
+     * Upload a file. Routes to single-shot for files at-or-below
+     * `multipartThresholdBytes`, else to the sequential multipart path.
      *
-     * @param string|resource $filePathOrResource Filesystem path string OR a
-     *                                            stream resource. Resources
-     *                                            throw `GislValidationError`
-     *                                            in this scaffold; that path
-     *                                            opens up in VOxtu0RZ-B.
+     * @param string|resource $filePathOrResource Filesystem path string. Stream
+     *                                            resources are deferred to
+     *                                            `bf68ju2r` (B2) — the chunked
+     *                                            path needs random-access
+     *                                            reads and the resource
+     *                                            contract there is still
+     *                                            being decided.
      */
     public function uploadFile(
         mixed $filePathOrResource,
         ?UploadOptions $options = null,
     ): UploadResponse {
-        unset($options); // VOxtu0RZ-B will consume options.
         if (\is_resource($filePathOrResource)) {
             throw new GislValidationError(
-                'Stream-resource uploadFile() is deferred to VOxtu0RZ-B; pass a filesystem path for now.',
+                'Stream-resource uploadFile() is deferred to VOxtu0RZ-B2; pass a filesystem path for now.',
             );
         }
         if (!\is_string($filePathOrResource)) {
@@ -93,18 +102,27 @@ final class GislClient
         if ($size === false) {
             throw new GislValidationError("Unable to stat file: {$filePath}");
         }
+
+        $fileName = \basename($filePath);
+
         if ($size > $this->config->multipartThresholdBytes) {
-            throw new GislValidationError(
-                "File size {$size} bytes exceeds multipartThreshold "
-                . "({$this->config->multipartThresholdBytes} bytes); multipart upload arrives in VOxtu0RZ-B.",
-            );
+            return $this->multipartUpload($filePath, $fileName, $size, $options);
         }
 
+        return $this->singleShotUpload($filePath, $fileName, $size, $options);
+    }
+
+    private function singleShotUpload(
+        string $filePath,
+        string $fileName,
+        int $size,
+        ?UploadOptions $options,
+    ): UploadResponse {
         $boundary = $this->generateMultipartBoundary();
         $body = $this->buildSingleShotMultipartBody(
             boundary: $boundary,
             filePath: $filePath,
-            fileName: \basename($filePath),
+            fileName: $fileName,
         );
 
         $request = $this->buildRequest(
@@ -116,7 +134,353 @@ final class GislClient
 
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
-        return $this->hydrate(UploadResponse::class, $data);
+        $response = $this->hydrate(UploadResponse::class, $data);
+
+        // Match the multipart path's progress contract: fire once at end. The
+        // single-shot wire has no chunked granularity to report, but firing
+        // here lets callers wire `onProgress` once and have it work for both
+        // routes.
+        $this->fireProgress($options, $size, $size);
+
+        return $response;
+    }
+
+    /**
+     * Sequential multipart upload.
+     *
+     * Three phases:
+     *   1. POST /api/uploads/multipart/initiate with first 8 MiB as form-data.
+     *      Server returns `upload_id`, `presigned_urls` for parts 2..N, the
+     *      recommended chunk size, and the first-chunk etag (which it tracks
+     *      server-side; the SDK does NOT submit part 1 in the complete call).
+     *   2. PUT each remaining chunk to its presigned S3 URL, in order, with
+     *      bounded retry + full-jitter backoff per part. `multipartConcurrency`
+     *      is recorded but currently advisory — see `lv43MVSl` for the
+     *      concurrent variant.
+     *   3. POST /api/uploads/multipart/complete with the collected etags.
+     *
+     * Returns a synthesised {@see UploadResponse} so the public `uploadFile()`
+     * surface is uniform across single-shot and multipart routes. The
+     * multipart/complete wire response carries only `upload_id` + `status`;
+     * the SDK pulls `mime_type` and `constraints_applied` from the initiate
+     * response (the v2 contract makes `constraintsApplied` REQUIRED on
+     * `UploadResponse` and the complete endpoint does not re-emit it).
+     */
+    private function multipartUpload(
+        string $filePath,
+        string $fileName,
+        int $totalSize,
+        ?UploadOptions $options,
+    ): UploadResponse {
+        $firstChunkSize = \min($totalSize, GislClientConfig::DEFAULT_MULTIPART_FIRST_CHUNK_SIZE_BYTES);
+
+        $initiate = $this->multipartInitiate(
+            filePath: $filePath,
+            fileName: $fileName,
+            totalSize: $totalSize,
+            firstChunkSize: $firstChunkSize,
+            metadataHint: $options?->metadataHint,
+        );
+
+        // Fail fast on a malformed initiate envelope — synthesising an
+        // UploadResponse needs `constraints_applied` (the v2 contract makes
+        // it REQUIRED on UploadResponse, and the multipart/complete endpoint
+        // does NOT re-emit it). Catching this BEFORE the chunk uploads avoids
+        // doing N PUTs + a complete call only to throw at synthesis time.
+        $constraintsApplied = $initiate->getConstraintsApplied();
+        if ($constraintsApplied === null) {
+            throw new GislError(
+                'Multipart initiate response missing constraints_applied; cannot synthesise UploadResponse.',
+            );
+        }
+
+        $uploadedBytes = $firstChunkSize;
+        $this->fireProgress($options, $uploadedBytes, $totalSize);
+
+        $presignedUrls = $initiate->getPresignedUrls() ?? [];
+        $chunkSize = $initiate->getRecommendedChunkSize();
+        if ($chunkSize === null || $chunkSize < 1) {
+            throw new GislError(
+                "Multipart initiate response missing recommendedChunkSize; cannot route remaining bytes.",
+            );
+        }
+
+        /** @var list<array{part_number: int, etag: string}> $parts */
+        $parts = [];
+
+        foreach ($presignedUrls as $index => $part) {
+            if (!$part instanceof PresignedUrlPart) {
+                throw new GislError("Multipart initiate response had a malformed presigned URL at index {$index}.");
+            }
+            $start = $firstChunkSize + $index * $chunkSize;
+            $end = \min($start + $chunkSize, $totalSize);
+            $contentLength = $end - $start;
+
+            $etag = $this->putChunkWithRetry(
+                presigned: $part,
+                filePath: $filePath,
+                offset: $start,
+                length: $contentLength,
+            );
+
+            $partNumber = $part->getPartNumber();
+            if ($partNumber === null) {
+                throw new GislError("Presigned URL at index {$index} missing part_number.");
+            }
+            $parts[] = ['part_number' => $partNumber, 'etag' => $etag];
+
+            $uploadedBytes += $contentLength;
+            $this->fireProgress($options, $uploadedBytes, $totalSize);
+        }
+
+        // Wire shape the server expects on /multipart/complete. Iteration
+        // order over `$presignedUrls` is part_number ascending per the v2
+        // contract; we don't re-sort here so a wire shape that drifts from
+        // that contract surfaces in fixture snapshots rather than getting
+        // hidden by a defensive sort.
+        $uploadId = $initiate->getUploadId();
+        if (!\is_string($uploadId) || $uploadId === '') {
+            throw new GislError('Multipart initiate response missing upload_id.');
+        }
+
+        $completeBody = $this->jsonEncode([
+            'upload_id' => $uploadId,
+            'parts' => $parts,
+        ]);
+        $completeRequest = $this->buildRequest(
+            method: 'POST',
+            path: '/api/uploads/multipart/complete',
+            body: $this->streamFactory->createStream($completeBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+
+        /** @var array<string, mixed> $completeData */
+        $completeData = $this->sendAndUnwrap($completeRequest);
+        $completeStatus = $completeData['status'] ?? null;
+        if ($completeStatus !== 'completed') {
+            throw new GislError(
+                'Multipart upload completed with unexpected status: '
+                . (\is_string($completeStatus) ? $completeStatus : \get_debug_type($completeStatus)),
+            );
+        }
+
+        // The complete response carries the authoritative upload_id (matches
+        // TS reference: idempotency replays / server-side rebinds end up
+        // here, not on the initiate envelope).
+        $completeUploadId = $completeData['upload_id'] ?? null;
+        if (!\is_string($completeUploadId) || $completeUploadId === '') {
+            throw new GislError('Multipart complete response missing upload_id.');
+        }
+
+        // Synthesise an UploadResponse from the initiate + complete envelopes.
+        // The complete response only carries upload_id+status, so mime_type
+        // and constraints_applied are pulled from initiate (the first-chunk
+        // probe is the authoritative source for those fields per the v2
+        // contract — multipart/complete intentionally does NOT re-emit them).
+        // `constraintsApplied` is non-null here: the early check above fails
+        // fast before any chunk uploads.
+        return $this->hydrate(UploadResponse::class, [
+            'file_id' => $completeUploadId,
+            'original_name' => $fileName,
+            'mime_type' => $initiate->getMimeType(),
+            'size_bytes' => $totalSize,
+            'constraints_applied' => ObjectSerializer::sanitizeForSerialization($constraintsApplied),
+        ]);
+    }
+
+    private function multipartInitiate(
+        string $filePath,
+        string $fileName,
+        int $totalSize,
+        int $firstChunkSize,
+        ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
+    ): MultipartInitiateResponse {
+        $boundary = $this->generateMultipartBoundary();
+        $body = $this->buildMultipartInitiateBody(
+            boundary: $boundary,
+            filePath: $filePath,
+            fileName: $fileName,
+            firstChunkSize: $firstChunkSize,
+            totalSize: $totalSize,
+            metadataHint: $metadataHint,
+        );
+
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/uploads/multipart/initiate',
+            body: $body,
+            extraHeaders: ['Content-Type' => "multipart/form-data; boundary={$boundary}"],
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(MultipartInitiateResponse::class, $data);
+    }
+
+    /**
+     * PUT a chunk to S3 with bounded retry and full-jitter backoff.
+     *
+     * Returns the ETag header value on success; throws on terminal failure or
+     * after `multipartMaxAttempts` retryable failures. Mirrors the TS
+     * `attemptPut` + per-part retry loop, minus the cross-worker abort
+     * controller (sequential workers don't have peers to wake).
+     *
+     * The chunk bytes are read from disk ONCE before the retry loop and held
+     * in memory across attempts. The TS reference holds an immutable
+     * `Blob.slice()` view across retries; the PHP equivalent is reading the
+     * bytes once and rewrapping in a fresh PSR-7 stream per attempt. Costs
+     * one chunk-sized buffer (~5-50 MiB) but avoids re-reading from disk on
+     * every transient S3 failure.
+     */
+    private function putChunkWithRetry(
+        PresignedUrlPart $presigned,
+        string $filePath,
+        int $offset,
+        int $length,
+    ): string {
+        $url = $presigned->getUrl();
+        if (!\is_string($url) || $url === '') {
+            throw new GislError("Presigned URL part {$presigned->getPartNumber()} has empty url.");
+        }
+
+        $partNumber = $presigned->getPartNumber() ?? 0;
+        $chunkBytes = $this->readChunk($filePath, $offset, $length);
+
+        $lastError = null;
+        for ($attempt = 0; $attempt < $this->config->multipartMaxAttempts; $attempt++) {
+            $request = $this->requestFactory
+                ->createRequest('PUT', $url)
+                ->withHeader('Content-Length', (string) $length)
+                ->withBody($this->streamFactory->createStream($chunkBytes));
+
+            try {
+                $response = $this->httpClient->sendRequest($request);
+            } catch (ClientExceptionInterface $e) {
+                // Treat transport failures as retryable — the TS reference
+                // distinguishes ECONNRESET / ECONNREFUSED / ETIMEDOUT here,
+                // but PSR-18 collapses everything into ClientExceptionInterface
+                // with no portable subtype. Bounded retry already caps the
+                // damage from a permanent transport failure.
+                $lastError = $e;
+                $this->backoff($attempt);
+                continue;
+            }
+
+            $statusCode = $response->getStatusCode();
+            if ($statusCode >= 200 && $statusCode < 300) {
+                $etag = $response->getHeaderLine('ETag');
+                if ($etag === '') {
+                    // Drain the body before throwing — keeps the transport
+                    // connection released eagerly, matching the TS reference's
+                    // explicit drain on this same fatal path.
+                    (string) $response->getBody();
+                    throw new GislError(
+                        "S3 response missing ETag for part {$partNumber}.",
+                    );
+                }
+                return $etag;
+            }
+
+            // Non-2xx — drain the body so the connection can be released by
+            // the underlying transport, then decide retry vs fatal.
+            (string) $response->getBody();
+
+            if (!$this->isRetryableStatus($statusCode)) {
+                throw new GislError(
+                    "S3 chunk upload failed for part {$partNumber}: HTTP {$statusCode} (non-retryable).",
+                );
+            }
+
+            $lastError = new GislError(
+                "S3 chunk upload failed for part {$partNumber}: HTTP {$statusCode}.",
+            );
+            $this->backoff($attempt);
+        }
+
+        $detail = $lastError instanceof \Throwable ? $lastError->getMessage() : 'unknown error';
+        throw new GislError(
+            "S3 chunk upload failed for part {$partNumber} after {$this->config->multipartMaxAttempts} attempts: {$detail}",
+        );
+    }
+
+    private function isRetryableStatus(int $status): bool
+    {
+        // 408 Request Timeout, 429 Too Many Requests, 500-599 server errors.
+        return $status === 408 || $status === 429 || ($status >= 500 && $status < 600);
+    }
+
+    /**
+     * Cap on the per-retry sleep window. 30 s matches what most well-behaved
+     * SDKs (AWS SDK, etc.) use as an upper bound — beyond this, repeated
+     * retries are no longer "back off and retry" but "block the worker for
+     * minutes," which is rarely what anyone wants. Also defends against
+     * pathological config (high attempts × high base) producing minutes-long
+     * sleeps OR int-overflow on `1 << attempt` for absurd attempt counts.
+     */
+    private const BACKOFF_CAP_MS = 30_000;
+
+    private function backoff(int $attempt): void
+    {
+        if ($attempt + 1 >= $this->config->multipartMaxAttempts) {
+            return;
+        }
+        $base = $this->config->multipartRetryBaseMs;
+        if ($base <= 0) {
+            return;
+        }
+        // Full-jitter: random_int(0, min(base * 2^attempt, cap)). Mirrors
+        // fullJitterDelay at packages/typescript/src/client.ts but with an
+        // explicit ceiling.  `1 << $attempt` is bounded by clamping the
+        // exponent so we never produce a negative cap on 32-bit PHP nor a
+        // multi-minute sleep on 64-bit.
+        $shift = \max(0, \min($attempt, 30));
+        $cap = \max(1, \min($base * (1 << $shift), self::BACKOFF_CAP_MS));
+        $delayMs = \random_int(0, $cap);
+        \usleep($delayMs * 1000);
+    }
+
+    private function readChunk(string $filePath, int $offset, int $length): string
+    {
+        if ($length < 1) {
+            // fread requires length >= 1; a zero-byte chunk is never produced
+            // by the multipart router (initiate enforces a non-zero first
+            // chunk; subsequent chunk_size is recommendedChunkSize >= 1) but
+            // guarding here keeps PHPStan honest and surfaces wire bugs early.
+            throw new GislError("readChunk called with non-positive length ({$length}) at offset {$offset}.");
+        }
+        $fh = @\fopen($filePath, 'rb');
+        if ($fh === false) {
+            throw new GislError("Unable to reopen {$filePath} for chunk read.");
+        }
+        try {
+            if (\fseek($fh, $offset) !== 0) {
+                throw new GislError("Failed to seek to offset {$offset} in {$filePath}.");
+            }
+            $bytes = \fread($fh, $length);
+            if ($bytes === false || \strlen($bytes) !== $length) {
+                $got = $bytes === false ? 'false' : (string) \strlen($bytes);
+                throw new GislError(
+                    "Short read at offset {$offset} in {$filePath}: expected {$length} bytes, got {$got}.",
+                );
+            }
+            return $bytes;
+        } finally {
+            \fclose($fh);
+        }
+    }
+
+    private function fireProgress(?UploadOptions $options, int $uploaded, int $total): void
+    {
+        $cb = $options?->onProgress;
+        if ($cb === null) {
+            return;
+        }
+        if (!\is_callable($cb)) {
+            throw new GislValidationError(
+                'UploadOptions::$onProgress must be callable when set.',
+            );
+        }
+        $cb($uploaded, $total);
     }
 
     public function createWorkflow(WorkflowCreatePayload $payload): WorkflowCreateResponse
@@ -149,6 +513,31 @@ final class GislClient
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
         return $this->hydrate(WorkflowStatusResponse::class, $data);
+    }
+
+    /**
+     * Fetch download URLs for a completed workflow. Mirrors TS
+     * `getWorkflowDownloads(workflowId)` at packages/typescript/src/client.ts.
+     *
+     * The response carries one or more `JobDownload` entries — each job in
+     * the workflow that produced output exposes its files (and optionally a
+     * combined zip URL). Helper streaming-to-disk is left to the caller; PSR-7
+     * `ResponseInterface::getBody()` already returns a streaming body, and
+     * adding a `downloadResultTo($path)` helper overlaps too much with
+     * existing PSR-7 idioms — readers can call `copy('php://memory', $stream)`
+     * or write their own loop.
+     */
+    public function getWorkflowDownloads(string $workflowId): WorkflowDownloadResponse
+    {
+        $encoded = \rawurlencode($workflowId);
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: "/api/workflows/{$encoded}/downloads",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(WorkflowDownloadResponse::class, $data);
     }
 
     // ---------------------------------------------------------------------
@@ -235,7 +624,7 @@ final class GislClient
 
         if ($rawBody === '') {
             // 204 No Content responses have no envelope. The SDK methods
-            // landing in VOxtu0RZ-B (submitContact, etc.) return void in
+            // landing in VOxtu0RZ-B2 (submitContact, etc.) return void in
             // that case; the three methods this scaffold exposes always
             // produce a body, so empty here is unexpected.
             throw new GislError(
@@ -352,6 +741,74 @@ final class GislClient
             . $crlf
             . $contents . $crlf
             . "--{$boundary}--{$crlf}";
+
+        return $this->streamFactory->createStream($body);
+    }
+
+    /**
+     * Build the multipart/form-data body for `/api/uploads/multipart/initiate`.
+     *
+     * Wire shape (mirrors packages/typescript/src/client.ts:714-753):
+     *   - `file`           — the first chunk (raw bytes), with filename
+     *   - `filename`       — repeated as a plain text field for servers that
+     *                        prefer it apart from Content-Disposition
+     *   - `total_size`     — total file size in bytes, base-10 string
+     *   - `metadata_hint`  — optional JSON-stringified hint for server-side
+     *                        first-chunk classification (snake_case keys via
+     *                        the generated `*ToJSON` shape)
+     */
+    private function buildMultipartInitiateBody(
+        string $boundary,
+        string $filePath,
+        string $fileName,
+        int $firstChunkSize,
+        int $totalSize,
+        ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
+    ): \Psr\Http\Message\StreamInterface {
+        if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
+            throw new GislValidationError(
+                'Filename contains illegal characters for multipart Content-Disposition '
+                . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
+            );
+        }
+
+        $firstChunkBytes = $this->readChunk($filePath, 0, $firstChunkSize);
+
+        $crlf = "\r\n";
+        $body = "--{$boundary}{$crlf}"
+            . "Content-Disposition: form-data; name=\"file\"; filename=\"{$fileName}\"{$crlf}"
+            . "Content-Type: application/octet-stream{$crlf}"
+            . $crlf
+            . $firstChunkBytes . $crlf
+            . "--{$boundary}{$crlf}"
+            . "Content-Disposition: form-data; name=\"filename\"{$crlf}"
+            . $crlf
+            . $fileName . $crlf
+            . "--{$boundary}{$crlf}"
+            . "Content-Disposition: form-data; name=\"total_size\"{$crlf}"
+            . $crlf
+            . $totalSize . $crlf;
+
+        if ($metadataHint !== null) {
+            // Generated DTOs are tagged-array friendly via ObjectSerializer's
+            // sanitizer — produces a stdClass with snake_case keys
+            // (`duration_seconds`, `width`, `height`) so the server's
+            // first-chunk classifier sees the contract-pinned wire shape, not
+            // the camelCase PHP getters. JSON_FORCE_OBJECT keeps even an
+            // all-null hint object encoded as `{}` rather than `[]`.
+            $hintWire = ObjectSerializer::sanitizeForSerialization($metadataHint);
+            try {
+                $hintJson = \json_encode($hintWire, JSON_THROW_ON_ERROR | JSON_FORCE_OBJECT);
+            } catch (\JsonException $e) {
+                throw new GislError("Failed to JSON-encode metadata_hint: {$e->getMessage()}", 0, $e);
+            }
+            $body .= "--{$boundary}{$crlf}"
+                . "Content-Disposition: form-data; name=\"metadata_hint\"{$crlf}"
+                . $crlf
+                . $hintJson . $crlf;
+        }
+
+        $body .= "--{$boundary}--{$crlf}";
 
         return $this->streamFactory->createStream($body);
     }

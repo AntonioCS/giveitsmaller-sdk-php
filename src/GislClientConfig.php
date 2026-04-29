@@ -9,7 +9,7 @@ namespace Gisl\Sdk;
  *
  * Multipart-related fields (`multipartThreshold`, `multipartConcurrency`,
  * `multipartMaxAttempts`, `multipartRetryBaseMs`) are read by the constructor
- * and held for the multipart upload path that arrives in VOxtu0RZ-B. They are
+ * and held for the multipart upload path that arrives in VOxtu0RZ-B2. They are
  * sanitised here so the contract is locked before that code lands.
  *
  * Note on `$timeoutMs`: the SDK records the value but does NOT enforce it
@@ -17,7 +17,7 @@ namespace Gisl\Sdk;
  * lives on the injected HTTP client (Guzzle: `timeout`/`connect_timeout`;
  * Symfony HttpClient: `timeout`). Callers wanting strict enforcement should
  * pre-configure their PSR-18 client. The field is exposed so consumers can
- * read back what they configured (and so that VOxtu0RZ-B's retry loop has
+ * read back what they configured (and so that VOxtu0RZ-B2's retry loop has
  * the deadline in scope when it lands).
  *
  * Sanitisation contract (mirrors packages/typescript/src/client.ts:232-265):
@@ -83,12 +83,12 @@ final class GislClientConfig
 
         // useSessionCookie wires up cookie-credentialled fetches for browser
         // SPA flows (login() / logout()). The auth/login + auth/logout
-        // methods themselves land in VOxtu0RZ-B, so accepting `true` here
+        // methods themselves land in VOxtu0RZ-B2, so accepting `true` here
         // would silently ship unauthenticated requests until B lands —
         // fail-open footgun. Reject loudly until the auth surface arrives.
         if ($useSessionCookie === true) {
             throw new \Gisl\Sdk\Errors\GislValidationError(
-                'GislClientConfig::$useSessionCookie is not yet implemented in this scaffold; lands with login/logout in VOxtu0RZ-B.',
+                'GislClientConfig::$useSessionCookie is not yet implemented in this scaffold; lands with login/logout in VOxtu0RZ-B2.',
             );
         }
         $this->useSessionCookie = $useSessionCookie;
