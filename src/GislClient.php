@@ -4,21 +4,27 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk;
 
+use Gisl\Generated\OpenApi\Model\AudioWatermarkDecodeRequest;
+use Gisl\Generated\OpenApi\Model\AudioWatermarkDecodeResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorType;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
 use Gisl\Generated\OpenApi\Model\ContactRequest;
 use Gisl\Generated\OpenApi\Model\CreditsBalanceResponse;
 use Gisl\Generated\OpenApi\Model\CreditsUsageResponse;
+use Gisl\Generated\OpenApi\Model\ExternalImportCreatedResponse;
+use Gisl\Generated\OpenApi\Model\ExternalImportRequest;
 use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
 use Gisl\Generated\OpenApi\Model\LoginUser200ResponseData;
 use Gisl\Generated\OpenApi\Model\LoginUserRequest;
 use Gisl\Generated\OpenApi\Model\MetadataResponse;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateResponse;
+use Gisl\Generated\OpenApi\Model\OperationsSchemaResponse;
 use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
 use Gisl\Generated\OpenApi\Model\RetryResponse;
 use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
+use Gisl\Generated\OpenApi\Model\UploadProbeResponse;
 use Gisl\Generated\OpenApi\Model\UploadResponse;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
 use Gisl\Generated\OpenApi\Model\WorkflowCancelResponse;
@@ -1180,6 +1186,265 @@ final class GislClient
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
         return $this->hydrate(CreditsUsageResponse::class, $data);
+    }
+
+    // ---------------------------------------------------------------------
+    // Schema introspection
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fetch the per-tier operations schema with optional MIME / operation
+     * filtering and HTTP conditional revalidation.
+     *
+     * Mirrors `packages/typescript/src/client.ts::getSchema`. Unlike the
+     * other GET methods, this endpoint does NOT route through
+     * {@see unwrapEnvelope} for the success path: 200 returns a
+     * {@see OperationsSchemaResponse} body directly (not wrapped in
+     * `{ success: true, data: ... }`), and 304 returns an empty body. The
+     * SDK builds the request manually, sends via the PSR-18 client, and
+     * returns the appropriate sealed-shape variant of {@see GetSchemaResult}:
+     *   - {@see GetSchemaHitResult} on 200 (carries the typed schema body
+     *     plus `etag` / `lastModified` cache markers)
+     *   - {@see GetSchemaNotModifiedResult} on 304 (cache markers only;
+     *     body is empty)
+     *
+     * Non-2xx / non-304 responses are routed through {@see unwrapEnvelope}
+     * so the typed-error dispatch keeps working — e.g. a 422 validation
+     * envelope still surfaces as {@see GislValidationError}.
+     */
+    public function getSchema(?GetSchemaOptions $options = null): GetSchemaResult
+    {
+        $options ??= new GetSchemaOptions();
+
+        $params = [];
+        if ($options->mimeType !== null) {
+            $params['mime_type'] = $options->mimeType;
+        }
+        if ($options->operation !== null) {
+            $params['operation'] = $options->operation;
+        }
+        $query = \http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+        $path = '/api/operations/schema' . ($query !== '' ? '?' . $query : '');
+
+        $extraHeaders = [];
+        if ($options->ifNoneMatch !== null) {
+            $extraHeaders['If-None-Match'] = $options->ifNoneMatch;
+        }
+        if ($options->ifModifiedSince !== null) {
+            $extraHeaders['If-Modified-Since'] = $options->ifModifiedSince;
+        }
+
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: $path,
+            extraHeaders: $extraHeaders,
+        );
+
+        try {
+            $response = $this->httpClient->sendRequest($request);
+        } catch (ClientExceptionInterface $e) {
+            throw new GislNetworkError(
+                "HTTP transport failed: {$e->getMessage()}",
+                $e,
+            );
+        }
+
+        $statusCode = $response->getStatusCode();
+        $etagHeader = $response->getHeaderLine('ETag');
+        $lastModifiedHeader = $response->getHeaderLine('Last-Modified');
+        $etag = $etagHeader !== '' ? $etagHeader : null;
+        $lastModified = $lastModifiedHeader !== '' ? $lastModifiedHeader : null;
+
+        if ($statusCode === 304) {
+            return new GetSchemaNotModifiedResult($etag, $lastModified);
+        }
+
+        if ($statusCode >= 200 && $statusCode < 300) {
+            $rawBody = (string) $response->getBody();
+            if ($rawBody === '') {
+                throw new GislError(
+                    "Empty response body from /api/operations/schema (status {$statusCode}).",
+                );
+            }
+            try {
+                /** @var array<string, mixed> $decoded */
+                $decoded = \json_decode($rawBody, associative: true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException $e) {
+                throw new GislError(
+                    "Server returned non-JSON body for /api/operations/schema (status {$statusCode}): "
+                    . $e->getMessage(),
+                    0,
+                    $e,
+                );
+            }
+
+            // The schema endpoint is NOT enveloped — the response body is
+            // the OperationsSchemaResponse directly, not wrapped in
+            // `{ success: true, data: ... }`. Hydrate straight from the
+            // decoded body.
+            $schema = $this->hydrate(OperationsSchemaResponse::class, $decoded);
+            return new GetSchemaHitResult($schema, $etag, $lastModified);
+        }
+
+        // Error path — route through the typed-error dispatcher so a 422
+        // validation envelope still surfaces as `GislValidationError`, etc.
+        $this->unwrapEnvelope($response);
+
+        // unwrapEnvelope() always throws on a non-success path, but PHP can't
+        // see that statically — guard so the return type is well-formed.
+        throw new GislError(
+            "Unexpected fall-through from getSchema error path (status {$statusCode}).",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Planned-tier operations
+    // ---------------------------------------------------------------------
+
+    /**
+     * Probe an uploaded file for workflow-readiness. Detects corruption,
+     * unsupported codecs, and pre-assigns the processing class the server
+     * would route the file to. Designed for the long-form merge edge case
+     * where a single bad input would fail the whole workflow.
+     *
+     * Currently `availability: planned` — calls return
+     * {@see GislFeatureNotAvailableError} (422) until the cross-repo Lambda
+     * support ships. Idempotent: probing the same `fileId` twice returns
+     * the cached result.
+     *
+     * Mirrors `packages/typescript/src/client.ts::probeUpload`.
+     */
+    public function probeUpload(string $fileId): UploadProbeResponse
+    {
+        $encoded = \rawurlencode($fileId);
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: "/api/uploads/{$encoded}/probe",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(UploadProbeResponse::class, $data);
+    }
+
+    /**
+     * Probe N uploaded files in sequence and partition the results by
+     * outcome. Returns {@see PreflightClipsResult} so the caller can cleanly
+     * drop bad clips before submitting a long-form merge workflow.
+     *
+     * **Aggregation contract** (mirrors the TS `Promise.allSettled`-shaped
+     * reference): every fileId is probed even if siblings fail. The whole
+     * call NEVER propagates a per-probe failure:
+     *   - probe succeeds AND `probe_status === 'ok'` → goes into `ok`
+     *   - probe succeeds AND `probe_status !== 'ok'` → goes into `rejected`
+     *     (carries the typed probe response so the caller can read
+     *     `probe_status`, `media_metadata`, etc.)
+     *   - probe call itself threw → `{ fileId, error }` goes into `errors`
+     *
+     * The PHP path is sequential (single-threaded) where the TS reference
+     * is parallel via `Promise.allSettled`. This is a deliberate divergence
+     * — PHP's PSR-18 surface has no async primitive, and the cross-call
+     * partitioning semantics (no per-probe propagation) are what callers
+     * depend on, not the parallelism. Concurrent fan-out for Guzzle /
+     * Symfony HttpClient is tracked separately.
+     *
+     * Empty input is well-defined: `preflightClips([])` returns an empty
+     * {@see PreflightClipsResult} without making any HTTP request.
+     *
+     * @param list<string> $fileIds
+     */
+    public function preflightClips(array $fileIds): PreflightClipsResult
+    {
+        $ok = [];
+        $rejected = [];
+        $errors = [];
+
+        foreach ($fileIds as $fileId) {
+            try {
+                $probe = $this->probeUpload($fileId);
+            } catch (\Throwable $e) {
+                $errors[] = new PreflightClipError($fileId, $e);
+                continue;
+            }
+
+            if ($probe->getProbeStatus() === 'ok') {
+                $ok[] = $probe;
+            } else {
+                $rejected[] = $probe;
+            }
+        }
+
+        return new PreflightClipsResult($ok, $rejected, $errors);
+    }
+
+    /**
+     * Decode a previously-embedded steganographic audio watermark.
+     *
+     * **Enterprise tier only.** Free / pro callers receive
+     * {@see GislFeatureTierRestrictedError} (403). Currently
+     * `availability: planned` — calls return
+     * {@see GislFeatureNotAvailableError} (422) until the cross-repo Lambda
+     * support ships. Decode requests are rate-limited independently from
+     * workflow-create.
+     *
+     * Mirrors `packages/typescript/src/client.ts::decodeAudioWatermark`.
+     */
+    public function decodeAudioWatermark(
+        AudioWatermarkDecodeRequest $payload,
+    ): AudioWatermarkDecodeResponse {
+        // Mirror the TS `*ToJSON` snake-case conversion via the generated
+        // ObjectSerializer's sanitizer. The PHP getters are camelCase
+        // (`getMethodHint`) but the wire shape is snake_case
+        // (`method_hint`).
+        $wire = ObjectSerializer::sanitizeForSerialization($payload);
+        $jsonBody = $this->jsonEncode((array) $wire);
+
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/audio-watermark/decode',
+            body: $this->streamFactory->createStream($jsonBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(AudioWatermarkDecodeResponse::class, $data);
+    }
+
+    /**
+     * Register a one-shot bearer URL (S3 presigned, GCS signed, Azure SAS,
+     * Dropbox shared link, public HTTPS) and receive an opaque
+     * `external_source_id` handle. Subsequent workflows reference the
+     * handle via `WorkflowSource` of `type: external_import`.
+     *
+     * Per ADR-0005 §"SSRF posture": the server validates 8 rules at
+     * registration time AND again at fetch time. HTTPS-only;
+     * private/loopback/cloud-metadata IPs are rejected (403). The original
+     * URL + password are encrypted at rest and never returned in any
+     * response.
+     *
+     * Currently `availability: planned` — calls return
+     * {@see GislFeatureNotAvailableError} (422) until the external-import
+     * infrastructure ships.
+     *
+     * Mirrors `packages/typescript/src/client.ts::createExternalImport`.
+     */
+    public function createExternalImport(
+        ExternalImportRequest $payload,
+    ): ExternalImportCreatedResponse {
+        $wire = ObjectSerializer::sanitizeForSerialization($payload);
+        $jsonBody = $this->jsonEncode((array) $wire);
+
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/external-imports',
+            body: $this->streamFactory->createStream($jsonBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(ExternalImportCreatedResponse::class, $data);
     }
 
     // ---------------------------------------------------------------------

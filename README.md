@@ -243,6 +243,79 @@ try {
 
 If the server emits a malformed typed envelope (missing required field, etc.) the dispatch falls through to the generic `GislApiError` rather than handing back a half-constructed typed payload — defense-in-depth mirroring the TS reference.
 
+## Schema introspection
+
+`getSchema()` returns the per-tier operations schema with optional MIME / operation filtering and HTTP conditional revalidation. Unlike every other GET method on the surface, the schema endpoint is NOT enveloped — the response body is the `OperationsSchemaResponse` directly — and the SDK exposes a sealed-shape return type so callers can narrow with `instanceof` rather than reading discriminator fields.
+
+```php
+use Gisl\Sdk\GetSchemaHitResult;
+use Gisl\Sdk\GetSchemaNotModifiedResult;
+use Gisl\Sdk\GetSchemaOptions;
+
+// First call: no conditional headers, server returns 200 with full body.
+$result = $client->getSchema();
+if ($result instanceof GetSchemaHitResult) {
+    $cachedSchema = $result->schema;          // OperationsSchemaResponse
+    $etag = $result->etag;                    // capture for next request
+    $lastModified = $result->lastModified;
+}
+
+// Subsequent call: revalidate against the captured ETag. A 304 returns
+// `GetSchemaNotModifiedResult`; the caller keeps using `$cachedSchema`.
+$revalidated = $client->getSchema(new GetSchemaOptions(
+    ifNoneMatch: $etag,
+    ifModifiedSince: $lastModified,
+));
+if ($revalidated instanceof GetSchemaNotModifiedResult) {
+    // Cache hit — `$cachedSchema` is still fresh.
+}
+```
+
+`GetSchemaResult` is the SDK's first sealed-shape value object — PHP 8.1 has no `sealed` keyword, but `abstract` base + `final` subclasses convey the same intent and let static analysis exhaust the cases.
+
+`GetSchemaOptions` also accepts `mimeType` and `operation` to filter the returned schema server-side (forwarded as query parameters).
+
+## Planned-tier ops
+
+Four methods on the `availability: planned` tier — the SDK ships them now so consumers can write the integration ahead of the cross-repo Lambda support landing. Each surfaces `GislFeatureNotAvailableError` (422) until the runtime endpoint flips to `stable`.
+
+| Method | Wire | Notes |
+|---|---|---|
+| `probeUpload(string $fileId)` | `POST /api/uploads/{id}/probe` | Detect corruption / unsupported codec / missing metadata. Idempotent. |
+| `preflightClips(array $fileIds)` | client-side aggregator | N sequential probes partitioned by outcome. Never throws. |
+| `decodeAudioWatermark(AudioWatermarkDecodeRequest)` | `POST /api/audio-watermark/decode` | Enterprise tier only. |
+| `createExternalImport(ExternalImportRequest)` | `POST /api/external-imports` | Round-trips an external URL into a `file_id`. SSRF-validated. |
+
+`preflightClips()` is the load-bearing helper for long-form merge workflows — probe N candidate clips, drop the bad ones, then submit a single workflow with the survivors. The aggregator NEVER throws on a per-probe failure; the whole batch always returns a `PreflightClipsResult` with three lists:
+
+```php
+use Gisl\Sdk\PreflightClipError;
+use Gisl\Sdk\PreflightClipsResult;
+use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
+
+$result = $client->preflightClips([$id1, $id2, $id3]);
+
+foreach ($result->ok as $probe) {
+    // probe_status === 'ok' — safe to include in the merge workflow.
+    $fileId = $probe->getFileId();
+}
+
+foreach ($result->rejected as $probe) {
+    // probe_status === 'corrupt' | 'unsupported_codec' | 'missing_metadata'.
+    // Caller should drop or convert before submitting.
+}
+
+foreach ($result->errors as $error) {
+    /** @var PreflightClipError $error */
+    if ($error->error instanceof GislFeatureNotAvailableError) {
+        // The probe endpoint is still `availability: planned` — degrade
+        // gracefully (e.g. submit the merge workflow without preflight).
+    }
+}
+```
+
+Aggregation is structural — `ok` / `rejected` carry typed `UploadProbeResponse` objects, `errors` carries `PreflightClipError` rows pairing each failed `fileId` with the exception that was thrown. The PHP path is sequential where the TS reference uses `Promise.allSettled` parallel fan-out (the partitioning semantics, not the parallelism, are what callers depend on).
+
 ## Multipart upload concurrency
 
 `GislClientConfig::$multipartConcurrency` is recorded but currently **advisory** — multipart uploads in v0.x run sequentially (one chunk in flight at a time). This keeps the SDK abstraction PSR-18-compatible across every supported HTTP client. Concurrent multipart for shops on Guzzle or Symfony HttpClient is tracked separately as [lv43MVSl](https://trello.com/c/lv43MVSl) and will detect the concrete client at runtime, falling back to sequential for other PSR-18 implementations.
@@ -288,8 +361,12 @@ make project/sdk/php/check
 |---|---|
 | `VOxtu0RZ-A` | Scaffold + single-shot upload + workflow create + status |
 | `VOxtu0RZ-B1` | Sequential multipart upload + webhook verification + workflow downloads |
-| `VOxtu0RZ-B2.3` (`lT54YsPS`, this) | Workflow lifecycle (cancel/resume/retry/wait) + getMetadata |
-| `VOxtu0RZ-B2` (`bf68ju2r`) | SSE consumer + remaining method surface + parity runner |
+| `VOxtu0RZ-B2.1` (`dQDXROmB`) | Typed error tree + i18n triple |
+| `VOxtu0RZ-B2.2` (`DI4x9bjG`) | SSE consumer streamEvents |
+| `VOxtu0RZ-B2.3` (`lT54YsPS`) | Workflow lifecycle (cancel/resume/retry/wait) + getMetadata |
+| `VOxtu0RZ-B2.4` (`zxGUQSmI`) | Auth + credits + contact |
+| `VOxtu0RZ-B2.5` (`pxJ1Gal9`, this) | Planned-tier ops + getSchema |
+| `VOxtu0RZ-B2.6` (`SeM2f5Og`) | PHP parity runner |
 | `lv43MVSl` | Concurrent multipart upload (Guzzle Pool / Symfony HttpClient) |
 | `Wwcrdi73` | Packagist publish (mirror repo + auto-build) |
 
