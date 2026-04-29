@@ -2,7 +2,7 @@
 
 Customer-facing PHP SDK for the GISL (Give It Smaller) file compression service.
 
-> **Status:** v0.2 (sub-cards `VOxtu0RZ-A` + `VOxtu0RZ-B1`). Single-shot upload, sequential multipart upload (>10 MB), workflow create + status, workflow downloads, and webhook verification. SSE, polling helpers, and the rest of the method surface land in `VOxtu0RZ-B2` (`bf68ju2r`). Concurrent multipart for Guzzle / Symfony HttpClient is tracked separately as `lv43MVSl`.
+> **Status:** v0.2 (sub-cards `VOxtu0RZ-A`, `VOxtu0RZ-B1`, `VOxtu0RZ-B2.3`). Single-shot upload, sequential multipart upload (>10 MB), workflow create + status, workflow downloads, webhook verification, plus the workflow lifecycle surface: `cancelWorkflow`, `resumeWorkflow`, `retryOperation`, `waitForWorkflow`, and `getMetadata`. SSE and the parity runner land in the remaining `VOxtu0RZ-B2` cards (`bf68ju2r`). Concurrent multipart for Guzzle / Symfony HttpClient is tracked separately as `lv43MVSl`.
 
 ## Install
 
@@ -45,10 +45,23 @@ $workflow = $client->createWorkflow(new WorkflowCreatePayload(
     ],
 ));
 
-// Single-shot status poll. (Polling helper `waitForWorkflow` arrives in
-// VOxtu0RZ-B2.)
+// Single-shot status poll OR `waitForWorkflow` to block until terminal.
 $status = $client->getWorkflowStatus($workflow->getWorkflowId());
 echo $status->getStatus(); // 'pending' | 'in_progress' | 'completed' | ...
+
+// Block until the workflow reaches a terminal status. Defaults: 2 s poll
+// interval, 5 min overall deadline. Pass a `WaitOptions` to override either
+// or to wire an `onPoll` callback fired once per cycle.
+use Gisl\Sdk\WaitOptions;
+
+$terminal = $client->waitForWorkflow(
+    $workflow->getWorkflowId(),
+    new WaitOptions(
+        intervalMs: 1_500,
+        timeoutMs: 120_000,
+        onPoll: fn (string $s) => error_log("workflow status: {$s}"),
+    ),
+);
 
 // Once the workflow finishes, fetch download URLs.
 $downloads = $client->getWorkflowDownloads($workflow->getWorkflowId());
@@ -57,6 +70,14 @@ foreach ($downloads->getDownloads() as $job) {
         echo $file->getUrl(), "\n";
     }
 }
+
+// Lifecycle: cancel an in-flight workflow, resume one that paused on
+// insufficient credits, retry a single failed operation by id, or fetch
+// full upload metadata.
+$client->cancelWorkflow($workflow->getWorkflowId());
+$client->resumeWorkflow($workflow->getWorkflowId());
+$client->retryOperation($operationId);
+$metadata = $client->getMetadata($upload->getFileId());
 ```
 
 ## Streaming workflow events
@@ -185,8 +206,9 @@ make project/sdk/php/check
 | Card | Scope |
 |---|---|
 | `VOxtu0RZ-A` | Scaffold + single-shot upload + workflow create + status |
-| `VOxtu0RZ-B1` (this) | Sequential multipart upload + webhook verification + workflow downloads |
-| `VOxtu0RZ-B2` (`bf68ju2r`) | SSE consumer, remaining method surface, full error tree, parity runner |
+| `VOxtu0RZ-B1` | Sequential multipart upload + webhook verification + workflow downloads |
+| `VOxtu0RZ-B2.3` (`lT54YsPS`, this) | Workflow lifecycle (cancel/resume/retry/wait) + getMetadata |
+| `VOxtu0RZ-B2` (`bf68ju2r`) | SSE consumer + remaining method surface + parity runner |
 | `lv43MVSl` | Concurrent multipart upload (Guzzle Pool / Symfony HttpClient) |
 | `Wwcrdi73` | Packagist publish (mirror repo + auto-build) |
 

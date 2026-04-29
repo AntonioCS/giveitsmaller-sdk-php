@@ -9,14 +9,18 @@ use Gisl\Generated\OpenApi\Model\AuthErrorType;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
 use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
+use Gisl\Generated\OpenApi\Model\MetadataResponse;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateResponse;
 use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
+use Gisl\Generated\OpenApi\Model\RetryResponse;
 use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
 use Gisl\Generated\OpenApi\Model\UploadResponse;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
+use Gisl\Generated\OpenApi\Model\WorkflowCancelResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowDownloadResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowResumeResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\ObjectSerializer;
 use Gisl\Sdk\Errors\GislApiError;
@@ -28,6 +32,7 @@ use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislNetworkError;
 use Gisl\Sdk\Errors\GislTierRestrictedError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Errors\GislValidationError;
 use Gisl\Sdk\Errors\GislWorkflowExpiredError;
 use Http\Discovery\Psr17FactoryDiscovery;
@@ -51,12 +56,16 @@ use Psr\Http\Message\StreamFactoryInterface;
  *   - {@see getWorkflowStatus}     GET /api/workflows/{id}/status
  *   - {@see getWorkflowDownloads}  GET /api/workflows/{id}/downloads
  *
+ * Sub-card `VOxtu0RZ-B2.3` (`lT54YsPS`) extends the surface with the
+ * workflow lifecycle methods: {@see cancelWorkflow}, {@see resumeWorkflow},
+ * {@see retryOperation}, {@see waitForWorkflow}, and {@see getMetadata}.
+ *
  * Multipart routing is sequential in v0.x: chunks are PUT to S3 one at a
  * time regardless of `GislClientConfig::$multipartConcurrency`. The config
  * field is recorded for forward compatibility — concurrent multipart uploads
  * (Guzzle Pool / Symfony HttpClient) arrive in a separate follow-up card
- * (`lv43MVSl`). SSE, the rest of the method surface, and the parity runner
- * arrive in `VOxtu0RZ-B2` (`bf68ju2r`).
+ * (`lv43MVSl`). SSE and the parity runner arrive in `VOxtu0RZ-B2`
+ * (`bf68ju2r`).
  *
  * The HTTP transport is PSR-18 abstract — callers may inject their own
  * client / factories, or let php-http/discovery resolve installed
@@ -761,6 +770,174 @@ final class GislClient
         // "message". Mirrors the TS reference at sse.ts:50.
         $name = $eventType !== '' ? $eventType : 'message';
         return new GislSseEvent(event: $name, data: $decoded);
+    }
+
+    /**
+     * Cancel a workflow. Idempotent — cancelling an already-cancelled
+     * workflow returns 200 with the same shape (and the original
+     * `cancelledAt`). Cancelling a `completed` / `failed` /
+     * `partially_failed` / `expired` workflow returns 409, which the SDK
+     * surfaces as a generic {@see GislApiError} (NOT a special class) so
+     * callers can branch on `$e->statusCode === 409` if needed.
+     *
+     * The response's `billingEffect` field tells the caller what happened to
+     * outstanding reservations:
+     *  - `unspent_reservation_released` — the unspent portion of the
+     *    reservation has been refunded as a separate `CreditTransaction`
+     *    with `type: refund`.
+     *  - `none` — no refund (all reserved credits were already consumed by
+     *    completed jobs, or this is an idempotent re-cancel).
+     *
+     * Mirrors `packages/typescript/src/client.ts::cancelWorkflow`.
+     */
+    public function cancelWorkflow(string $workflowId): WorkflowCancelResponse
+    {
+        $encoded = \rawurlencode($workflowId);
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: "/api/workflows/{$encoded}/cancel",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(WorkflowCancelResponse::class, $data);
+    }
+
+    /**
+     * Resume a workflow that is in `paused_insufficient_credits`.
+     *
+     * Resume succeeds only when `availableCredits` covers the next
+     * reservation. If the balance is still insufficient, a
+     * {@see GislBalanceExhaustedError} (402) surfaces and the workflow stays
+     * paused. If the workflow is past its `expiresAt` (default 7-day TTL
+     * from `pausedAt`), {@see GislWorkflowExpiredError} (422) surfaces and
+     * the workflow has transitioned to `expired` — callers cannot un-expire
+     * a workflow. Resuming a workflow that is not in
+     * `paused_insufficient_credits` is a 409 (no-op) and surfaces as a
+     * generic {@see GislApiError}.
+     *
+     * Mirrors `packages/typescript/src/client.ts::resumeWorkflow`.
+     */
+    public function resumeWorkflow(string $workflowId): WorkflowResumeResponse
+    {
+        $encoded = \rawurlencode($workflowId);
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: "/api/workflows/{$encoded}/resume",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(WorkflowResumeResponse::class, $data);
+    }
+
+    /**
+     * Retry a single failed operation. Note: keyed on **operationId**, not
+     * workflowId — the contract pins this to `POST /api/operations/{id}/retry`.
+     *
+     * Returns the new operation's id (and the original id for traceability).
+     * Returns 409 when the operation is not failed or has already been
+     * retried; the SDK surfaces 409 as a generic {@see GislApiError} so
+     * callers can decide whether to ignore or surface the conflict.
+     *
+     * Mirrors `packages/typescript/src/client.ts::retryOperation`.
+     */
+    public function retryOperation(string $operationId): RetryResponse
+    {
+        $encoded = \rawurlencode($operationId);
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: "/api/operations/{$encoded}/retry",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(RetryResponse::class, $data);
+    }
+
+    /**
+     * Get full metadata for an uploaded file. The shape varies by mime-type
+     * family: image uploads carry `dimensions` + EXIF; documents carry
+     * page-count fields; etc. The DTO exposes every nullable field — callers
+     * read the ones relevant to their workflow.
+     *
+     * Mirrors `packages/typescript/src/client.ts::getMetadata`.
+     */
+    public function getMetadata(string $fileId): MetadataResponse
+    {
+        $encoded = \rawurlencode($fileId);
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: "/api/uploads/{$encoded}/metadata",
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(MetadataResponse::class, $data);
+    }
+
+    /**
+     * Poll {@see getWorkflowStatus()} until the workflow reaches a terminal
+     * status (completed / failed / partially_failed / cancelled / expired /
+     * paused_insufficient_credits — see {@see WorkflowConstants::TERMINAL_STATUSES}).
+     *
+     * Pass a {@see WaitOptions} to override the default 2 s poll interval
+     * and 5 min overall deadline, and to register an `onPoll` callback that
+     * fires once per polling cycle (including the very first status fetch)
+     * with the current status string.
+     *
+     * Throws {@see GislTimeoutError} when the next interval would push the
+     * total elapsed past `timeoutMs`. The deadline is tracked in nanoseconds
+     * via `hrtime(true)` for monotonic-clock semantics (robust to NTP
+     * adjustments and DST shifts) and sub-ms precision (lets test cases
+     * with `timeoutMs: 0` trip after any time has passed instead of
+     * looping forever on integer-ms truncation).
+     *
+     * Mirrors `packages/typescript/src/client.ts::waitForWorkflow`. Note
+     * that PHP's `usleep` is a real-time sleep — tests should pass
+     * `intervalMs: 0` (and a small `timeoutMs`) to keep the suite fast.
+     */
+    public function waitForWorkflow(
+        string $workflowId,
+        ?WaitOptions $options = null,
+    ): WorkflowStatusResponse {
+        $intervalMs = ($options !== null ? $options->intervalMs : null) ?? WorkflowConstants::DEFAULT_POLL_INTERVAL_MS;
+        $timeoutMs = ($options !== null ? $options->timeoutMs : null) ?? WorkflowConstants::DEFAULT_POLL_TIMEOUT_MS;
+        $onPoll = $options?->onPoll;
+
+        if ($onPoll !== null && !\is_callable($onPoll)) {
+            throw new GislConfigError(
+                'WaitOptions::$onPoll must be callable when set.',
+            );
+        }
+
+        $intervalNs = $intervalMs * 1_000_000;
+        $timeoutNs = $timeoutMs * 1_000_000;
+        $deadlineNs = \hrtime(true) + $timeoutNs;
+
+        while (true) {
+            $status = $this->getWorkflowStatus($workflowId);
+            $statusString = $status->getStatus() ?? '';
+
+            if ($onPoll !== null) {
+                $onPoll($statusString);
+            }
+
+            if (\in_array($statusString, WorkflowConstants::TERMINAL_STATUSES, true)) {
+                return $status;
+            }
+
+            $nowNs = \hrtime(true);
+            if ($nowNs + $intervalNs > $deadlineNs) {
+                throw new GislTimeoutError(
+                    "Workflow {$workflowId} did not complete within {$timeoutMs}ms",
+                );
+            }
+
+            if ($intervalMs > 0) {
+                \usleep($intervalMs * 1000);
+            }
+        }
     }
 
     // ---------------------------------------------------------------------
