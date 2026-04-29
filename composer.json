@@ -17,13 +17,17 @@
         "phpstan/phpstan": "^2",
         "guzzlehttp/guzzle": "^7.8",
         "guzzlehttp/psr7": "^2.6",
-        "http-interop/http-factory-guzzle": "^1.2"
+        "http-interop/http-factory-guzzle": "^1.2",
+        "symfony/yaml": "^6.4 || ^7.0"
     },
     "autoload": {
         "psr-4": { "Gisl\\Sdk\\": "src/" }
     },
     "autoload-dev": {
-        "psr-4": { "Gisl\\Sdk\\Tests\\": "tests/" }
+        "psr-4": {
+            "Gisl\\Sdk\\Tests\\": "tests/",
+            "Gisl\\Sdk\\Tests\\Parity\\": "tests/parity/"
+        }
     },
     "repositories": [
         {
@@ -40,7 +44,7 @@
     },
     "scripts": {
         "test": "phpunit",
-        "phpstan": "phpstan analyse src --level 8",
+        "phpstan": "phpstan analyse",
         "check": ["@test", "@phpstan"]
     }
 }
