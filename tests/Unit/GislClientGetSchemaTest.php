@@ -131,7 +131,7 @@ final class GislClientGetSchemaTest extends TestCase
         self::assertInstanceOf(GetSchemaResult::class, $result);
         self::assertInstanceOf(GetSchemaHitResult::class, $result);
         /** @var GetSchemaHitResult $result */
-        self::assertSame('2.3.1', $result->schema->getSchemaVersion());
+        self::assertSame('2.6.0', $result->schema->getSchemaVersion());
         self::assertSame('"abc123"', $result->etag);
         self::assertSame('Wed, 29 Apr 2026 12:00:00 GMT', $result->lastModified);
 
