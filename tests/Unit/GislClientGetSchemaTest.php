@@ -102,8 +102,8 @@ final class GislClientGetSchemaTest extends TestCase
     private function minimalSchemaBody(): array
     {
         return [
-            'schema_version' => '2.3.1',
-            'capabilities_version' => 21,
+            'schema_version' => '2.6.0',
+            'capabilities_version' => 25,
             'generated_at' => '2026-04-29T12:00:00Z',
             'operations' => new \stdClass(),
         ];
@@ -267,8 +267,8 @@ final class GislClientGetSchemaTest extends TestCase
         // contract callers narrow against.
         $hit = new GetSchemaHitResult(
             schema: new \Gisl\Generated\OpenApi\Model\OperationsSchemaResponse([
-                'schema_version' => '2.3.1',
-                'capabilities_version' => 21,
+                'schema_version' => '2.6.0',
+                'capabilities_version' => 25,
                 'generated_at' => new \DateTime('2026-04-29T12:00:00Z'),
                 'operations' => [],
             ]),
