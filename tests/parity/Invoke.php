@@ -380,6 +380,12 @@ final class Invoke
             source: $source,
             inputs: $inputs,
             deliver: isset($job['deliver']) ? (bool) $job['deliver'] : null,
+            // Preserve explicit `false` separately from omission — the API
+            // server defaults to `false` per JobDefinition.php:20, so the
+            // SDK only emits the field when the fixture sets it.
+            skipCompression: \array_key_exists('skip_compression', $job)
+                ? (bool) $job['skip_compression']
+                : null,
         );
     }
 
