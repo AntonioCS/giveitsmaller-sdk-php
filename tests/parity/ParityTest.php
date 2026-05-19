@@ -60,17 +60,19 @@ final class ParityTest extends TestCase
             . 'TS forwards Blob.type. Real divergence — file follow-up card to forward caller type.',
 
         // Generated `MultipartInitiateResponse::setRecommendedChunkSize`
-        // rejects values below the S3 5 MiB minimum. The fixtures pin small
-        // chunk sizes (~2 MB) so the binary payload stays compact, mirroring
-        // the TS runner which doesn't validate wire responses on hydrate.
+        // rejects values below the 16 MiB minimum (raised 5 MiB -> 16 MiB by
+        // CON-1 / contracts z4GDTUMx, ADR-0011). The fixtures pin small chunk
+        // sizes (~2 MB) so the binary payload stays compact, mirroring the TS
+        // runner which doesn't validate wire responses on hydrate.
         'upload_multipart' =>
-            'Generated MultipartInitiateResponse setter rejects recommendedChunkSize<5MiB; '
+            'Generated MultipartInitiateResponse setter rejects recommendedChunkSize<16MiB '
+            . '(CON-1/ADR-0011 raised the floor 5MiB->16MiB); '
             . 'fixture pins 2MB to keep payload compact. TS does not validate. '
             . 'Follow-up: relax/remove generator-level wire-response constraints.',
         'upload_metadata_hint' =>
-            'Same recommendedChunkSize<5MiB validation as upload_multipart.',
+            'Same recommendedChunkSize<16MiB validation as upload_multipart.',
         'upload_boundary_multipart' =>
-            'Same recommendedChunkSize<5MiB validation as upload_multipart.',
+            'Same recommendedChunkSize<16MiB validation as upload_multipart.',
 
         // `AudioWatermarkDecodeRequest::__construct` defaults `method_hint`
         // to `'auto'` via setIfExists when the caller omits it, so the wire

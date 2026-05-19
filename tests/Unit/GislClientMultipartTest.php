@@ -28,8 +28,12 @@ use Psr\Http\Message\ResponseInterface;
 final class GislClientMultipartTest extends TestCase
 {
     private const FIRST_CHUNK_SIZE = 8_388_608;  // 8 MiB — DEFAULT_MULTIPART_FIRST_CHUNK_SIZE_BYTES
-    private const CHUNK_SIZE       = 5_242_880;  // 5 MiB — S3 multipart minimum part size
-    private const TOTAL_SIZE       = 13_631_488; // FIRST_CHUNK_SIZE + CHUNK_SIZE = 1 remaining chunk
+    // 16 MiB — CON-1 (contracts z4GDTUMx) raised MultipartInitiateResponse
+    // recommended_chunk_size minimum 5 MiB -> 16 MiB; the mocked initiate
+    // envelope must carry a CON-1-valid value or the regenerated generated
+    // model rejects it at deserialize (InvalidArgumentException).
+    private const CHUNK_SIZE       = 16_777_216;
+    private const TOTAL_SIZE       = 25_165_824; // FIRST_CHUNK_SIZE + CHUNK_SIZE = 1 remaining chunk
     // UUID v7 — matches the regex the generated DTO enforces.
     private const UPLOAD_ID        = '01936fb2-0000-7000-8000-000000000aaa';
 
