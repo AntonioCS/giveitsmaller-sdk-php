@@ -10,6 +10,8 @@ use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
 use Gisl\Generated\OpenApi\Model\FeatureViolation;
 use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
+use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
+use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelopeDetailsInner;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
@@ -19,6 +21,7 @@ use Gisl\Sdk\Errors\GislBalanceExhaustedError;
 use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislTierRestrictedError;
+use Gisl\Sdk\Errors\GislUploadCapExceededError;
 use Gisl\Sdk\Errors\GislValidationError;
 use Gisl\Sdk\Errors\GislWorkflowExpiredError;
 use Gisl\Sdk\GislClient;
@@ -327,6 +330,102 @@ final class GislClientTypedErrorsTest extends TestCase
                 $e->typedPayload->getExpiredAt()->format(\DateTimeInterface::ATOM),
             );
             self::assertSame('errors.workflow.expired', $e->messageKey);
+        }
+    }
+
+    /**
+     * 422 upload_size_exceeds_tier -> GislUploadCapExceededError kind
+     * `size_tier` with the typed UploadSizeExceedsTierResponse payload.
+     * Mirrors `packages/typescript/src/client.ts` handleResponse tryThrowCap.
+     */
+    public function testUploadSizeExceedsTierDispatch(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'Upload exceeds the size cap for your tier',
+                'error_type' => 'upload_size_exceeds_tier',
+                'current_tier' => 'free',
+                'max_size_bytes' => 10485760,
+                'required_tier' => 'pro',
+                'message' => 'This file is larger than your tier permits.',
+                'message_key' => 'error.upload_size_exceeds_tier',
+                'locale' => 'en-GB',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislUploadCapExceededError');
+        } catch (GislUploadCapExceededError $e) {
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame(GislUploadCapExceededError::KIND_SIZE_TIER, $e->kind);
+            self::assertInstanceOf(UploadSizeExceedsTierResponse::class, $e->typedPayload);
+            self::assertSame(10485760, $e->typedPayload->getMaxSizeBytes());
+            self::assertSame('error.upload_size_exceeds_tier', $e->messageKey);
+        }
+    }
+
+    /**
+     * 422 upload_duration_exceeds_tier -> kind `duration_tier` with the
+     * typed UploadDurationExceedsTierResponse payload.
+     */
+    public function testUploadDurationExceedsTierDispatch(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'Upload exceeds the duration cap for your tier',
+                'error_type' => 'upload_duration_exceeds_tier',
+                'current_tier' => 'free',
+                'max_duration_seconds' => 300,
+                'required_tier' => 'pro',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislUploadCapExceededError');
+        } catch (GislUploadCapExceededError $e) {
+            self::assertSame(GislUploadCapExceededError::KIND_DURATION_TIER, $e->kind);
+            self::assertInstanceOf(UploadDurationExceedsTierResponse::class, $e->typedPayload);
+            self::assertSame(300, $e->typedPayload->getMaxDurationSeconds());
+        }
+    }
+
+    /**
+     * 413 absolute across-tier cap. The contract models 413 as a plain
+     * ErrorEnvelope (no error_type discriminator, no typed payload), so the
+     * SDK dispatches purely on status with kind `absolute_413` and a null
+     * typed payload.
+     */
+    public function testUploadAbsolute413Dispatch(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(413, [
+                'success' => false,
+                'error' => 'File size exceeds maximum allowed (500MB)',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislUploadCapExceededError');
+        } catch (GislUploadCapExceededError $e) {
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(413, $e->statusCode);
+            self::assertSame(GislUploadCapExceededError::KIND_ABSOLUTE_413, $e->kind);
+            self::assertNull($e->typedPayload);
         }
     }
 

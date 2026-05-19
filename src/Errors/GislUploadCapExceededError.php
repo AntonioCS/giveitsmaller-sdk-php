@@ -1,0 +1,52 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Gisl\Sdk\Errors;
+
+use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
+use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
+
+/**
+ * The upload exceeds a size or duration cap. Covers all three server shapes:
+ * - 422 `upload_size_exceeds_tier`     (kind `size_tier`, typed payload present)
+ * - 422 `upload_duration_exceeds_tier` (kind `duration_tier`, typed payload present)
+ * - 413 absolute across-tier cap       (kind `absolute_413`, NO typed payload)
+ *
+ * Mirrors `packages/typescript/src/errors.ts:GislUploadCapExceededError`.
+ *
+ * CONSCIOUS DEVIATION (mirrors the TS-side note): every other structured
+ * subclass binds exactly one typed payload. This one binds a size|duration
+ * union — and none at all for 413, which the contract models as a plain
+ * `ErrorEnvelope` with no `error_type` discriminator. The card mandates this
+ * single class name and SDK-3/E2E-1 are blocked-on it, so splitting into
+ * size/duration subclasses would break a cross-ticket naming contract; 413
+ * could not be covered uniformly by a one-payload-per-class split anyway.
+ * The `$kind` discriminant + a nullable union `$typedPayload` is the
+ * deliberate trade-off.
+ */
+final class GislUploadCapExceededError extends GislApiError
+{
+    public const KIND_SIZE_TIER = 'size_tier';
+    public const KIND_DURATION_TIER = 'duration_tier';
+    public const KIND_ABSOLUTE_413 = 'absolute_413';
+
+    /**
+     * @param string $kind One of the KIND_* constants. `absolute_413` always
+     *                      carries a null `$typedPayload` (413 has no
+     *                      structured envelope on the wire).
+     */
+    public function __construct(
+        string $message,
+        int $statusCode,
+        string $errorCode,
+        public readonly string $kind,
+        public readonly UploadSizeExceedsTierResponse|UploadDurationExceedsTierResponse|null $typedPayload,
+        array $payload = [],
+        ?string $messageKey = null,
+        ?string $locale = null,
+        ?array $messageParams = null,
+    ) {
+        parent::__construct($message, $statusCode, $errorCode, $payload, $messageKey, $locale, $messageParams);
+    }
+}

@@ -31,6 +31,8 @@ use Gisl\Generated\OpenApi\Model\WorkflowCancelResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowDownloadResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
+use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
+use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowResumeResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\ObjectSerializer;
@@ -41,9 +43,12 @@ use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislError;
 use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
+use Gisl\Sdk\Errors\GislMultipartPartCountError;
+use Gisl\Sdk\Errors\GislMultipartPartError;
 use Gisl\Sdk\Errors\GislNetworkError;
 use Gisl\Sdk\Errors\GislTierRestrictedError;
 use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\Errors\GislUploadCapExceededError;
 use Gisl\Sdk\Errors\GislValidationError;
 use Gisl\Sdk\Errors\GislWorkflowExpiredError;
 use Http\Discovery\Psr17FactoryDiscovery;
@@ -264,6 +269,58 @@ final class GislClient
             );
         }
 
+        // S3 <=10 000-part ceiling guard (Model A). Mirrors
+        // `packages/typescript/src/client.ts` multipartUpload. Trust the
+        // server-computed total_parts (consistent with trusting
+        // recommendedChunkSize/presignedUrls from the same envelope) but
+        // assert the S3 physical ceiling, cross-checked against a client-side
+        // recompute. NOTE (out of SDK-1 scope): the contract additionally
+        // pins total_parts to maximum:500 and recommended_chunk_size to
+        // <=100 MiB, i.e. a ~50 GB contract ceiling that sits below the
+        // 50-100 GB Enterprise target — tracked as a separate contracts/API
+        // follow-up; this guard stays at the S3-physical 10 000 per the card.
+        $serverParts = $initiate->getTotalParts() ?? 0;
+        $remainingBytes = \max(0, $totalSize - $firstChunkSize);
+        $computedParts = 1 + (int) \ceil($remainingBytes / $chunkSize);
+        $maxParts = 10000;
+        if ($serverParts > $maxParts || $computedParts > $maxParts) {
+            $required = \max($serverParts, $computedParts);
+            throw new GislMultipartPartCountError(
+                "Upload requires {$required} parts, exceeding the S3 {$maxParts}-part "
+                . "multipart limit (server reported {$serverParts}, client computed "
+                . "{$computedParts} at {$chunkSize}-byte chunks). A larger chunk size "
+                . 'is required server-side to upload a file this large.',
+                $required,
+                $maxParts,
+            );
+        }
+
+        // Plan-consistency guard (codex review; mirrors the TS reference).
+        // The <=10k ceiling above only bounds the count; it does not catch an
+        // initiate plan that is internally inconsistent BELOW the cap. Under
+        // Model A a contract-compliant server computes total_parts from the
+        // same recommended_chunk_size it returns and emits exactly one
+        // presigned URL per remaining part (part 1 = initiate first chunk).
+        // If they disagree, proceeding would PUT the wrong number of ranges
+        // and fail opaquely at /multipart/complete — fail fast here instead.
+        if ($serverParts !== $computedParts || \count($presignedUrls) !== $computedParts - 1) {
+            throw new GislError(
+                'Multipart initiate plan is internally inconsistent: server '
+                . "total_parts={$serverParts}, client computed {$computedParts} "
+                . "from {$chunkSize}-byte chunks, presigned_urls count="
+                . \count($presignedUrls) . ' (expected ' . ($computedParts - 1)
+                . '). Refusing to upload a mismatched part plan.',
+            );
+        }
+
+        // Resolve uploadId before the chunk loop so a terminal part failure
+        // can carry it on the typed GislMultipartPartError (mirrors the TS
+        // reference, where the throw site has initResponse.uploadId in scope).
+        $uploadId = $initiate->getUploadId();
+        if (!\is_string($uploadId) || $uploadId === '') {
+            throw new GislError('Multipart initiate response missing upload_id.');
+        }
+
         /** @var list<array{part_number: int, etag: string}> $parts */
         $parts = [];
 
@@ -280,6 +337,7 @@ final class GislClient
                 filePath: $filePath,
                 offset: $start,
                 length: $contentLength,
+                uploadId: $uploadId,
             );
 
             $partNumber = $part->getPartNumber();
@@ -296,11 +354,8 @@ final class GislClient
         // order over `$presignedUrls` is part_number ascending per the v2
         // contract; we don't re-sort here so a wire shape that drifts from
         // that contract surfaces in fixture snapshots rather than getting
-        // hidden by a defensive sort.
-        $uploadId = $initiate->getUploadId();
-        if (!\is_string($uploadId) || $uploadId === '') {
-            throw new GislError('Multipart initiate response missing upload_id.');
-        }
+        // hidden by a defensive sort. `$uploadId` was already resolved +
+        // validated above the chunk loop.
 
         $completeBody = $this->jsonEncode([
             'upload_id' => $uploadId,
@@ -396,6 +451,7 @@ final class GislClient
         string $filePath,
         int $offset,
         int $length,
+        string $uploadId,
     ): string {
         $url = $presigned->getUrl();
         if (!\is_string($url) || $url === '') {
@@ -403,7 +459,20 @@ final class GislClient
         }
 
         $partNumber = $presigned->getPartNumber() ?? 0;
-        $chunkBytes = $this->readChunk($filePath, $offset, $length);
+        // Surface a read failure for THIS part as the typed
+        // GislMultipartPartError (partNumber + uploadId), consistent with the
+        // PUT-failure path below — a bare GislError from readChunk (short
+        // read / seek failure) would otherwise lose the per-part context
+        // (codex review; mirrors the TS reference).
+        try {
+            $chunkBytes = $this->readChunk($filePath, $offset, $length);
+        } catch (GislError $e) {
+            throw new GislMultipartPartError(
+                "Failed to read bytes for part {$partNumber}: " . $e->getMessage(),
+                $partNumber,
+                $uploadId,
+            );
+        }
 
         $lastError = null;
         for ($attempt = 0; $attempt < $this->config->multipartMaxAttempts; $attempt++) {
@@ -457,8 +526,13 @@ final class GislClient
         }
 
         $detail = $lastError instanceof \Throwable ? $lastError->getMessage() : 'unknown error';
-        throw new GislError(
+        // Mirrors the TS reference: only the after-all-attempts throw is the
+        // typed GislMultipartPartError; the non-retryable mid-loop throw above
+        // stays a plain GislError (matches the TS `{kind:'fatal'}` path).
+        throw new GislMultipartPartError(
             "S3 chunk upload failed for part {$partNumber} after {$this->config->multipartMaxAttempts} attempts: {$detail}",
+            $partNumber,
+            $uploadId,
         );
     }
 
@@ -1779,6 +1853,70 @@ final class GislClient
                     $messageParams,
                 );
             }
+        }
+
+        // Upload cap errors. Mirrors
+        // `packages/typescript/src/client.ts` handleResponse (the
+        // `tryThrowCap` helper + the 422 size/duration + 413 branches). Same
+        // construct-validate-fallthrough discipline as the branches above.
+        if ($statusCode === 422 && $errorType === 'upload_size_exceeds_tier') {
+            $typed = $this->tryDeserialize(UploadSizeExceedsTierResponse::class, $decoded);
+            if (
+                $typed instanceof UploadSizeExceedsTierResponse
+                && $typed->getCurrentTier() !== null
+                && $typed->getMaxSizeBytes() !== null
+            ) {
+                throw new GislUploadCapExceededError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    GislUploadCapExceededError::KIND_SIZE_TIER,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        if ($statusCode === 422 && $errorType === 'upload_duration_exceeds_tier') {
+            $typed = $this->tryDeserialize(UploadDurationExceedsTierResponse::class, $decoded);
+            if (
+                $typed instanceof UploadDurationExceedsTierResponse
+                && $typed->getCurrentTier() !== null
+                && $typed->getMaxDurationSeconds() !== null
+            ) {
+                throw new GislUploadCapExceededError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    GislUploadCapExceededError::KIND_DURATION_TIER,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        // 413 = the absolute across-tier cap. The contract models 413 as a
+        // plain ErrorEnvelope (no `error_type` discriminator, no typed
+        // payload), so dispatch purely on status with a null typed payload
+        // — `absolute_413` tells the caller there is intentionally none.
+        if ($statusCode === 413) {
+            throw new GislUploadCapExceededError(
+                $message,
+                $statusCode,
+                $errorCode,
+                GislUploadCapExceededError::KIND_ABSOLUTE_413,
+                null,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+            );
         }
 
         // Generic fallback.
