@@ -205,29 +205,34 @@ final class GislClientMultipartTest extends TestCase
      * Mirrors the TS upload-streaming.test.ts "client-side recompute"
      * case. The guard fires AFTER the initiate round-trip (totalParts /
      * chunkSize only exist on the initiate response) on the CLIENT-COMPUTED
-     * part count: a >50 GiB input at the 5 MiB minimum chunk size yields
-     * ~12 000 parts. A sparse file gives the huge logical size with ~0 bytes
-     * on disk (the guard throws before any chunk is read past the 8 MiB
-     * first chunk).
+     * part count: a 165 GiB input at the 16 MiB minimum chunk size yields
+     * ~10 561 parts (post-SDK-2 #84; was ~12 000 with the old 5 MiB
+     * minimum + ~50 GiB input). A sparse file gives the huge logical size
+     * with ~0 bytes on disk (the guard throws before any chunk is read
+     * past the 8 MiB first chunk).
      *
      * PHP <-> TS divergence (see testServerOverReportingPartsIsRejectedByGeneratedModel
      * below): in PHP the SERVER-reported `total_parts` branch of the guard
      * is unreachable — the generated MultipartInitiateResponse model
-     * enforces the contract `maximum: 500` and throws at deserialization
-     * before the SDK guard runs. TS's generator does not validate response
-     * bodies, so its server-branch IS reachable and is covered there. Only
-     * the computed-parts branch is live in PHP.
+     * enforces the contract `maximum: 10000` (post-SDK-2 #84; was 500) and
+     * throws at deserialization before the SDK guard runs. TS's generator
+     * does not validate response bodies, so its server-branch IS reachable
+     * and is covered there. Only the computed-parts branch is live in PHP.
      */
     public function testPartCountGuardThrowsViaComputedPartsForOversizeFile(): void
     {
-        // 60 GiB sparse file -> filesize() reports 60 GiB, ~0 bytes on disk.
-        $filePath = $this->writeSparseFile(60 * 1024 * 1024 * 1024);
+        // 165 GiB sparse file — large enough that the client recompute
+        // 1 + ceil((165GiB - 8MiB) / 16MiB) ~= 10561 > 10000 -> guard
+        // fires. Realigned to 16 MiB chunk (SDK-2 #84) from the prior 5
+        // MiB literal — see ticket 2hMemNSN.
+        $filePath = $this->writeSparseFile(165 * 1024 * 1024 * 1024);
 
-        // Valid, in-contract initiate: total_parts <= 500, chunk = 5 MiB
-        // (the generated-model minimum). The client recompute
-        // 1 + ceil((60GiB - 8MiB) / 5MiB) ~= 12289 > 10000 -> guard fires.
+        // Valid, in-contract initiate: total_parts <= 10000 (post-SDK-2),
+        // chunk = 16 MiB (the generated-model minimum). Use a small
+        // total_parts so the plan-consistency guard fires AFTER the count
+        // ceiling — the test asserts the count guard.
         $envelope = $this->initiateEnvelope(remainingChunks: 1, chunkSize: self::CHUNK_SIZE);
-        $envelope['data']['total_parts'] = 500;
+        $envelope['data']['total_parts'] = 7680;
 
         $captured = [];
         $http = $this->stubClient([
@@ -250,21 +255,23 @@ final class GislClientMultipartTest extends TestCase
 
     /**
      * Documents the PHP<->TS divergence: an out-of-contract initiate
-     * response with total_parts > 500 is rejected by the generated
-     * MultipartInitiateResponse model's `maximum: 500` validation at
-     * deserialization time, BEFORE the SDK-level <=10k guard can run. This
-     * is the contract-ceiling gap (total_parts maximum:500 + chunk
-     * <=100MiB => ~50 GB multipart ceiling) surfaced concretely; tracked as
-     * a separate contracts/API follow-up. SDK-1 keeps the S3-physical
-     * 10 000 guard per the card; this test pins the actual current PHP
-     * behaviour so the divergence is not silently "fixed" or regressed.
+     * response with total_parts > 10000 is rejected by the generated
+     * MultipartInitiateResponse model's `maximum: 10000` validation at
+     * deserialization time, BEFORE the SDK-level <=10k guard can run.
+     * SDK-2 (#84) raised the contract maximum from 500 to 10000 in
+     * lockstep with the 5->16 MiB chunk bump, so the new ceiling = the
+     * S3 physical limit and the contract-ceiling-vs-S3-physical-ceiling
+     * gap that ticket aBsqlMCc tracked under SDK-1 is now resolved.
+     * SDK-1 keeps the S3-physical 10000 guard per the card; this test
+     * pins the actual current PHP behaviour so the divergence is not
+     * silently "fixed" or regressed.
      */
     public function testServerOverReportingPartsIsRejectedByGeneratedModel(): void
     {
         $filePath = $this->writeBigFile(self::TOTAL_SIZE);
 
         $envelope = $this->initiateEnvelope(remainingChunks: 0, chunkSize: self::CHUNK_SIZE);
-        $envelope['data']['total_parts'] = 10_001; // out of contract (max 500)
+        $envelope['data']['total_parts'] = 10_001; // out of contract (max 10000)
 
         $captured = [];
         $http = $this->stubClient([
@@ -274,10 +281,10 @@ final class GislClientMultipartTest extends TestCase
         $client = $this->makeClient($http);
 
         // The generated model setter throws InvalidArgumentException for
-        // total_parts > 500 — surfaces before the SDK guard. (TS divergence:
-        // its lax generator would let the guard fire instead.)
+        // total_parts > 10000 — surfaces before the SDK guard. (TS
+        // divergence: its lax generator would let the guard fire instead.)
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessageMatches('/total_parts.*500/');
+        $this->expectExceptionMessageMatches('/total_parts.*10000/');
         $client->uploadFile($filePath);
     }
 
