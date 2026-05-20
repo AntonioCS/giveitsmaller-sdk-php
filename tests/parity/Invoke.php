@@ -117,7 +117,15 @@ final class Invoke
                             'height' => $hintMap['height'] ?? null,
                         ]);
                     }
-                    $options = new UploadOptions(metadataHint: $hint);
+                    // SDK-3 (Wb6ebOMM): resumeUploadId on UploadOptions
+                    // wires the parity fixture to the resume branch.
+                    $resumeUploadId = isset($opts['resumeUploadId']) && \is_string($opts['resumeUploadId'])
+                        ? $opts['resumeUploadId']
+                        : null;
+                    $options = new UploadOptions(
+                        metadataHint: $hint,
+                        resumeUploadId: $resumeUploadId,
+                    );
                 }
                 return $client->uploadFile($tempPath, $options);
 
@@ -277,6 +285,34 @@ final class Invoke
 
             case 'waitForWorkflow':
                 return $client->waitForWorkflow(self::stringArg($args, 0, $fixture->name));
+
+            // SDK-3 (Wb6ebOMM) resume-support endpoints.
+            case 'getUploadStatus':
+                return $client->getUploadStatus(self::stringArg($args, 0, $fixture->name));
+
+            case 'presignParts':
+                $uploadId = self::stringArg($args, 0, $fixture->name);
+                $partsRaw = $args[1] ?? null;
+                $totalParts = $args[2] ?? null;
+                if (!\is_array($partsRaw) || !\is_int($totalParts)) {
+                    throw new \RuntimeException(
+                        "presignParts fixture {$fixture->name}: args must be (uploadId:string, partNumbers:list<int>, totalParts:int)",
+                    );
+                }
+                /** @var list<int> $parts */
+                $parts = [];
+                foreach ($partsRaw as $n) {
+                    if (!\is_int($n)) {
+                        throw new \RuntimeException(
+                            "presignParts fixture {$fixture->name}: partNumbers entries must be ints",
+                        );
+                    }
+                    $parts[] = $n;
+                }
+                return $client->presignParts($uploadId, $parts, $totalParts);
+
+            case 'keepaliveUpload':
+                return $client->keepaliveUpload(self::stringArg($args, 0, $fixture->name));
         }
 
         throw new \RuntimeException("Invoke: unsupported method \"{$method}\" for fixture {$fixture->name}");

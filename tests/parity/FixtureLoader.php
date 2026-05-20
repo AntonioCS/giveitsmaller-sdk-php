@@ -44,6 +44,10 @@ final class FixtureLoader
         'probeUpload',
         'retryOperation',
         'submitContact',
+        // SDK-3 (Wb6ebOMM) resume-support endpoints.
+        'getUploadStatus',
+        'presignParts',
+        'keepaliveUpload',
         // Webhook mode invokes verifyWebhook directly; not a GislClient method.
         'verifyWebhook',
     ];

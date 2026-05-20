@@ -30,6 +30,17 @@ final class GislUploadCapExceededError extends GislApiError
     public const KIND_SIZE_TIER = 'size_tier';
     public const KIND_DURATION_TIER = 'duration_tier';
     public const KIND_ABSOLUTE_413 = 'absolute_413';
+    /**
+     * SDK-3 (Wb6ebOMM) — 422 `FILE_TOO_LARGE_FOR_MULTIPART`: pre-S3 capacity
+     * reject on the resume-support presign endpoint (more parts than the
+     * manifest can ever accept). No typed payload today. Adding a new kind
+     * value here is an additive extension on the discriminant (TS 0.5.0 /
+     * PHP 0.3.0); existing `instanceof GislUploadCapExceededError` catches
+     * keep working. Consumer exhaustive-switch warning is captured on the
+     * TS-side `GislUploadCapKind` docblock; PHP has no exhaustive-string-
+     * union construct so this is silent here.
+     */
+    public const KIND_V2_MULTIPART = 'cap_v2_multipart';
 
     /**
      * @param string $kind One of the KIND_* constants. `absolute_413` always

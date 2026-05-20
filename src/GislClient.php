@@ -45,6 +45,9 @@ use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislMultipartPartCountError;
 use Gisl\Sdk\Errors\GislMultipartPartError;
+use Gisl\Sdk\Errors\GislMultipartSessionAuthRequiredError;
+use Gisl\Sdk\Errors\GislMultipartSessionNotFoundError;
+use Gisl\Sdk\Errors\GislMultipartSessionOwnershipError;
 use Gisl\Sdk\Errors\GislNetworkError;
 use Gisl\Sdk\Errors\GislTierRestrictedError;
 use Gisl\Sdk\Errors\GislTimeoutError;
@@ -168,6 +171,30 @@ final class GislClient
         }
 
         $fileName = \basename($filePath);
+
+        if (\is_string($options?->resumeUploadId) && $options->resumeUploadId !== '') {
+            // SDK-3 (Wb6ebOMM): resume path takes the durable session's
+            // `recommended_chunk_size` from /status (initiate is skipped).
+            // Below the multipart threshold a resume is meaningless — the
+            // original session was started as multipart, so a sub-threshold
+            // file CAN'T be a "resume target" in practice. Guard explicitly
+            // so a confused caller gets a clear error rather than a 404 on
+            // /status. Mirrors the TS reference.
+            if ($size <= $this->config->multipartThresholdBytes) {
+                throw new GislError(
+                    "uploadFile: resumeUploadId set but file size ({$size}) is at-or-below the "
+                    . "multipart threshold ({$this->config->multipartThresholdBytes}); resume targets "
+                    . 'must be multipart sessions.',
+                );
+            }
+            return $this->multipartResume(
+                filePath: $filePath,
+                fileName: $fileName,
+                totalSize: $size,
+                resumeUploadId: $options->resumeUploadId,
+                options: $options,
+            );
+        }
 
         if ($size > $this->config->multipartThresholdBytes) {
             return $this->multipartUpload($filePath, $fileName, $size, $options);
@@ -400,6 +427,610 @@ final class GislClient
             'size_bytes' => $totalSize,
             'constraints_applied' => ObjectSerializer::sanitizeForSerialization($constraintsApplied),
         ]);
+    }
+
+    /**
+     * SDK-3 (Wb6ebOMM): resume an in-progress multipart upload.
+     *
+     * Skips `/multipart/initiate` entirely (the original initiate happened in a
+     * prior process). Walks `/status` for the authoritative list of recorded
+     * parts, re-presigns the missing ones in batches of <=100, PUTs only those,
+     * and finalises with `/complete`. Caller's file at `$filePath` MUST be
+     * byte-identical to the original upload at the same offsets — parts whose
+     * etags don't match server state will fail `/complete`.
+     *
+     * Re-runs the same uploadId / chunkSize / totalParts / plan-consistency
+     * guards as the fresh-upload path, using the /status envelope. `onProgress`
+     * fires on entry seeded from sum(uploadedParts.sizeBytes) and again after
+     * every successful PUT. `onCheckpoint` fires OUTSIDE the retry-scoped path
+     * after every successful PUT — a callback-throw must not trigger a
+     * duplicate PUT. Mirrors `packages/typescript/src/client.ts:multipartResume`.
+     *
+     * TODO(HxUmVr3Y): replace inline hand-coded request body marshalling on
+     * regen.
+     */
+    private function multipartResume(
+        string $filePath,
+        string $fileName,
+        int $totalSize,
+        string $resumeUploadId,
+        ?UploadOptions $options,
+    ): UploadResponse {
+        // Step 1: Walk /status for authoritative session state.
+        $status = $this->walkUploadStatus($resumeUploadId);
+        $uploadId = $status['uploadId'];
+        if ($uploadId !== $resumeUploadId) {
+            throw new GislError(
+                'multipartResume: /status response uploadId does not match resumeUploadId.',
+            );
+        }
+        $chunkSize = $status['recommendedChunkSize'];
+        // Mirrors the TS reference's MULTIPART_CHUNK_SIZE +
+        // RECOMMENDED_CHUNK_SIZE_MAX_BYTES drift guards. Generator pins the
+        // chunk-size enum (16 MiB) via UploadThresholds; the upper bound is
+        // a contract-spec literal (the openapi `maximum:` on
+        // recommended_chunk_size). Bumping either requires a contracts
+        // regen that updates this constant.
+        $minChunk = \Gisl\Generated\OpenApi\Model\UploadThresholds::MULTIPART_CHUNK_SIZE_NUMBER_16777216;
+        $maxChunk = 104_857_600; // 100 MiB — api.yaml UploadThresholds recommended_chunk_size maximum
+        if ($chunkSize < $minChunk || $chunkSize > $maxChunk) {
+            throw new GislError(
+                "multipartResume: /status recommendedChunkSize {$chunkSize} outside the contract "
+                . "range [{$minChunk}, {$maxChunk}].",
+            );
+        }
+        $totalParts = $status['totalParts'];
+        if ($totalParts < 1) {
+            throw new GislError(
+                "multipartResume: /status totalParts={$totalParts} is invalid.",
+            );
+        }
+        $maxParts = 10000;
+        if ($totalParts > $maxParts) {
+            throw new GislMultipartPartCountError(
+                "multipartResume: /status totalParts={$totalParts} exceeds the S3 "
+                . "{$maxParts}-part multipart limit.",
+                $totalParts,
+                $maxParts,
+            );
+        }
+        // Wrong-file-for-this-uploadId guard.
+        // Mirrors fresh-upload chunk-plan: part 1 = firstChunkSize (8 MiB),
+        // parts 2..totalParts each take chunkSize bytes (last part may be
+        // a short tail). See `multipartUpload` for the fresh side.
+        $firstChunkSize = \min($totalSize, GislClientConfig::DEFAULT_MULTIPART_FIRST_CHUNK_SIZE_BYTES);
+        $expectedMin = $firstChunkSize + \max(0, $totalParts - 2) * $chunkSize + ($totalParts > 1 ? 1 : 0);
+        $expectedMax = $firstChunkSize + \max(0, $totalParts - 1) * $chunkSize;
+        if ($totalSize < $expectedMin || $totalSize > $expectedMax) {
+            throw new GislError(
+                "multipartResume: caller file size ({$totalSize}) does not match the resumed "
+                . "session's recorded plan (totalParts={$totalParts}, chunkSize={$chunkSize}, "
+                . "expected {$expectedMin}-{$expectedMax} bytes). Wrong file for this uploadId?",
+            );
+        }
+
+        // Step 2: Compute missing parts. Part 1 was uploaded inline at
+        // initiate — if missing from /status the session is unrecoverable
+        // (server rejects re-presigning part 1 to preserve the recorded
+        // etag for /complete).
+        /** @var array<int, array{partNumber:int,etag:string,sizeBytes:int,lastModified:string}> $uploaded */
+        $uploaded = [];
+        foreach ($status['uploadedParts'] as $p) {
+            $uploaded[$p['partNumber']] = $p;
+        }
+        if (!isset($uploaded[1])) {
+            throw new GislError(
+                'multipartResume: part 1 (initiate first chunk) is missing from /status. '
+                . 'Part 1 is sealed at initiate and cannot be re-presigned; this session is '
+                . 'unrecoverable. Start a fresh upload (call uploadFile without resumeUploadId).',
+            );
+        }
+        /** @var list<int> $missingParts */
+        $missingParts = [];
+        for ($n = 2; $n <= $totalParts; $n++) {
+            if (!isset($uploaded[$n])) {
+                $missingParts[] = $n;
+            }
+        }
+
+        // Seed uploadedBytes from already-uploaded parts so onProgress
+        // reflects the true resumption point.
+        $uploadedBytes = 0;
+        foreach ($uploaded as $p) {
+            $uploadedBytes += $p['sizeBytes'];
+        }
+        $this->fireProgress($options, $uploadedBytes, $totalSize);
+
+        $fireCheckpoint = function (?int $extraPartNumber = null) use (&$uploaded, $status, $options): void {
+            $all = \array_keys($uploaded);
+            if ($extraPartNumber !== null && !\in_array($extraPartNumber, $all, true)) {
+                $all[] = $extraPartNumber;
+            }
+            \sort($all);
+            $state = new MultipartCheckpointState(
+                uploadId: $status['uploadId'],
+                totalParts: $status['totalParts'],
+                uploadedPartNumbers: $all,
+                manifestExpiresAt: $status['manifestExpiresAt'],
+            );
+            // OUTSIDE retry-scope. A throw here propagates and fails the
+            // upload but cannot trigger a duplicate PUT.
+            if (\is_callable($options?->onCheckpoint)) {
+                ($options->onCheckpoint)($state);
+            }
+        };
+        // Fire an entry checkpoint so callers can persist resumed state
+        // even before any new PUT lands.
+        $fireCheckpoint();
+
+        // Step 3: Process batches of <=100 missing parts.
+        /** @var list<array{part_number:int,etag:string}> $newParts */
+        $newParts = [];
+        $batchSize = 100;
+        for ($i = 0; $i < \count($missingParts); $i += $batchSize) {
+            $batch = \array_slice($missingParts, $i, $batchSize);
+            $presigned = $this->presignParts($uploadId, $batch, $totalParts);
+            foreach ($presigned['presignedUrls'] as $presignedPart) {
+                $partNumber = $presignedPart['partNumber'];
+                // Mirrors fresh-upload offset math: part 1 = firstChunkSize,
+                // parts 2..N = firstChunkSize + (partNumber - 2) * chunkSize.
+                // Resume never PUTs part 1 (unrecoverable check earlier).
+                $start = $firstChunkSize + ($partNumber - 2) * $chunkSize;
+                $end = \min($start + $chunkSize, $totalSize);
+                $contentLength = $end - $start;
+
+                // Surface read failures as the typed GislMultipartPartError
+                // (mirrors fresh-path putChunkWithRetry pattern).
+                try {
+                    $chunkBytes = $this->readChunk($filePath, $start, $contentLength);
+                } catch (GislError $e) {
+                    throw new GislMultipartPartError(
+                        "multipartResume: failed to read bytes for part {$partNumber}: " . $e->getMessage(),
+                        $partNumber,
+                        $uploadId,
+                    );
+                }
+
+                $etag = $this->resumePutWithRetry(
+                    url: $presignedPart['url'],
+                    chunkBytes: $chunkBytes,
+                    contentLength: $contentLength,
+                    partNumber: $partNumber,
+                    uploadId: $uploadId,
+                );
+
+                $newParts[] = ['part_number' => $partNumber, 'etag' => $etag];
+                $uploaded[$partNumber] = [
+                    'partNumber' => $partNumber,
+                    'etag' => $etag,
+                    'sizeBytes' => $contentLength,
+                    'lastModified' => \gmdate('Y-m-d\\TH:i:s\\Z'),
+                ];
+                $uploadedBytes = \min($uploadedBytes + $contentLength, $totalSize);
+                $this->fireProgress($options, $uploadedBytes, $totalSize);
+                $fireCheckpoint();
+            }
+        }
+
+        // Step 4: /complete with the FULL parts list = recorded etags from
+        // /status UNION newly-PUT etags. Sort ascending by part_number.
+        /** @var list<array{part_number:int,etag:string}> $allParts */
+        $allParts = [];
+        foreach ($uploaded as $p) {
+            $allParts[] = ['part_number' => $p['partNumber'], 'etag' => $p['etag']];
+        }
+        \usort($allParts, fn ($a, $b) => $a['part_number'] <=> $b['part_number']);
+        if (\count($allParts) !== $totalParts) {
+            throw new GislError(
+                'multipartResume: assembled parts list has ' . \count($allParts)
+                . " entries, expected {$totalParts}. Refusing to /complete with an incomplete part set.",
+            );
+        }
+
+        $completeBody = $this->jsonEncode([
+            'upload_id' => $uploadId,
+            'parts' => $allParts,
+        ]);
+        $completeRequest = $this->buildRequest(
+            method: 'POST',
+            path: '/api/uploads/multipart/complete',
+            body: $this->streamFactory->createStream($completeBody),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+        /** @var array<string, mixed> $completeData */
+        $completeData = $this->sendAndUnwrap($completeRequest);
+        $completeStatus = $completeData['status'] ?? null;
+        if ($completeStatus !== 'completed') {
+            throw new GislError(
+                'multipartResume: completed with unexpected status: '
+                . (\is_string($completeStatus) ? $completeStatus : \get_debug_type($completeStatus)),
+            );
+        }
+        $completeUploadId = $completeData['upload_id'] ?? null;
+        if (!\is_string($completeUploadId) || $completeUploadId === '') {
+            throw new GislError('multipartResume: complete response missing upload_id.');
+        }
+
+        // Resume-path information loss: /status (and /complete) carry
+        // neither mime_type nor constraints_applied. Emit sentinel-shaped
+        // values (mirrors TS reference); consumers needing authoritative
+        // metadata SHOULD call `getMetadata($fileId)`.
+        // TODO(HxUmVr3Y): once /status carries mime_type +
+        // constraints_applied, replace these sentinels.
+        return $this->hydrate(UploadResponse::class, [
+            'file_id' => $completeUploadId,
+            'original_name' => $fileName,
+            'mime_type' => '',
+            'size_bytes' => $totalSize,
+            'constraints_applied' => [
+                'max_size_bytes' => $totalSize,
+                // `max_duration_seconds` deliberately omitted: parity
+                // comparator filters undefined/missing keys; mirrors TS.
+                'processing_class_pre_assignment' => 'unknown',
+            ],
+        ]);
+    }
+
+    /**
+     * Resume-path PUT loop. PHP-side is sequential (mirrors the
+     * `lv43MVSl`-deferred concurrent variant of the fresh path). Bounded
+     * retry + full-jitter backoff. Read-once-retry-many — chunk bytes are
+     * captured by the caller and passed in.
+     */
+    private function resumePutWithRetry(
+        string $url,
+        string $chunkBytes,
+        int $contentLength,
+        int $partNumber,
+        string $uploadId,
+    ): string {
+        $lastError = null;
+        for ($attempt = 0; $attempt < $this->config->multipartMaxAttempts; $attempt++) {
+            $request = $this->requestFactory
+                ->createRequest('PUT', $url)
+                ->withHeader('Content-Length', (string) $contentLength)
+                ->withBody($this->streamFactory->createStream($chunkBytes));
+
+            try {
+                $response = $this->httpClient->sendRequest($request);
+            } catch (ClientExceptionInterface $e) {
+                $lastError = $e;
+                $this->backoff($attempt);
+                continue;
+            }
+
+            $statusCode = $response->getStatusCode();
+            if ($statusCode >= 200 && $statusCode < 300) {
+                $etag = $response->getHeaderLine('ETag');
+                if ($etag === '') {
+                    (string) $response->getBody();
+                    throw new GislError(
+                        "multipartResume: S3 response missing ETag for part {$partNumber}.",
+                    );
+                }
+                return $etag;
+            }
+            (string) $response->getBody();
+            if (!$this->isRetryableStatus($statusCode)) {
+                throw new GislError(
+                    "multipartResume: S3 chunk upload failed for part {$partNumber}: HTTP {$statusCode} (non-retryable).",
+                );
+            }
+            $lastError = new GislError(
+                "multipartResume: S3 chunk upload failed for part {$partNumber}: HTTP {$statusCode}.",
+            );
+            $this->backoff($attempt);
+        }
+        $detail = $lastError instanceof \Throwable ? $lastError->getMessage() : 'unknown error';
+        throw new GislMultipartPartError(
+            "multipartResume: S3 chunk upload failed for part {$partNumber} after "
+            . "{$this->config->multipartMaxAttempts} attempts: {$detail}",
+            $partNumber,
+            $uploadId,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // SDK-3 (Wb6ebOMM) resume-support public endpoints. Mirrors
+    // packages/typescript/src/client.ts getUploadStatus / presignParts /
+    // keepaliveUpload.
+    // -------------------------------------------------------------------
+
+    /**
+     * Fetch the durable status of an in-progress multipart upload session.
+     *
+     * Walks every page of `GET /api/uploads/multipart/{uploadId}/status`
+     * (paginated via `next_part_number_marker` + `is_truncated`) and
+     * returns the aggregated state. Callers see the complete set of
+     * recorded parts across pages without driving the cursor themselves.
+     *
+     * Anonymous-initiated sessions return 403 -> `GislMultipartSessionAuthRequiredError`.
+     * Non-existent / expired sessions return 404 -> `GislMultipartSessionNotFoundError`.
+     * Authed-but-non-owning callers return 403 -> `GislMultipartSessionOwnershipError`.
+     *
+     * TODO(HxUmVr3Y): replace hand-coded response shape on regen.
+     *
+     * @return array{
+     *     uploadId: string,
+     *     multipartUploadId: string,
+     *     cloudKey: string,
+     *     totalParts: int,
+     *     uploadedParts: list<array{partNumber:int,etag:string,sizeBytes:int,lastModified:string}>,
+     *     manifestExpiresAt: string,
+     *     recommendedChunkSize: int,
+     * }
+     */
+    public function getUploadStatus(string $uploadId): array
+    {
+        if ($uploadId === '') {
+            throw new GislError('getUploadStatus: uploadId must be a non-empty string.');
+        }
+        return $this->walkUploadStatus($uploadId);
+    }
+
+    /**
+     * Re-presign a batch of missing part numbers on an in-progress
+     * multipart session.
+     *
+     * Validates client-side BEFORE the HTTP round-trip:
+     * - `$partNumbers` non-empty
+     * - count <=100 (server raw-body cap is 8 KiB before json_decode)
+     * - every entry an integer in `[2, totalParts]` — part 1 is sealed at
+     *   initiate (re-presigning it would break the etag recorded
+     *   server-side for /complete)
+     * - entries unique
+     * - `$totalParts` <=10 000 (S3 hard limit; mirrors SDK-1)
+     *
+     * TODO(HxUmVr3Y): replace hand-coded request/response shapes on regen.
+     *
+     * @param list<int> $partNumbers
+     * @return array{
+     *     uploadId: string,
+     *     presignedUrls: list<array{partNumber:int,url:string,expiresAt:string}>,
+     * }
+     */
+    public function presignParts(string $uploadId, array $partNumbers, int $totalParts): array
+    {
+        if ($uploadId === '') {
+            throw new GislError('presignParts: uploadId must be a non-empty string.');
+        }
+        if ($totalParts < 1) {
+            throw new GislError("presignParts: totalParts must be a positive integer, got {$totalParts}.");
+        }
+        if ($totalParts > 10000) {
+            throw new GislMultipartPartCountError(
+                "presignParts: totalParts={$totalParts} exceeds the S3 10000-part multipart limit. "
+                . 'Refusing to re-presign on a session that cannot complete.',
+                $totalParts,
+                10000,
+            );
+        }
+        if ($partNumbers === []) {
+            throw new GislError('presignParts: partNumbers must be a non-empty array.');
+        }
+        if (\count($partNumbers) > 100) {
+            throw new GislError(
+                'presignParts: partNumbers has ' . \count($partNumbers)
+                . ' entries — server caps batches at 100.',
+            );
+        }
+        $seen = [];
+        foreach ($partNumbers as $n) {
+            if (!\is_int($n) || $n < 2 || $n > $totalParts) {
+                throw new GislError(
+                    "presignParts: partNumbers entry {$n} is not an integer in [2, {$totalParts}]. "
+                    . 'Part 1 is sealed at initiate; re-presigning it would invalidate the recorded '
+                    . 'etag for /complete.',
+                );
+            }
+            if (isset($seen[$n])) {
+                throw new GislError("presignParts: partNumbers contains duplicate {$n}.");
+            }
+            $seen[$n] = true;
+        }
+        $body = $this->jsonEncode(['part_numbers' => \array_values($partNumbers)]);
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/uploads/multipart/' . \rawurlencode($uploadId) . '/presign',
+            body: $this->streamFactory->createStream($body),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+
+        $resultUploadId = $data['upload_id'] ?? null;
+        $presignedRaw = $data['presigned_urls'] ?? null;
+        if (!\is_string($resultUploadId) || !\is_array($presignedRaw)) {
+            throw new GislError('presignParts: malformed response envelope.');
+        }
+        /** @var list<array{partNumber:int,url:string,expiresAt:string}> $presigned */
+        $presigned = [];
+        foreach ($presignedRaw as $entry) {
+            if (!\is_array($entry)) {
+                throw new GislError('presignParts: malformed presigned_urls entry.');
+            }
+            $partNumber = $entry['part_number'] ?? null;
+            $url = $entry['url'] ?? null;
+            $expiresAt = $entry['expires_at'] ?? null;
+            if (!\is_int($partNumber) || !\is_string($url) || !\is_string($expiresAt)) {
+                throw new GislError('presignParts: malformed presigned_urls entry fields.');
+            }
+            $presigned[] = [
+                'partNumber' => $partNumber,
+                'url' => $url,
+                'expiresAt' => $expiresAt,
+            ];
+        }
+        return [
+            'uploadId' => $resultUploadId,
+            'presignedUrls' => $presigned,
+        ];
+    }
+
+    /**
+     * Extend the manifest TTL of an in-progress multipart upload session.
+     *
+     * The durable session manifest defaults to a 48 h TTL (decoupled from
+     * the shorter presigned-URL TTL). For a long-running resume that spans
+     * days, callers SHOULD invoke `keepaliveUpload` every **12-24 h** while
+     * resuming — the 12-24 h band leaves >=24 h of slack against the 48 h
+     * ceiling even with worst-case clock skew between client and server.
+     * The server atomically refreshes the Redis EXPIRE for the manifest
+     * key; the call is idempotent.
+     *
+     * TODO(HxUmVr3Y): replace hand-coded response shape on regen.
+     *
+     * @return array{uploadId: string, manifestExpiresAt: string}
+     */
+    public function keepaliveUpload(string $uploadId): array
+    {
+        if ($uploadId === '') {
+            throw new GislError('keepaliveUpload: uploadId must be a non-empty string.');
+        }
+        // Server expects an empty body; sending '{}' keeps Content-Type:
+        // application/json symmetric with the other JSON-bodied POSTs.
+        $request = $this->buildRequest(
+            method: 'POST',
+            path: '/api/uploads/multipart/' . \rawurlencode($uploadId) . '/keepalive',
+            body: $this->streamFactory->createStream('{}'),
+            extraHeaders: ['Content-Type' => 'application/json'],
+        );
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        $resultUploadId = $data['upload_id'] ?? null;
+        $manifestExpiresAt = $data['manifest_expires_at'] ?? null;
+        if (!\is_string($resultUploadId) || !\is_string($manifestExpiresAt)) {
+            throw new GislError('keepaliveUpload: malformed response envelope.');
+        }
+        return [
+            'uploadId' => $resultUploadId,
+            'manifestExpiresAt' => $manifestExpiresAt,
+        ];
+    }
+
+    /**
+     * Private walk-pagination helper for /status. Aggregates every page
+     * into a single result. Limit pinned to 1000 (max per page) so we
+     * make the minimum number of round-trips even for the worst-case
+     * ~10 pages on a 10 000-part upload.
+     *
+     * @return array{
+     *     uploadId: string,
+     *     multipartUploadId: string,
+     *     cloudKey: string,
+     *     totalParts: int,
+     *     uploadedParts: list<array{partNumber:int,etag:string,sizeBytes:int,lastModified:string}>,
+     *     manifestExpiresAt: string,
+     *     recommendedChunkSize: int,
+     * }
+     */
+    private function walkUploadStatus(string $uploadId): array
+    {
+        $pageLimit = 1000;
+        // Slow-path DoS guard (code-reviewer minor 6). Mirrors TS reference.
+        $maxPages = 50;
+        /** @var list<array{partNumber:int,etag:string,sizeBytes:int,lastModified:string}> $collected */
+        $collected = [];
+        $cursor = 0;
+        $totalParts = 0;
+        $multipartUploadId = '';
+        $cloudKey = '';
+        $manifestExpiresAt = '';
+        $recommendedChunkSize = 0;
+        $pageCount = 0;
+
+        while (true) {
+            if ($pageCount >= $maxPages) {
+                throw new GislError(
+                    "getUploadStatus: server returned more than {$maxPages} pages — refusing to continue.",
+                );
+            }
+            $pageCount++;
+            $query = "?cursor={$cursor}&limit={$pageLimit}";
+            $path = '/api/uploads/multipart/' . \rawurlencode($uploadId) . '/status' . $query;
+            $request = $this->buildRequest(method: 'GET', path: $path);
+            /** @var array<string, mixed> $page */
+            $page = $this->sendAndUnwrap($request);
+
+            $pageTotalParts = $page['total_parts'] ?? null;
+            if (!\is_int($pageTotalParts) || $pageTotalParts < 1) {
+                throw new GislError('getUploadStatus: server page missing or invalid total_parts.');
+            }
+            $totalParts = $pageTotalParts;
+            // Strict validation discipline (code-reviewer P7): use null-default
+            // so the type-check catches a wire envelope that OMITS a required
+            // field, instead of silently coercing a missing key to '' / 0 and
+            // flowing it into MultipartCheckpointState.manifestExpiresAt.
+            $pageUploadId = $page['upload_id'] ?? null;
+            $pageMultipartUploadId = $page['multipart_upload_id'] ?? null;
+            $pageCloudKey = $page['cloud_key'] ?? null;
+            $pageManifestExpiresAt = $page['manifest_expires_at'] ?? null;
+            $pageRecommendedChunkSize = $page['recommended_chunk_size'] ?? null;
+            if (
+                !\is_string($pageUploadId) || $pageUploadId !== $uploadId
+                || !\is_string($pageMultipartUploadId) || $pageMultipartUploadId === ''
+                || !\is_string($pageCloudKey) || $pageCloudKey === ''
+                || !\is_string($pageManifestExpiresAt) || $pageManifestExpiresAt === ''
+                || !\is_int($pageRecommendedChunkSize)
+            ) {
+                throw new GislError(
+                    'getUploadStatus: server page missing required fields or returned a '
+                    . "mismatching upload_id (expected {$uploadId}, got " . \var_export($pageUploadId, true) . ').',
+                );
+            }
+            $multipartUploadId = $pageMultipartUploadId;
+            $cloudKey = $pageCloudKey;
+            $manifestExpiresAt = $pageManifestExpiresAt;
+            $recommendedChunkSize = $pageRecommendedChunkSize;
+
+            $uploadedParts = $page['uploaded_parts'] ?? [];
+            if (!\is_array($uploadedParts)) {
+                throw new GislError('getUploadStatus: server page uploaded_parts not an array.');
+            }
+            foreach ($uploadedParts as $p) {
+                if (!\is_array($p)) {
+                    throw new GislError('getUploadStatus: malformed uploaded_parts entry.');
+                }
+                $pn = $p['part_number'] ?? null;
+                $et = $p['etag'] ?? null;
+                $sb = $p['size_bytes'] ?? null;
+                $lm = $p['last_modified'] ?? null;
+                if (!\is_int($pn) || !\is_string($et) || !\is_int($sb) || !\is_string($lm)) {
+                    throw new GislError('getUploadStatus: malformed uploaded_parts entry fields.');
+                }
+                $collected[] = [
+                    'partNumber' => $pn,
+                    'etag' => $et,
+                    'sizeBytes' => $sb,
+                    'lastModified' => $lm,
+                ];
+            }
+
+            $isTruncated = $page['is_truncated'] ?? false;
+            if ($isTruncated !== true) {
+                break;
+            }
+            $nextMarker = $page['next_part_number_marker'] ?? null;
+            if (!\is_int($nextMarker) || $nextMarker <= $cursor) {
+                throw new GislError(
+                    'getUploadStatus: server is_truncated=true but next_part_number_marker '
+                    . "did not advance (was {$cursor}, got " . \var_export($nextMarker, true) . ').',
+                );
+            }
+            $cursor = $nextMarker;
+        }
+
+        \usort($collected, fn ($a, $b) => $a['partNumber'] <=> $b['partNumber']);
+
+        return [
+            'uploadId' => $uploadId,
+            'multipartUploadId' => $multipartUploadId,
+            'cloudKey' => $cloudKey,
+            'totalParts' => $totalParts,
+            'uploadedParts' => $collected,
+            'manifestExpiresAt' => $manifestExpiresAt,
+            'recommendedChunkSize' => $recommendedChunkSize,
+        ];
     }
 
     private function multipartInitiate(
@@ -1911,6 +2542,65 @@ final class GislClient
                 $statusCode,
                 $errorCode,
                 GislUploadCapExceededError::KIND_ABSOLUTE_413,
+                null,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+            );
+        }
+
+        // SDK-3 (Wb6ebOMM) resume-support endpoint error codes. API-2 / PR
+        // #283 specced these as plain ErrorEnvelope envelopes discriminated
+        // by string on `error_type`. No typed payload to build — dispatch
+        // on the (statusCode, errorType) tuple. Mirrors the TS reference
+        // (`packages/typescript/src/client.ts` handleResponse, the 4 new
+        // branches after the 413 absolute-cap one). The HxUmVr3Y contract
+        // regen will produce typed responses for these; today the 3 typed
+        // subclasses carry only the localisation triple + raw envelope.
+        if ($statusCode === 404 && $errorType === 'MULTIPART_SESSION_NOT_FOUND') {
+            throw new GislMultipartSessionNotFoundError(
+                $message,
+                $statusCode,
+                $errorCode,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+            );
+        }
+        if ($statusCode === 403 && $errorType === 'MULTIPART_SESSION_OWNERSHIP') {
+            throw new GislMultipartSessionOwnershipError(
+                $message,
+                $statusCode,
+                $errorCode,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+            );
+        }
+        if ($statusCode === 403 && $errorType === 'MULTIPART_SESSION_AUTH_REQUIRED') {
+            throw new GislMultipartSessionAuthRequiredError(
+                $message,
+                $statusCode,
+                $errorCode,
+                $decoded,
+                $messageKey,
+                $locale,
+                $messageParams,
+            );
+        }
+        // 422 `FILE_TOO_LARGE_FOR_MULTIPART` — pre-S3 capacity reject on the
+        // resume-support presign endpoint. No typed payload today; the
+        // `KIND_V2_MULTIPART` discriminant tells the caller this is the
+        // SDK-3 cap variant.
+        if ($statusCode === 422 && $errorType === 'FILE_TOO_LARGE_FOR_MULTIPART') {
+            throw new GislUploadCapExceededError(
+                $message,
+                $statusCode,
+                $errorCode,
+                GislUploadCapExceededError::KIND_V2_MULTIPART,
                 null,
                 $decoded,
                 $messageKey,
