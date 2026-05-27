@@ -30,6 +30,7 @@ use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
 use Gisl\Generated\OpenApi\Model\WorkflowCancelResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowDownloadResponse;
+use Gisl\Generated\OpenApi\Model\ProbePendingResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
 use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
@@ -53,6 +54,7 @@ use Gisl\Sdk\Errors\GislTierRestrictedError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Errors\GislUploadCapExceededError;
 use Gisl\Sdk\Errors\GislValidationError;
+use Gisl\Sdk\Errors\GislProbePendingError;
 use Gisl\Sdk\Errors\GislWorkflowExpiredError;
 use Http\Discovery\Psr17FactoryDiscovery;
 use Http\Discovery\Psr18ClientDiscovery;
@@ -2474,6 +2476,37 @@ final class GislClient
             $typed = $this->tryDeserialize(WorkflowExpiredResponse::class, $decoded);
             if ($typed instanceof WorkflowExpiredResponse && $typed->getExpiredAt() instanceof \DateTimeInterface) {
                 throw new GislWorkflowExpiredError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        // Probe-pending 422 on POST /api/workflows (per contracts av1J0rEF).
+        // Recovery: caller polls /api/uploads/{id}/probe until terminal,
+        // then retries the workflow-create. `typedPayload->getJobRef()`
+        // names which job triggered the rejection. Mirrors
+        // `packages/typescript/src/client.ts` GislProbePendingError branch.
+        if ($statusCode === 422 && $errorType === 'probe_pending') {
+            // Validate `job_ref` on the RAW wire before deserialize — the
+            // generated ObjectSerializer coerces non-string values (numeric,
+            // array) to strings, so a malformed `job_ref: 123` would pass
+            // a post-deserialize `is_string()` check as `"123"`. Pin the
+            // wire-shape integrity upstream of deserialization. (Codex r1.)
+            $rawJobRef = $decoded['job_ref'] ?? null;
+            $typed = $this->tryDeserialize(ProbePendingResponse::class, $decoded);
+            if (
+                $typed instanceof ProbePendingResponse
+                && \is_string($rawJobRef)
+                && $rawJobRef !== ''
+            ) {
+                throw new GislProbePendingError(
                     $message,
                     $statusCode,
                     $errorCode,

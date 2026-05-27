@@ -9,6 +9,7 @@ use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
 use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
 use Gisl\Generated\OpenApi\Model\FeatureViolation;
+use Gisl\Generated\OpenApi\Model\ProbePendingResponse;
 use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
 use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
@@ -20,6 +21,7 @@ use Gisl\Sdk\Errors\GislAuthError;
 use Gisl\Sdk\Errors\GislBalanceExhaustedError;
 use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
+use Gisl\Sdk\Errors\GislProbePendingError;
 use Gisl\Sdk\Errors\GislTierRestrictedError;
 use Gisl\Sdk\Errors\GislUploadCapExceededError;
 use Gisl\Sdk\Errors\GislValidationError;
@@ -296,6 +298,42 @@ final class GislClientTypedErrorsTest extends TestCase
             self::assertCount(1, $violations);
             self::assertSame('audio_watermark', $violations[0]->getFeature());
             self::assertSame('errors.feature.not_available', $e->messageKey);
+        }
+    }
+
+    public function testProbePendingDispatch(): void
+    {
+        $captured = [];
+        // 422 with error_type: probe_pending — referenced upload's
+        // server-side probe hasn't completed; caller should poll
+        // /api/uploads/{id}/probe and retry. Production trigger is on
+        // POST /api/workflows but the SDK error-dispatcher runs on every
+        // response, so getWorkflowStatus + same envelope drives the same
+        // dispatch path. j2sukTDl typed error.
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'probe_pending',
+                'message' => 'The upload for job_compress is still being probed.',
+                'message_key' => 'errors.workflow.probe_pending',
+                'locale' => 'en-GB',
+                'error_type' => 'probe_pending',
+                'job_ref' => 'job_compress',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislProbePendingError');
+        } catch (GislProbePendingError $e) {
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame('probe_pending', $e->errorCode);
+            self::assertInstanceOf(ProbePendingResponse::class, $e->typedPayload);
+            self::assertSame('job_compress', $e->typedPayload->getJobRef());
+            self::assertSame('errors.workflow.probe_pending', $e->messageKey);
         }
     }
 
