@@ -21,6 +21,16 @@ final class FixtureLoader
      * means a fixture references a method that exists in one runner but not
      * another, and that's a parity bug.
      *
+     * Ergonomic-facade verbs (`compress`/`thumbnail`/`convert`/`merge`/
+     * `watermark`/`archive`/`mapEach`/`bundle`) are deliberately NOT listed.
+     * The Invoke.php P0 seam (Bljva8nj) short-circuits them with a
+     * structured {@see \Gisl\Sdk\Errors\NotYetImplementedDispatch} ahead of
+     * the low-level dispatch switch, but no parity fixture targets those
+     * verbs YAML-side until P1+ ships actual ergonomic-fixture support
+     * (parity-infra v2 / F4). Adding them here pre-emptively would diverge
+     * from the TS allowlist; the symmetric sync lands when both languages
+     * gain fixture coverage at the same time.
+     *
      * @var list<string>
      */
     private const KNOWN_SDK_METHODS = [

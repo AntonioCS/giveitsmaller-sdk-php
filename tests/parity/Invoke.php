@@ -10,6 +10,7 @@ use Gisl\Generated\OpenApi\Model\ExternalImportRequest;
 use Gisl\Generated\OpenApi\Model\LoginUserRequest;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint;
 use Gisl\Sdk\CreditsUsageOptions;
+use Gisl\Sdk\Errors\NotYetImplementedDispatch;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
@@ -40,6 +41,36 @@ use GuzzleHttp\Psr7\HttpFactory;
  */
 final class Invoke
 {
+    /**
+     * Ergonomic-facade verbs (PHP P0 seam — Bljva8nj). Method names sourced
+     * from `docs/plans/sdk-cross-language-foundation.md` §4.10 conformance
+     * checklist. Pre-P1 these short-circuit ahead of the low-level dispatch
+     * switch with a structured {@see NotYetImplementedDispatch} per F5 §4.
+     *
+     * `archive` and `.bundle()` are kept as DISTINCT verbs even though
+     * `.bundle()` is archive sugar — they are separate dispatch verbs in
+     * the conformance checklist (plan §4.10 lines 203, 206) and a future
+     * fixture may target either.
+     *
+     * `gisl.create`, `.run`, `.submit` are deliberately NOT in this list —
+     * the first is a factory (already shipped in P1 `uNquwsVt` via
+     * {@see \Gisl\Sdk\Gisl::create()}); the latter two are chain terminals,
+     * not dispatch verbs. The terminals attach to a builder returned by an
+     * ergonomic verb and dispatch transparently via the same seam.
+     *
+     * @var array<string, string>
+     */
+    private const ERGONOMIC_METHODS = [
+        'compress' => 'lands in P2 (operation builder + .run/.submit)',
+        'thumbnail' => 'lands in P2 (operation builder + .run/.submit)',
+        'convert' => 'lands in P2 (operation builder + .run/.submit)',
+        'merge' => 'lands in P3 (merge compose model)',
+        'watermark' => 'lands in P2 (operation builder + .run/.submit)',
+        'archive' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
+        'mapEach' => 'lands in P4 (.mapEach fan-out)',
+        'bundle' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
+    ];
+
     /**
      * @param Fixture $fixture
      * @return InvokeResult
@@ -94,6 +125,20 @@ final class Invoke
     ): mixed {
         $args = $fixture->args;
         $method = $fixture->sdkMethod;
+
+        // Ergonomic-dispatch seam (P0 / Bljva8nj). Short-circuits ahead of
+        // the low-level switch with a structured LocalError per F5 §4 so
+        // fixtures targeting the ergonomic facade fail loud-and-clear while
+        // P1–P7 fill the surface incrementally. Existing low-level method
+        // dispatch is untouched: $method ∉ ERGONOMIC_METHODS falls through
+        // to the switch verbatim.
+        if (\array_key_exists($method, self::ERGONOMIC_METHODS)) {
+            throw new NotYetImplementedDispatch(
+                method: $method,
+                hint: self::ERGONOMIC_METHODS[$method],
+                metadata: ['fixture' => $fixture->name],
+            );
+        }
 
         switch ($method) {
             case 'uploadFile':
