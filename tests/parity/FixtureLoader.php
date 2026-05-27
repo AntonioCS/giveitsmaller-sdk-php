@@ -21,15 +21,22 @@ final class FixtureLoader
      * means a fixture references a method that exists in one runner but not
      * another, and that's a parity bug.
      *
-     * Ergonomic-facade verbs (`compress`/`thumbnail`/`convert`/`merge`/
-     * `watermark`/`archive`/`mapEach`/`bundle`) are deliberately NOT listed.
-     * The Invoke.php P0 seam (Bljva8nj) short-circuits them with a
-     * structured {@see \Gisl\Sdk\Errors\NotYetImplementedDispatch} ahead of
-     * the low-level dispatch switch, but no parity fixture targets those
-     * verbs YAML-side until P1+ ships actual ergonomic-fixture support
-     * (parity-infra v2 / F4). Adding them here pre-emptively would diverge
-     * from the TS allowlist; the symmetric sync lands when both languages
-     * gain fixture coverage at the same time.
+     * Ergonomic-facade verbs `compress` / `thumbnail` / `convert` were
+     * added in PHP P2 (7QXkzoIi) alongside the real ergonomic-dispatch
+     * wiring in {@see Invoke}. The TS allowlist at
+     * `packages/typescript/tests/parity/fixtures.ts` carries the symmetric
+     * addition + the matching dispatch shim in
+     * `packages/typescript/tests/parity/invoke.ts`. `watermark` / `archive`
+     * / `merge` / `mapEach` / `bundle` are deliberately STILL OMITTED:
+     *
+     *   - `watermark`: v2 `OperationType` has no bare `watermark` value
+     *     (split into `image_watermark` / `text_watermark`). Needs a
+     *     preset-style mapping → tracked alongside the preset matrix.
+     *   - `archive`: contract-modeled as MULTI-INPUT (`inputs[]`), not
+     *     compatible with the single-input `OperationBuilder` → lands
+     *     alongside P4's `.bundle()` archive sugar.
+     *   - `merge` / `mapEach` / `bundle` stay on the P0 seam (Bljva8nj)
+     *     until P3 / P4 ship.
      *
      * @var list<string>
      */
@@ -60,6 +67,11 @@ final class FixtureLoader
         'keepaliveUpload',
         // Webhook mode invokes verifyWebhook directly; not a GislClient method.
         'verifyWebhook',
+        // Ergonomic-facade verbs (PHP P2 / 7QXkzoIi). See class docblock
+        // for why `watermark` + `archive` are NOT included here yet.
+        'compress',
+        'thumbnail',
+        'convert',
     ];
 
     private const ALLOWED_REQUEST_METHODS = [

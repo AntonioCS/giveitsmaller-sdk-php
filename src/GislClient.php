@@ -108,8 +108,17 @@ use Psr\Http\Message\StreamFactoryInterface;
  * client / factories, or let php-http/discovery resolve installed
  * implementations at runtime. Tests must always inject explicit mocks so the
  * assertion surface stays deterministic.
+ *
+ * **Not `final` by design.** {@see GislErgonomicClient} extends this
+ * to add the ergonomic operation-builder factory methods (`compress` /
+ * `thumbnail` / `convert` / `watermark` / `archive`). The TS reference
+ * composes those methods via a Proxy
+ * (`packages/typescript/src/gisl.ts:102-133`); PHP has no Proxy
+ * primitive, so the seal is loosened here for a single deliberate
+ * subclass. Other downstream consumers should still treat `GislClient`
+ * as the stable low-level surface and AVOID subclassing.
  */
-final class GislClient
+class GislClient
 {
     private readonly ClientInterface $httpClient;
     private readonly RequestFactoryInterface $requestFactory;

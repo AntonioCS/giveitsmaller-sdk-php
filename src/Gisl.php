@@ -97,7 +97,7 @@ final class Gisl
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
-    ): GislClient {
+    ): GislErgonomicClient {
         return self::createInternal(
             apiKey: $apiKey,
             environment: $environment,
@@ -183,7 +183,7 @@ final class Gisl
         ?RequestFactoryInterface $requestFactory,
         ?StreamFactoryInterface $streamFactory,
         bool $allowAnonymous,
-    ): GislClient {
+    ): GislErgonomicClient {
         $resolvedBaseUrl = Credentials::resolveEndpoint(
             baseUrl: $baseUrl,
             environment: $environment,
@@ -204,7 +204,7 @@ final class Gisl
                 multipartMaxAttempts: $multipartMaxAttempts,
                 multipartRetryBaseMs: $multipartRetryBaseMs,
             );
-            return new GislClient(
+            return new GislErgonomicClient(
                 $config,
                 $httpClient,
                 $requestFactory,
@@ -248,7 +248,7 @@ final class Gisl
             multipartMaxAttempts: $multipartMaxAttempts,
             multipartRetryBaseMs: $multipartRetryBaseMs,
         );
-        return new GislClient(
+        return new GislErgonomicClient(
             $config,
             $httpClient,
             $requestFactory,

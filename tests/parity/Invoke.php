@@ -10,10 +10,14 @@ use Gisl\Generated\OpenApi\Model\ExternalImportRequest;
 use Gisl\Generated\OpenApi\Model\LoginUserRequest;
 use Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint;
 use Gisl\Sdk\CreditsUsageOptions;
+use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Gisl\Sdk\Ergonomic\RunOptions;
+use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\NotYetImplementedDispatch;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
+use Gisl\Sdk\GislErgonomicClient;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
 use Gisl\Sdk\UploadOptions;
@@ -42,33 +46,53 @@ use GuzzleHttp\Psr7\HttpFactory;
 final class Invoke
 {
     /**
-     * Ergonomic-facade verbs (PHP P0 seam — Bljva8nj). Method names sourced
-     * from `docs/plans/sdk-cross-language-foundation.md` §4.10 conformance
-     * checklist. Pre-P1 these short-circuit ahead of the low-level dispatch
-     * switch with a structured {@see NotYetImplementedDispatch} per F5 §4.
+     * Ergonomic-facade verbs still parked on the P0 seam — Bljva8nj.
      *
-     * `archive` and `.bundle()` are kept as DISTINCT verbs even though
-     * `.bundle()` is archive sugar — they are separate dispatch verbs in
-     * the conformance checklist (plan §4.10 lines 203, 206) and a future
-     * fixture may target either.
+     * Originally (P0) the full eight-verb list short-circuited here. PHP
+     * P2 (7QXkzoIi) shipped real dispatch for `compress` / `thumbnail` /
+     * `convert` only — the other five stay on the seam:
+     *
+     *   - `watermark`: v2 `OperationType` has no bare `watermark` value
+     *     (the contract split it into `image_watermark` / `text_watermark`
+     *     / planned `audio_watermark`). A real dispatch needs a preset-
+     *     style mapping that picks the right sub-op for the input MIME +
+     *     options. Codex caught this gap in P2 review.
+     *   - `archive`: contract-modeled as MULTI-INPUT (`inputs[]`),
+     *     incompatible with the single-input `OperationBuilder`. Lands
+     *     alongside P4's `.bundle()` archive sugar.
+     *   - `merge`: P3 (merge compose model).
+     *   - `mapEach`: P4 (`.mapEach` fan-out).
+     *   - `bundle`: P4 (`.bundle` archive sugar + chain cardinality).
      *
      * `gisl.create`, `.run`, `.submit` are deliberately NOT in this list —
-     * the first is a factory (already shipped in P1 `uNquwsVt` via
-     * {@see \Gisl\Sdk\Gisl::create()}); the latter two are chain terminals,
-     * not dispatch verbs. The terminals attach to a builder returned by an
-     * ergonomic verb and dispatch transparently via the same seam.
+     * the first is a factory ({@see \Gisl\Sdk\Gisl::create()}); the
+     * latter two are chain terminals, not dispatch verbs.
      *
      * @var array<string, string>
      */
     private const ERGONOMIC_METHODS = [
-        'compress' => 'lands in P2 (operation builder + .run/.submit)',
-        'thumbnail' => 'lands in P2 (operation builder + .run/.submit)',
-        'convert' => 'lands in P2 (operation builder + .run/.submit)',
+        'watermark' => 'lands alongside preset-matrix (v2 has no bare watermark op)',
+        'archive' => 'lands alongside P4 (.bundle archive — multi-input shape)',
         'merge' => 'lands in P3 (merge compose model)',
-        'watermark' => 'lands in P2 (operation builder + .run/.submit)',
-        'archive' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
         'mapEach' => 'lands in P4 (.mapEach fan-out)',
         'bundle' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
+    ];
+
+    /**
+     * Ergonomic-facade verbs WIRED in PHP P2 (7QXkzoIi). The dispatch
+     * shape: $args = [bytesValue, options?, terminal?] where `terminal`
+     * is either `{run: {maxWait, useSSE?, pollIntervalMs?}}` or
+     * `{submit: {webhook}}`. Default terminal when omitted is
+     * `{submit: {webhook: 'https://example.com/webhook'}}` — picked so
+     * a fixture exercising only the upload+create wire shape doesn't
+     * also need to assert the full run-orchestration flow.
+     *
+     * @var list<string>
+     */
+    private const ERGONOMIC_DISPATCH_VERBS = [
+        'compress',
+        'thumbnail',
+        'convert',
     ];
 
     /**
@@ -89,7 +113,11 @@ final class Invoke
             // sequential in v0.x anyway but the config field is recorded.
             multipartConcurrency: 1,
         );
-        $client = new GislClient(
+        // Construct the ergonomic subclass so ergonomic-verb dispatch
+        // (PHP P2 / 7QXkzoIi) can reach `$client->compress(...)` etc.
+        // GislErgonomicClient is-a GislClient — every low-level case in
+        // {@see Invoke::dispatch()} continues to work unchanged.
+        $client = new GislErgonomicClient(
             config: $config,
             httpClient: $stub,
             requestFactory: $factory,
@@ -126,12 +154,27 @@ final class Invoke
         $args = $fixture->args;
         $method = $fixture->sdkMethod;
 
+        // Ergonomic-dispatch — PHP P2 (7QXkzoIi) wires real dispatch for
+        // compress/thumbnail/convert/watermark/archive via
+        // {@see GislErgonomicClient}. The remaining verbs in
+        // ERGONOMIC_METHODS (merge/mapEach/bundle) stay on the P0 seam
+        // (Bljva8nj). Existing low-level method dispatch is untouched.
+        if (\in_array($method, self::ERGONOMIC_DISPATCH_VERBS, true)) {
+            if (!$client instanceof GislErgonomicClient) {
+                // Should be unreachable — Invoke::run() always constructs
+                // a GislErgonomicClient. Defensive guard so a future
+                // refactor that swaps in a bare GislClient surfaces here
+                // rather than at the magic-call site.
+                throw new \LogicException(
+                    "Ergonomic verb \"{$method}\" requires a GislErgonomicClient; got " . \get_class($client),
+                );
+            }
+            return self::dispatchErgonomic($client, $method, $args, $fixture, $tempFiles);
+        }
+
         // Ergonomic-dispatch seam (P0 / Bljva8nj). Short-circuits ahead of
-        // the low-level switch with a structured LocalError per F5 §4 so
-        // fixtures targeting the ergonomic facade fail loud-and-clear while
-        // P1–P7 fill the surface incrementally. Existing low-level method
-        // dispatch is untouched: $method ∉ ERGONOMIC_METHODS falls through
-        // to the switch verbatim.
+        // the low-level switch with a structured LocalError per F5 §4 for
+        // verbs still parked (merge/mapEach/bundle).
         if (\array_key_exists($method, self::ERGONOMIC_METHODS)) {
             throw new NotYetImplementedDispatch(
                 method: $method,
@@ -365,6 +408,119 @@ final class Invoke
         }
 
         throw new \RuntimeException("Invoke: unsupported method \"{$method}\" for fixture {$fixture->name}");
+    }
+
+    /**
+     * Dispatch an ergonomic verb (PHP P2 / 7QXkzoIi).
+     *
+     * Fixture-arg shape: `[bytesValue, optionsMap?, terminalMap?]`.
+     *  - `bytesValue`: standard `{kind: 'bytes', source, value, filename?, content-type?}`.
+     *  - `optionsMap`: the per-op options (e.g. `{quality: 75, format: 'webp'}`); defaults to `[]`.
+     *  - `terminalMap`: ONE of `{submit: {webhook}}` or `{run: {maxWait, useSSE?, pollIntervalMs?}}`.
+     *                   Defaults to `{submit: {webhook: 'https://example.com/webhook'}}` so a
+     *                   fixture exercising only the upload+create wire shape doesn't also
+     *                   need to drive the full run orchestration.
+     *
+     * @param list<mixed>  $args
+     * @param list<string> $tempFiles
+     */
+    private static function dispatchErgonomic(
+        GislErgonomicClient $client,
+        string $method,
+        array $args,
+        Fixture $fixture,
+        array &$tempFiles,
+    ): mixed {
+        $first = $args[0] ?? null;
+        if (!\is_array($first) || ($first['kind'] ?? null) !== 'bytes') {
+            throw new \RuntimeException("ergonomic fixture {$fixture->name}: first arg must be a bytes value");
+        }
+        /** @var array<string, mixed> $first */
+        $bytes = BytesDecoder::decode($first, $fixture->absolutePath);
+        $filename = isset($first['filename']) ? (string) $first['filename'] : 'fixture.bin';
+        $tempPath = self::writeTemp($bytes, $filename);
+        $tempFiles[] = $tempPath;
+
+        /** @var array<string, mixed> $opOptions */
+        $opOptions = [];
+        if (isset($args[1])) {
+            if (!\is_array($args[1])) {
+                throw new \RuntimeException("ergonomic fixture {$fixture->name}: args[1] (options) must be a mapping or omitted");
+            }
+            /** @var array<string, mixed> $opOptions */
+            $opOptions = $args[1];
+        }
+
+        /** @var array<string, mixed> $terminal */
+        $terminal = ['submit' => ['webhook' => 'https://example.com/webhook']];
+        if (isset($args[2])) {
+            if (!\is_array($args[2])) {
+                throw new \RuntimeException("ergonomic fixture {$fixture->name}: args[2] (terminal) must be a mapping or omitted");
+            }
+            /** @var array<string, mixed> $terminal */
+            $terminal = $args[2];
+        }
+
+        $builder = self::buildErgonomicBuilder($client, $method, $tempPath, $opOptions);
+        return self::invokeErgonomicTerminal($builder, $terminal, $fixture->name);
+    }
+
+    /**
+     * @param array<string, mixed> $opOptions
+     */
+    private static function buildErgonomicBuilder(
+        GislErgonomicClient $client,
+        string $method,
+        string $input,
+        array $opOptions,
+    ): OperationBuilder {
+        return match ($method) {
+            'compress' => $client->compress($input, $opOptions),
+            'thumbnail' => $client->thumbnail($input, $opOptions),
+            'convert' => $client->convert($input, $opOptions),
+            default => throw new \LogicException("Unreachable: unsupported ergonomic verb \"{$method}\""),
+        };
+    }
+
+    /**
+     * @param array<string, mixed> $terminal
+     */
+    private static function invokeErgonomicTerminal(
+        OperationBuilder $builder,
+        array $terminal,
+        string $fixtureName,
+    ): mixed {
+        if (isset($terminal['submit'])) {
+            if (!\is_array($terminal['submit'])) {
+                throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal.submit must be a mapping");
+            }
+            /** @var array<string, mixed> $submitMap */
+            $submitMap = $terminal['submit'];
+            $webhook = (string) ($submitMap['webhook'] ?? '');
+            if ($webhook === '') {
+                throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal.submit.webhook must be a non-empty string");
+            }
+            return $builder->submit(new SubmitOptions(webhook: $webhook));
+        }
+        if (isset($terminal['run'])) {
+            if (!\is_array($terminal['run'])) {
+                throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal.run must be a mapping");
+            }
+            /** @var array<string, mixed> $runMap */
+            $runMap = $terminal['run'];
+            $maxWait = $runMap['maxWait'] ?? null;
+            if (!\is_string($maxWait) && !\is_int($maxWait)) {
+                throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal.run.maxWait must be a string or int");
+            }
+            $useSSE = isset($runMap['useSSE']) ? (bool) $runMap['useSSE'] : true;
+            $pollIntervalMs = isset($runMap['pollIntervalMs']) ? (int) $runMap['pollIntervalMs'] : null;
+            return $builder->run(new RunOptions(
+                maxWait: $maxWait,
+                useSSE: $useSSE,
+                pollIntervalMs: $pollIntervalMs,
+            ));
+        }
+        throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal must declare exactly one of 'run' or 'submit'");
     }
 
     /**

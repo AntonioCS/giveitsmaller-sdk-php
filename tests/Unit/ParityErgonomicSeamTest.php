@@ -15,41 +15,44 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Exercises the PHP P0 parity-adapter ergonomic-dispatch seam (Bljva8nj).
+ * Exercises the parity-adapter ergonomic-dispatch seam.
  *
- * The seam itself lives in {@see Invoke::run()} → `dispatch()` (parity dir,
- * not src/). The error class under test ({@see NotYetImplementedDispatch})
- * is in src/Errors/ so any future LocalError emitter that filters on
- * `instanceof GislError` picks it up — covered by the hierarchy assertion
- * in {@see ParityErgonomicSeamTest::test_extends_gisl_error_hierarchy()}.
+ * Originally (P0 / Bljva8nj) eight verbs short-circuited here. PHP P2
+ * (7QXkzoIi) shipped real dispatch for `compress` / `thumbnail` /
+ * `convert` / `watermark` / `archive` — those are exercised by the
+ * unit tests under `Tests/Unit/Ergonomic/` and by the new parity
+ * fixture `op_ergonomic_compress_submit.yaml`. The three verbs still
+ * parked on the seam (`merge` / `mapEach` / `bundle`) keep coverage
+ * here until P3 / P4 ship them.
  *
- * Fixtures are SYNTHESIZED here directly rather than loaded from YAML —
- * {@see \Gisl\Sdk\Tests\Parity\FixtureLoader} deliberately rejects
- * ergonomic verbs on its allowlist (parity with TS) until parity-infra v2
- * / F4 lands fixture-side ergonomic admittance. The seam itself is loader-
- * independent so synthesizing covers the P0 contract end-to-end through
- * `Invoke::run()`.
+ * The seam itself lives in {@see Invoke::run()} → `dispatch()` (parity
+ * dir, not src/). The error class under test
+ * ({@see NotYetImplementedDispatch}) is in src/Errors/ so any future
+ * LocalError emitter that filters on `instanceof GislError` picks it up.
+ *
+ * Seam-targeted fixtures are SYNTHESIZED directly rather than loaded
+ * from YAML — `FixtureLoader::KNOWN_SDK_METHODS` does not list the
+ * still-parked verbs (it lists the five P2-wired verbs alongside the
+ * low-level methods). The seam itself is loader-independent so
+ * synthesising covers the contract end-to-end through `Invoke::run()`.
  */
 #[CoversClass(NotYetImplementedDispatch::class)]
 final class ParityErgonomicSeamTest extends TestCase
 {
     /**
-     * Every ergonomic verb listed in `docs/plans/sdk-cross-language-foundation.md`
-     * §4.10 short-circuits the dispatch with a structured error. If a new
-     * verb lands in `Invoke::ERGONOMIC_METHODS`, add a row here so the
-     * surface is exhaustively asserted.
+     * Every ergonomic verb still parked on the seam (i.e. NOT yet wired
+     * end-to-end in {@see Invoke}). Post-PHP-P2 (7QXkzoIi) only `merge`,
+     * `mapEach`, and `bundle` remain — P3 ships `merge`, P4 ships the
+     * other two.
      *
      * @return array<string, array{string}>
      */
     public static function ergonomicMethodProvider(): array
     {
         return [
-            'compress' => ['compress'],
-            'thumbnail' => ['thumbnail'],
-            'convert' => ['convert'],
-            'merge' => ['merge'],
             'watermark' => ['watermark'],
             'archive' => ['archive'],
+            'merge' => ['merge'],
             'mapEach' => ['mapEach'],
             'bundle' => ['bundle'],
         ];
@@ -149,7 +152,9 @@ final class ParityErgonomicSeamTest extends TestCase
 
     public function test_error_metadata_carries_fixture_name(): void
     {
-        $fixture = self::synthesizeFixture('custom_fixture_label', 'compress');
+        // Uses a still-parked verb (`merge`) so the seam fires; the
+        // P2-wired verbs (compress/etc.) no longer reach this code path.
+        $fixture = self::synthesizeFixture('custom_fixture_label', 'merge');
         $result = Invoke::run($fixture, new StubPsr18Client([], null));
 
         $this->assertInstanceOf(NotYetImplementedDispatch::class, $result->thrown);
@@ -189,7 +194,10 @@ final class ParityErgonomicSeamTest extends TestCase
             name: 'webhook_ordering_pin',
             description: 'pins webhook short-circuit precedes ergonomic guard',
             mode: Fixture::MODE_WEBHOOK,
-            sdkMethod: 'compress',
+            // Use a still-parked verb so the assertion fires meaningfully —
+            // a wired verb (compress/etc.) would reach the P2 dispatch
+            // path rather than the seam, masking the ordering intent.
+            sdkMethod: 'merge',
             args: [],
             requests: [],
             responses: [],
@@ -226,7 +234,10 @@ final class ParityErgonomicSeamTest extends TestCase
             name: 'ergonomic_with_garbage_args',
             description: 'malformed args do not bypass the seam',
             mode: Fixture::MODE_REQUEST_RESPONSE,
-            sdkMethod: 'compress',
+            // Still-parked verb keeps this test asserting the seam path;
+            // a P2-wired verb would surface a different failure mode (an
+            // argument-validation error rather than the seam throw).
+            sdkMethod: 'merge',
             args: [new \stdClass(), ['nested' => ['junk' => null]], 'a string in the wrong slot'],
             requests: [],
             responses: [],
@@ -246,7 +257,7 @@ final class ParityErgonomicSeamTest extends TestCase
         );
         /** @var NotYetImplementedDispatch $err */
         $err = $result->thrown;
-        $this->assertSame('compress', $err->method);
+        $this->assertSame('merge', $err->method);
     }
 
     /**
@@ -261,9 +272,30 @@ final class ParityErgonomicSeamTest extends TestCase
         /** @var array<string, string> $methods */
         $methods = $reflection->getReflectionConstant('ERGONOMIC_METHODS')->getValue();
         $this->assertSame(
-            ['compress', 'thumbnail', 'convert', 'merge', 'watermark', 'archive', 'mapEach', 'bundle'],
+            ['watermark', 'archive', 'merge', 'mapEach', 'bundle'],
             \array_keys($methods),
-            'ERGONOMIC_METHODS keyset drifted — update or revert if intentional.',
+            'ERGONOMIC_METHODS keyset drifted — update or revert if intentional. '
+            . 'Post-PHP-P2 (7QXkzoIi) only these five verbs remain parked: '
+            . 'watermark+archive (deferred to preset/multi-input work), '
+            . 'merge (P3), mapEach+bundle (P4).',
+        );
+    }
+
+    /**
+     * Pins the symmetric companion list: verbs the dispatch path
+     * actually wires end-to-end via {@see Invoke::dispatchErgonomic()}.
+     * A typo or a regression that moves a verb back to the seam shows
+     * up here as a single-place assertion break.
+     */
+    public function test_ergonomic_dispatch_verbs_keyset_is_stable(): void
+    {
+        $reflection = new \ReflectionClass(Invoke::class);
+        /** @var list<string> $verbs */
+        $verbs = $reflection->getReflectionConstant('ERGONOMIC_DISPATCH_VERBS')->getValue();
+        $this->assertSame(
+            ['compress', 'thumbnail', 'convert'],
+            $verbs,
+            'ERGONOMIC_DISPATCH_VERBS keyset drifted — these are the PHP P2 wired verbs.',
         );
     }
 

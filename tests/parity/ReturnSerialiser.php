@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Tests\Parity;
 
 use Gisl\Generated\OpenApi\ObjectSerializer;
+use Gisl\Sdk\Ergonomic\Handle;
+use Gisl\Sdk\Ergonomic\Result;
 use Gisl\Sdk\GetSchemaHitResult;
 use Gisl\Sdk\GetSchemaNotModifiedResult;
 use Gisl\Sdk\GislSseEvent;
@@ -67,6 +69,15 @@ final class ReturnSerialiser
         }
         if ($value instanceof GislSseEvent) {
             return ['event' => $value->event, 'data' => $value->data];
+        }
+        // Ergonomic-layer wrappers (PHP P2 / 7QXkzoIi). Their `toArray()`
+        // projections already emit camelCase keys with absent-optional keys
+        // dropped — the comparator can compare directly.
+        if ($value instanceof Handle) {
+            return $value->toArray();
+        }
+        if ($value instanceof Result) {
+            return $value->toArray();
         }
 
         if ($value === null || \is_scalar($value)) {
