@@ -24,6 +24,10 @@ use GuzzleHttp\Psr7\HttpFactory;
  * Maps a {@see Fixture} to the right {@see GislClient} (or {@see Webhook})
  * call.
  *
+ * PHP reference implementation of the parity adapter contract
+ * (F5 / MZWsS0qs). See `docs/sdks/parity-adapter-contract.md` for the
+ * language-neutral interface every adapter implements.
+ *
  * Mirrors `packages/typescript/tests/parity/invoke.ts`. The argument shape
  * for each method is fixed across runners: a fixture that authors
  * `args: [<email + password mapping>]` MUST resolve to the same call
