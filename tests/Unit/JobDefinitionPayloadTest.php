@@ -87,75 +87,30 @@ final class JobDefinitionPayloadTest extends TestCase
         );
     }
 
-    public function testToWireEmitsSkipCompressionAsSnakeCaseWhenTrue(): void
+    public function testToWireOptsOutOfCompressionViaOperationsWithoutCompress(): void
     {
-        // Convert PDF -> PNG fan-out per ADR-0009 §D2: chains that don't
-        // terminate in `compress` must set skipCompression so the server
-        // doesn't reject at Job::validateChainOrdering.
+        // Per contracts api.yaml POST /api/workflows description + ADR-0004:
+        // V2 has no skip_compression flag — operations[] IS the chain. A job
+        // opts out of compression by sending an explicit non-empty
+        // operations[] that omits compress. Mirrors the TS unit test.
         $job = new JobDefinitionPayload(
             operations: [new OperationDef(type: 'convert', options: ['format' => 'png', 'pages' => '1-3'])],
             id: 'pdf_to_pngs',
             source: Sources::upload('upl_pdf'),
-            skipCompression: true,
-        );
-
-        $wire = $job->toWire();
-        self::assertArrayHasKey('skip_compression', $wire);
-        self::assertTrue($wire['skip_compression']);
-        // Snake-case key on the wire — mirrors the API constraint at
-        // JobDefinitionConstraint.php:68.
-        self::assertArrayNotHasKey('skipCompression', $wire);
-    }
-
-    public function testToWireEmitsSkipCompressionFalseExplicitly(): void
-    {
-        // false is distinct from null: false explicitly opts INTO the
-        // chain-ordering gate, null omits the field (server defaults to
-        // false per JobDefinition.php:20 default).
-        $job = new JobDefinitionPayload(
-            operations: [new OperationDef(type: 'compress')],
-            source: Sources::upload('upl_a'),
-            skipCompression: false,
-        );
-
-        $wire = $job->toWire();
-        self::assertArrayHasKey('skip_compression', $wire);
-        self::assertFalse($wire['skip_compression']);
-    }
-
-    public function testToWireOmitsSkipCompressionWhenNull(): void
-    {
-        $job = new JobDefinitionPayload(
-            operations: [new OperationDef(type: 'compress')],
-            source: Sources::upload('upl_a'),
         );
 
         $wire = $job->toWire();
         self::assertArrayNotHasKey('skip_compression', $wire);
-    }
-
-    public function testToWireEmitsSkipCompressionAlongsideMultiInputInputs(): void
-    {
-        // skip_compression is structurally orthogonal to source vs inputs.
-        // Pin: the emit branch must run regardless of which source shape
-        // the job uses, so a multi-input merge chain skipping the compress
-        // gate also lands on the wire correctly.
-        $job = new JobDefinitionPayload(
-            operations: [new OperationDef(type: 'merge', options: ['format' => 'pdf'])],
-            id: 'merge_without_compress',
-            inputs: [
-                ['source' => Sources::upload('upl_a')],
-                ['source' => Sources::upload('upl_b')],
+        self::assertSame(
+            [
+                'id' => 'pdf_to_pngs',
+                'source' => ['type' => 'upload', 'file_id' => 'upl_pdf'],
+                'operations' => [
+                    ['type' => 'convert', 'options' => ['format' => 'png', 'pages' => '1-3']],
+                ],
             ],
-            skipCompression: true,
+            $wire,
         );
-
-        $wire = $job->toWire();
-        self::assertArrayHasKey('inputs', $wire);
-        self::assertCount(2, $wire['inputs']);
-        self::assertArrayNotHasKey('source', $wire);
-        self::assertArrayHasKey('skip_compression', $wire);
-        self::assertTrue($wire['skip_compression']);
     }
 
     public function testOperationDefToWireOmitsNullOptions(): void
