@@ -14,7 +14,13 @@ namespace Gisl\Sdk\Errors;
  * `GislValidationError` for both); PHP needs a distinct class so the
  * server-side typed-payload subclass below can inherit from
  * {@see GislApiError} without colliding with the client-side guard.
+ *
+ * Subclassable: {@see GislMissingCredentialsError} and
+ * {@see GislFeatureRequiresAuthError} extend this class so callers
+ * catching `GislConfigError` for local configuration failures also catch
+ * those two specialised cases. Mirrors the TS hierarchy
+ * (`packages/typescript/src/errors.ts:386-417`).
  */
-final class GislConfigError extends GislError
+class GislConfigError extends GislError
 {
 }
