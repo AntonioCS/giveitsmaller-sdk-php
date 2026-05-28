@@ -73,7 +73,6 @@ final class Invoke
     private const ERGONOMIC_METHODS = [
         'watermark' => 'lands alongside preset-matrix (v2 has no bare watermark op)',
         'archive' => 'lands alongside P4 (.bundle archive — multi-input shape)',
-        'merge' => 'lands in P3 (merge compose model)',
         'mapEach' => 'lands in P4 (.mapEach fan-out)',
         'bundle' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
     ];
@@ -93,6 +92,32 @@ final class Invoke
         'compress',
         'thumbnail',
         'convert',
+    ];
+
+    /**
+     * Multi-input ergonomic verbs WIRED in PHP P3 (dxIeLVbP). Dispatch
+     * shape diverges from the single-input verbs above:
+     *
+     *   $args = [
+     *     [<assetEntry>, <assetEntry>, ...],     // args[0] — declared assets
+     *     <mergeOptions>|null,                   // args[1] — MergeOptions map (default {})
+     *     [<seqEntry>, <seqEntry>, ...]|null,    // args[2] — sequence (null = declared order)
+     *     <terminal>|null,                       // args[3] — {run|submit} (default submit-webhook)
+     *   ]
+     *
+     * Each `<assetEntry>` is either:
+     *   - a bytes value `{kind: bytes, ...}` — materialised to a temp
+     *     file and wrapped as `Merge::asset($tempPath)`
+     *   - `{kind: handle, fileId: <uuid>}` — wrapped as `Merge::handle($fileId)`
+     *
+     * Each `<seqEntry>` is `{asset: <int>, options?: <map>}` where `asset`
+     * is the index into `args[0]`. Bare asset entry: omit `options`.
+     * Clip entry: include `options`.
+     *
+     * @var list<string>
+     */
+    private const ERGONOMIC_MULTI_INPUT_VERBS = [
+        'merge',
     ];
 
     /**
@@ -155,10 +180,10 @@ final class Invoke
         $method = $fixture->sdkMethod;
 
         // Ergonomic-dispatch — PHP P2 (7QXkzoIi) wires real dispatch for
-        // compress/thumbnail/convert/watermark/archive via
-        // {@see GislErgonomicClient}. The remaining verbs in
-        // ERGONOMIC_METHODS (merge/mapEach/bundle) stay on the P0 seam
-        // (Bljva8nj). Existing low-level method dispatch is untouched.
+        // compress/thumbnail/convert; PHP P3 (dxIeLVbP) adds merge via
+        // ERGONOMIC_MULTI_INPUT_VERBS. The remaining verbs in
+        // ERGONOMIC_METHODS (watermark/archive/mapEach/bundle) stay on
+        // the P0 seam (Bljva8nj). Low-level method dispatch is untouched.
         if (\in_array($method, self::ERGONOMIC_DISPATCH_VERBS, true)) {
             if (!$client instanceof GislErgonomicClient) {
                 // Should be unreachable — Invoke::run() always constructs
@@ -172,9 +197,18 @@ final class Invoke
             return self::dispatchErgonomic($client, $method, $args, $fixture, $tempFiles);
         }
 
+        if (\in_array($method, self::ERGONOMIC_MULTI_INPUT_VERBS, true)) {
+            if (!$client instanceof GislErgonomicClient) {
+                throw new \LogicException(
+                    "Ergonomic multi-input verb \"{$method}\" requires a GislErgonomicClient; got " . \get_class($client),
+                );
+            }
+            return self::dispatchErgonomicMultiInput($client, $method, $args, $fixture, $tempFiles);
+        }
+
         // Ergonomic-dispatch seam (P0 / Bljva8nj). Short-circuits ahead of
         // the low-level switch with a structured LocalError per F5 §4 for
-        // verbs still parked (merge/mapEach/bundle).
+        // verbs still parked (watermark/archive/mapEach/bundle).
         if (\array_key_exists($method, self::ERGONOMIC_METHODS)) {
             throw new NotYetImplementedDispatch(
                 method: $method,
@@ -521,6 +555,228 @@ final class Invoke
             ));
         }
         throw new \RuntimeException("ergonomic fixture {$fixtureName}: terminal must declare exactly one of 'run' or 'submit'");
+    }
+
+    /**
+     * Multi-input ergonomic dispatch — currently `merge` only (PHP P3 /
+     * dxIeLVbP). See {@see ERGONOMIC_MULTI_INPUT_VERBS} for the args
+     * shape. Each bytes asset is materialised to its own temp file +
+     * tracked in `$tempFiles` for caller-side cleanup.
+     *
+     * @param list<mixed>  $args
+     * @param list<string> $tempFiles
+     */
+    private static function dispatchErgonomicMultiInput(
+        GislErgonomicClient $client,
+        string $method,
+        array $args,
+        Fixture $fixture,
+        array &$tempFiles,
+    ): mixed {
+        $assetsRaw = $args[0] ?? null;
+        if (!\is_array($assetsRaw) || !\array_is_list($assetsRaw) || \count($assetsRaw) === 0) {
+            throw new \RuntimeException(
+                "ergonomic multi-input fixture {$fixture->name}: args[0] must be a non-empty list of asset entries",
+            );
+        }
+
+        /** @var list<\Gisl\Sdk\Ergonomic\Asset> $assets */
+        $assets = [];
+        foreach ($assetsRaw as $idx => $entry) {
+            if (!\is_array($entry)) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixture->name}: args[0][{$idx}] must be a mapping",
+                );
+            }
+            $kind = $entry['kind'] ?? null;
+            if ($kind === 'bytes') {
+                /** @var array<string, mixed> $entry */
+                $bytes = BytesDecoder::decode($entry, $fixture->absolutePath);
+                $filename = isset($entry['filename']) ? (string) $entry['filename'] : "fixture_{$idx}.bin";
+                $tempPath = self::writeTemp($bytes, $filename);
+                $tempFiles[] = $tempPath;
+                $assets[] = \Gisl\Sdk\Ergonomic\Merge::asset($tempPath);
+            } elseif ($kind === 'handle') {
+                $fileId = isset($entry['fileId']) ? (string) $entry['fileId'] : '';
+                if ($fileId === '') {
+                    throw new \RuntimeException(
+                        "ergonomic multi-input fixture {$fixture->name}: args[0][{$idx}] handle requires non-empty fileId",
+                    );
+                }
+                $assets[] = \Gisl\Sdk\Ergonomic\Merge::handle($fileId);
+            } else {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixture->name}: args[0][{$idx}].kind must be 'bytes' or 'handle' (got " . var_export($kind, true) . ')',
+                );
+            }
+        }
+
+        $mergeOptions = self::buildMergeOptions($args[1] ?? null, $fixture->name);
+
+        $builder = match ($method) {
+            'merge' => $client->merge($assets, $mergeOptions),
+            default => throw new \LogicException("Unreachable: unsupported multi-input verb \"{$method}\""),
+        };
+
+        if (\array_key_exists(2, $args) && $args[2] !== null) {
+            if (!\is_array($args[2])) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixture->name}: args[2] (sequence) must be a list or null",
+                );
+            }
+            /** @var list<mixed> $sequenceRaw */
+            $sequenceRaw = $args[2];
+            $entries = self::buildSequenceEntries($sequenceRaw, $assets, $fixture->name);
+            $builder->sequence($entries);
+        }
+
+        /** @var array<string, mixed> $terminal */
+        $terminal = ['submit' => ['webhook' => 'https://example.com/webhook']];
+        if (\array_key_exists(3, $args) && $args[3] !== null) {
+            if (!\is_array($args[3])) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixture->name}: args[3] (terminal) must be a mapping or null",
+                );
+            }
+            /** @var array<string, mixed> $terminal */
+            $terminal = $args[3];
+        }
+
+        return self::invokeMergeTerminal($builder, $terminal, $fixture->name);
+    }
+
+    private static function buildMergeOptions(mixed $raw, string $fixtureName): \Gisl\Sdk\Ergonomic\MergeOptions
+    {
+        if ($raw === null) {
+            return new \Gisl\Sdk\Ergonomic\MergeOptions();
+        }
+        if (!\is_array($raw)) {
+            throw new \RuntimeException(
+                "ergonomic multi-input fixture {$fixtureName}: args[1] (options) must be a mapping or null",
+            );
+        }
+        /** @var array<string, mixed> $raw */
+        $mediaKind = isset($raw['mediaKind']) ? (string) $raw['mediaKind'] : null;
+        if ($mediaKind !== null && !\in_array($mediaKind, ['video', 'audio', 'image'], true)) {
+            throw new \RuntimeException(
+                "ergonomic multi-input fixture {$fixtureName}: args[1].mediaKind must be 'video'|'audio'|'image' (got '{$mediaKind}')",
+            );
+        }
+        $targetSize = $raw['targetSize'] ?? null;
+        if ($targetSize !== null && !\is_int($targetSize) && !\is_string($targetSize)) {
+            throw new \RuntimeException(
+                "ergonomic multi-input fixture {$fixtureName}: args[1].targetSize must be int|string|null",
+            );
+        }
+        return new \Gisl\Sdk\Ergonomic\MergeOptions(
+            transition: isset($raw['transition']) ? (string) $raw['transition'] : null,
+            crossfadeDuration: isset($raw['crossfadeDuration']) ? (float) $raw['crossfadeDuration'] : null,
+            gapDuration: isset($raw['gapDuration']) ? (float) $raw['gapDuration'] : null,
+            normalizeAudio: isset($raw['normalizeAudio']) ? (bool) $raw['normalizeAudio'] : null,
+            codec: isset($raw['codec']) ? (string) $raw['codec'] : null,
+            crf: isset($raw['crf']) ? (int) $raw['crf'] : null,
+            preset: isset($raw['preset']) ? (string) $raw['preset'] : null,
+            targetSize: $targetSize,
+            transitionDuration: isset($raw['transitionDuration']) ? (float) $raw['transitionDuration'] : null,
+            fps: isset($raw['fps']) ? (float) $raw['fps'] : null,
+            durationPerImage: isset($raw['durationPerImage']) ? (float) $raw['durationPerImage'] : null,
+            loopCount: isset($raw['loopCount']) ? (int) $raw['loopCount'] : null,
+            output: isset($raw['output']) ? (string) $raw['output'] : null,
+            videoFormat: isset($raw['videoFormat']) ? (string) $raw['videoFormat'] : null,
+            outputType: isset($raw['outputType']) ? (string) $raw['outputType'] : null,
+            mediaKind: $mediaKind,
+            allowUnusedAssets: isset($raw['allowUnusedAssets']) ? (bool) $raw['allowUnusedAssets'] : false,
+        );
+    }
+
+    /**
+     * @param list<mixed>                          $rawEntries
+     * @param list<\Gisl\Sdk\Ergonomic\Asset>      $assets
+     * @return list<\Gisl\Sdk\Ergonomic\Asset|\Gisl\Sdk\Ergonomic\ClipEntry>
+     */
+    private static function buildSequenceEntries(array $rawEntries, array $assets, string $fixtureName): array
+    {
+        $entries = [];
+        foreach ($rawEntries as $idx => $entry) {
+            if (!\is_array($entry)) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixtureName}: sequence[{$idx}] must be a mapping",
+                );
+            }
+            if (!isset($entry['asset']) || !\is_int($entry['asset'])) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixtureName}: sequence[{$idx}].asset must be an int index into args[0]",
+                );
+            }
+            $assetIdx = $entry['asset'];
+            if (!isset($assets[$assetIdx])) {
+                throw new \RuntimeException(
+                    "ergonomic multi-input fixture {$fixtureName}: sequence[{$idx}].asset index {$assetIdx} is out of range (declared " . \count($assets) . ' assets)',
+                );
+            }
+            $asset = $assets[$assetIdx];
+            if (\array_key_exists('options', $entry) && $entry['options'] !== null) {
+                if (!\is_array($entry['options'])) {
+                    throw new \RuntimeException(
+                        "ergonomic multi-input fixture {$fixtureName}: sequence[{$idx}].options must be a mapping or null",
+                    );
+                }
+                /** @var array<string, mixed> $optsRaw */
+                $optsRaw = $entry['options'];
+                $entries[] = \Gisl\Sdk\Ergonomic\Merge::clip(
+                    $asset,
+                    new \Gisl\Sdk\Ergonomic\ClipOptions(
+                        transition: isset($optsRaw['transition']) ? (string) $optsRaw['transition'] : null,
+                        crossfadeDuration: isset($optsRaw['crossfadeDuration']) ? (float) $optsRaw['crossfadeDuration'] : null,
+                        gapDuration: isset($optsRaw['gapDuration']) ? (float) $optsRaw['gapDuration'] : null,
+                    ),
+                );
+            } else {
+                $entries[] = $asset;
+            }
+        }
+        return $entries;
+    }
+
+    /**
+     * @param array<string, mixed> $terminal
+     */
+    private static function invokeMergeTerminal(
+        \Gisl\Sdk\Ergonomic\MergeBuilder $builder,
+        array $terminal,
+        string $fixtureName,
+    ): mixed {
+        if (isset($terminal['submit'])) {
+            if (!\is_array($terminal['submit'])) {
+                throw new \RuntimeException("ergonomic multi-input fixture {$fixtureName}: terminal.submit must be a mapping");
+            }
+            /** @var array<string, mixed> $submitMap */
+            $submitMap = $terminal['submit'];
+            $webhook = (string) ($submitMap['webhook'] ?? '');
+            if ($webhook === '') {
+                throw new \RuntimeException("ergonomic multi-input fixture {$fixtureName}: terminal.submit.webhook must be a non-empty string");
+            }
+            return $builder->submit(new SubmitOptions(webhook: $webhook));
+        }
+        if (isset($terminal['run'])) {
+            if (!\is_array($terminal['run'])) {
+                throw new \RuntimeException("ergonomic multi-input fixture {$fixtureName}: terminal.run must be a mapping");
+            }
+            /** @var array<string, mixed> $runMap */
+            $runMap = $terminal['run'];
+            $maxWait = $runMap['maxWait'] ?? null;
+            if (!\is_string($maxWait) && !\is_int($maxWait)) {
+                throw new \RuntimeException("ergonomic multi-input fixture {$fixtureName}: terminal.run.maxWait must be a string or int");
+            }
+            $useSSE = isset($runMap['useSSE']) ? (bool) $runMap['useSSE'] : true;
+            $pollIntervalMs = isset($runMap['pollIntervalMs']) ? (int) $runMap['pollIntervalMs'] : null;
+            return $builder->run(new RunOptions(
+                maxWait: $maxWait,
+                useSSE: $useSSE,
+                pollIntervalMs: $pollIntervalMs,
+            ));
+        }
+        throw new \RuntimeException("ergonomic multi-input fixture {$fixtureName}: terminal must declare exactly one of 'run' or 'submit'");
     }
 
     /**

@@ -23,11 +23,12 @@ final class FixtureLoader
      *
      * Ergonomic-facade verbs `compress` / `thumbnail` / `convert` were
      * added in PHP P2 (7QXkzoIi) alongside the real ergonomic-dispatch
-     * wiring in {@see Invoke}. The TS allowlist at
+     * wiring in {@see Invoke}. PHP P3 (dxIeLVbP) added `merge` via the
+     * new multi-input dispatch path. The TS allowlist at
      * `packages/typescript/tests/parity/fixtures.ts` carries the symmetric
-     * addition + the matching dispatch shim in
+     * additions + the matching dispatch shims in
      * `packages/typescript/tests/parity/invoke.ts`. `watermark` / `archive`
-     * / `merge` / `mapEach` / `bundle` are deliberately STILL OMITTED:
+     * / `mapEach` / `bundle` are deliberately STILL OMITTED:
      *
      *   - `watermark`: v2 `OperationType` has no bare `watermark` value
      *     (split into `image_watermark` / `text_watermark`). Needs a
@@ -35,8 +36,7 @@ final class FixtureLoader
      *   - `archive`: contract-modeled as MULTI-INPUT (`inputs[]`), not
      *     compatible with the single-input `OperationBuilder` → lands
      *     alongside P4's `.bundle()` archive sugar.
-     *   - `merge` / `mapEach` / `bundle` stay on the P0 seam (Bljva8nj)
-     *     until P3 / P4 ship.
+     *   - `mapEach` / `bundle` stay on the P0 seam (Bljva8nj) until P4 ships.
      *
      * @var list<string>
      */
@@ -72,6 +72,8 @@ final class FixtureLoader
         'compress',
         'thumbnail',
         'convert',
+        // Multi-input ergonomic verbs (PHP P3 / dxIeLVbP).
+        'merge',
     ];
 
     private const ALLOWED_REQUEST_METHODS = [

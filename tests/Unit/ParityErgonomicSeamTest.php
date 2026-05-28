@@ -19,11 +19,11 @@ use PHPUnit\Framework\TestCase;
  *
  * Originally (P0 / Bljva8nj) eight verbs short-circuited here. PHP P2
  * (7QXkzoIi) shipped real dispatch for `compress` / `thumbnail` /
- * `convert` / `watermark` / `archive` — those are exercised by the
- * unit tests under `Tests/Unit/Ergonomic/` and by the new parity
- * fixture `op_ergonomic_compress_submit.yaml`. The three verbs still
- * parked on the seam (`merge` / `mapEach` / `bundle`) keep coverage
- * here until P3 / P4 ship them.
+ * `convert`; PHP P3 (dxIeLVbP) shipped `merge` via the multi-input
+ * dispatch path. Those wired verbs are exercised by the unit tests
+ * under `Tests/Unit/Ergonomic/` and by the parity fixtures. The four
+ * verbs still parked on the seam (`watermark` / `archive` / `mapEach`
+ * / `bundle`) keep coverage here until P4+ ship them.
  *
  * The seam itself lives in {@see Invoke::run()} → `dispatch()` (parity
  * dir, not src/). The error class under test
@@ -41,9 +41,10 @@ final class ParityErgonomicSeamTest extends TestCase
 {
     /**
      * Every ergonomic verb still parked on the seam (i.e. NOT yet wired
-     * end-to-end in {@see Invoke}). Post-PHP-P2 (7QXkzoIi) only `merge`,
-     * `mapEach`, and `bundle` remain — P3 ships `merge`, P4 ships the
-     * other two.
+     * end-to-end in {@see Invoke}). Post-PHP-P3 (dxIeLVbP) `merge`
+     * shipped via the multi-input dispatch path, leaving four on the
+     * seam — `watermark`/`archive` for the preset+multi-input work
+     * downstream of P5+, `mapEach`/`bundle` for P4.
      *
      * @return array<string, array{string}>
      */
@@ -52,7 +53,6 @@ final class ParityErgonomicSeamTest extends TestCase
         return [
             'watermark' => ['watermark'],
             'archive' => ['archive'],
-            'merge' => ['merge'],
             'mapEach' => ['mapEach'],
             'bundle' => ['bundle'],
         ];
@@ -152,9 +152,10 @@ final class ParityErgonomicSeamTest extends TestCase
 
     public function test_error_metadata_carries_fixture_name(): void
     {
-        // Uses a still-parked verb (`merge`) so the seam fires; the
-        // P2-wired verbs (compress/etc.) no longer reach this code path.
-        $fixture = self::synthesizeFixture('custom_fixture_label', 'merge');
+        // Uses a still-parked verb (`mapEach`) so the seam fires; the
+        // P2/P3-wired verbs (compress/merge/etc.) no longer reach this
+        // code path.
+        $fixture = self::synthesizeFixture('custom_fixture_label', 'mapEach');
         $result = Invoke::run($fixture, new StubPsr18Client([], null));
 
         $this->assertInstanceOf(NotYetImplementedDispatch::class, $result->thrown);
@@ -166,14 +167,14 @@ final class ParityErgonomicSeamTest extends TestCase
     public function test_error_message_names_method_and_hint(): void
     {
         $err = new NotYetImplementedDispatch(
-            method: 'merge',
-            hint: 'lands in P3 (merge compose model)',
+            method: 'mapEach',
+            hint: 'lands in P4 (.mapEach fan-out)',
         );
 
-        $this->assertStringContainsString('merge', $err->getMessage());
+        $this->assertStringContainsString('mapEach', $err->getMessage());
         // Don't pin the literal P-card number — `ERGONOMIC_METHODS` may
         // renumber as the plan shifts. The hint substring is stable.
-        $this->assertStringContainsString('merge compose model', $err->getMessage());
+        $this->assertStringContainsString('mapEach fan-out', $err->getMessage());
     }
 
     /**
@@ -195,9 +196,10 @@ final class ParityErgonomicSeamTest extends TestCase
             description: 'pins webhook short-circuit precedes ergonomic guard',
             mode: Fixture::MODE_WEBHOOK,
             // Use a still-parked verb so the assertion fires meaningfully —
-            // a wired verb (compress/etc.) would reach the P2 dispatch
-            // path rather than the seam, masking the ordering intent.
-            sdkMethod: 'merge',
+            // a wired verb (compress/merge/etc.) would reach the P2/P3
+            // dispatch paths rather than the seam, masking the ordering
+            // intent.
+            sdkMethod: 'mapEach',
             args: [],
             requests: [],
             responses: [],
@@ -235,9 +237,9 @@ final class ParityErgonomicSeamTest extends TestCase
             description: 'malformed args do not bypass the seam',
             mode: Fixture::MODE_REQUEST_RESPONSE,
             // Still-parked verb keeps this test asserting the seam path;
-            // a P2-wired verb would surface a different failure mode (an
-            // argument-validation error rather than the seam throw).
-            sdkMethod: 'merge',
+            // a P2/P3-wired verb would surface a different failure mode
+            // (an argument-validation error rather than the seam throw).
+            sdkMethod: 'mapEach',
             args: [new \stdClass(), ['nested' => ['junk' => null]], 'a string in the wrong slot'],
             requests: [],
             responses: [],
@@ -257,7 +259,7 @@ final class ParityErgonomicSeamTest extends TestCase
         );
         /** @var NotYetImplementedDispatch $err */
         $err = $result->thrown;
-        $this->assertSame('merge', $err->method);
+        $this->assertSame('mapEach', $err->method);
     }
 
     /**
@@ -272,12 +274,29 @@ final class ParityErgonomicSeamTest extends TestCase
         /** @var array<string, string> $methods */
         $methods = $reflection->getReflectionConstant('ERGONOMIC_METHODS')->getValue();
         $this->assertSame(
-            ['watermark', 'archive', 'merge', 'mapEach', 'bundle'],
+            ['watermark', 'archive', 'mapEach', 'bundle'],
             \array_keys($methods),
             'ERGONOMIC_METHODS keyset drifted — update or revert if intentional. '
-            . 'Post-PHP-P2 (7QXkzoIi) only these five verbs remain parked: '
+            . 'Post-PHP-P3 (dxIeLVbP) only these four verbs remain parked: '
             . 'watermark+archive (deferred to preset/multi-input work), '
-            . 'merge (P3), mapEach+bundle (P4).',
+            . 'mapEach+bundle (P4).',
+        );
+    }
+
+    /**
+     * Pins the multi-input dispatch keyset added in PHP P3 (dxIeLVbP).
+     * Currently only `merge` lives here; future multi-input verbs
+     * (`bundle`/`archive` once they ship) would join.
+     */
+    public function test_ergonomic_multi_input_verbs_keyset_is_stable(): void
+    {
+        $reflection = new \ReflectionClass(Invoke::class);
+        /** @var list<string> $verbs */
+        $verbs = $reflection->getReflectionConstant('ERGONOMIC_MULTI_INPUT_VERBS')->getValue();
+        $this->assertSame(
+            ['merge'],
+            $verbs,
+            'ERGONOMIC_MULTI_INPUT_VERBS keyset drifted — `merge` is the only PHP P3 wired multi-input verb.',
         );
     }
 

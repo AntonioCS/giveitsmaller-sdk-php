@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk;
 
+use Gisl\Sdk\Ergonomic\Asset;
+use Gisl\Sdk\Ergonomic\Merge;
+use Gisl\Sdk\Ergonomic\MergeBuilder;
+use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
 
 /**
@@ -52,7 +56,33 @@ class GislErgonomicClient extends GislClient
         return new OperationBuilder($this, 'convert', $input, $options);
     }
 
-    // `watermark()` and `archive()` factories are NOT shipped in P2.
+    /**
+     * Multi-input merge compose. PHP P3 / dxIeLVbP. Mirrors the TS
+     * reference `client.merge(...assets, options?)` at
+     * `packages/typescript/src/gisl.ts:115-128` — PHP collapses the
+     * variadic+last-arg-options TS idiom into an explicit array + named
+     * options arg (matches the rest of the SDK's signature shape).
+     *
+     * Bare strings are auto-wrapped via {@see Merge::asset()}; pre-uploaded
+     * file_ids enter the asset set via {@see Merge::handle()}. See the
+     * {@see MergeBuilder} docblock for wire-truth boundaries per media kind.
+     *
+     * @param list<Asset|string> $assets Declared assets (paths or handles).
+     *                                   At least 2 are required at run/submit;
+     *                                   image/audio/video kind is inferred from
+     *                                   the first asset's path unless
+     *                                   {@see MergeOptions::$mediaKind} is set.
+     */
+    public function merge(array $assets, ?MergeOptions $options = null): MergeBuilder
+    {
+        $coerced = [];
+        foreach ($assets as $a) {
+            $coerced[] = $a instanceof Asset ? $a : Merge::asset($a);
+        }
+        return new MergeBuilder($this, $coerced, $options ?? new MergeOptions());
+    }
+
+    // `watermark()` and `archive()` factories are NOT shipped in P2/P3.
     //
     // - `watermark`: the v2 `OperationType` enum has NO bare `watermark`
     //   value — the contract split it into `image_watermark` /
