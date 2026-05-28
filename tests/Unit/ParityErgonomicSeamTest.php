@@ -20,10 +20,12 @@ use PHPUnit\Framework\TestCase;
  * Originally (P0 / Bljva8nj) eight verbs short-circuited here. PHP P2
  * (7QXkzoIi) shipped real dispatch for `compress` / `thumbnail` /
  * `convert`; PHP P3 (dxIeLVbP) shipped `merge` via the multi-input
- * dispatch path. Those wired verbs are exercised by the unit tests
- * under `Tests/Unit/Ergonomic/` and by the parity fixtures. The four
- * verbs still parked on the seam (`watermark` / `archive` / `mapEach`
- * / `bundle`) keep coverage here until P4+ ship them.
+ * dispatch path; PHP P4 (`OMuSCt7y`) unparked `mapEach` (callable on
+ * `OperationBuilder` returning a {@see \Gisl\Sdk\Ergonomic\MapEachBuilder}
+ * scaffold). Those wired verbs are exercised by the unit tests under
+ * `Tests/Unit/Ergonomic/` and by the parity fixtures. Three verbs
+ * remain parked on the seam (`watermark` / `archive` / `bundle`) — see
+ * `ergonomicMethodProvider` docblock for the per-verb deferral cards.
  *
  * The seam itself lives in {@see Invoke::run()} → `dispatch()` (parity
  * dir, not src/). The error class under test
@@ -42,9 +44,13 @@ final class ParityErgonomicSeamTest extends TestCase
     /**
      * Every ergonomic verb still parked on the seam (i.e. NOT yet wired
      * end-to-end in {@see Invoke}). Post-PHP-P3 (dxIeLVbP) `merge`
-     * shipped via the multi-input dispatch path, leaving four on the
-     * seam — `watermark`/`archive` for the preset+multi-input work
-     * downstream of P5+, `mapEach`/`bundle` for P4.
+     * shipped via the multi-input dispatch path; PHP P4 (`OMuSCt7y`)
+     * unparked `mapEach` (callable via `OperationBuilder::mapEach()` →
+     * {@see \Gisl\Sdk\Ergonomic\MapEachBuilder} scaffold, with the
+     * KNOWN LIMITATION still documented on the class). Three verbs
+     * remain parked — `watermark`/`archive` for preset+multi-input
+     * downstream of P5+, `bundle` for `wpHoJhuo` (P4b — single-workflow
+     * `.mapEach().bundle()` per `docs/plans/sdk-ergonomics/lowering.md`).
      *
      * @return array<string, array{string}>
      */
@@ -53,7 +59,6 @@ final class ParityErgonomicSeamTest extends TestCase
         return [
             'watermark' => ['watermark'],
             'archive' => ['archive'],
-            'mapEach' => ['mapEach'],
             'bundle' => ['bundle'],
         ];
     }
@@ -152,10 +157,10 @@ final class ParityErgonomicSeamTest extends TestCase
 
     public function test_error_metadata_carries_fixture_name(): void
     {
-        // Uses a still-parked verb (`mapEach`) so the seam fires; the
-        // P2/P3-wired verbs (compress/merge/etc.) no longer reach this
-        // code path.
-        $fixture = self::synthesizeFixture('custom_fixture_label', 'mapEach');
+        // Uses a still-parked verb (`bundle`) so the seam fires; the
+        // P2/P3/P4-wired verbs (compress/merge/mapEach/etc.) no longer
+        // reach this code path.
+        $fixture = self::synthesizeFixture('custom_fixture_label', 'bundle');
         $result = Invoke::run($fixture, new StubPsr18Client([], null));
 
         $this->assertInstanceOf(NotYetImplementedDispatch::class, $result->thrown);
@@ -167,14 +172,14 @@ final class ParityErgonomicSeamTest extends TestCase
     public function test_error_message_names_method_and_hint(): void
     {
         $err = new NotYetImplementedDispatch(
-            method: 'mapEach',
-            hint: 'lands in P4 (.mapEach fan-out)',
+            method: 'bundle',
+            hint: 'lands in wpHoJhuo (P4b — single-workflow .mapEach().bundle())',
         );
 
-        $this->assertStringContainsString('mapEach', $err->getMessage());
+        $this->assertStringContainsString('bundle', $err->getMessage());
         // Don't pin the literal P-card number — `ERGONOMIC_METHODS` may
         // renumber as the plan shifts. The hint substring is stable.
-        $this->assertStringContainsString('mapEach fan-out', $err->getMessage());
+        $this->assertStringContainsString('single-workflow .mapEach().bundle()', $err->getMessage());
     }
 
     /**
@@ -196,10 +201,10 @@ final class ParityErgonomicSeamTest extends TestCase
             description: 'pins webhook short-circuit precedes ergonomic guard',
             mode: Fixture::MODE_WEBHOOK,
             // Use a still-parked verb so the assertion fires meaningfully —
-            // a wired verb (compress/merge/etc.) would reach the P2/P3
-            // dispatch paths rather than the seam, masking the ordering
-            // intent.
-            sdkMethod: 'mapEach',
+            // a wired verb (compress/merge/mapEach/etc.) would reach the
+            // P2/P3/P4 dispatch paths rather than the seam, masking the
+            // ordering intent.
+            sdkMethod: 'bundle',
             args: [],
             requests: [],
             responses: [],
@@ -237,9 +242,9 @@ final class ParityErgonomicSeamTest extends TestCase
             description: 'malformed args do not bypass the seam',
             mode: Fixture::MODE_REQUEST_RESPONSE,
             // Still-parked verb keeps this test asserting the seam path;
-            // a P2/P3-wired verb would surface a different failure mode
-            // (an argument-validation error rather than the seam throw).
-            sdkMethod: 'mapEach',
+            // a P2/P3/P4-wired verb would surface a different failure
+            // mode (an argument-validation error rather than the seam throw).
+            sdkMethod: 'bundle',
             args: [new \stdClass(), ['nested' => ['junk' => null]], 'a string in the wrong slot'],
             requests: [],
             responses: [],
@@ -259,7 +264,7 @@ final class ParityErgonomicSeamTest extends TestCase
         );
         /** @var NotYetImplementedDispatch $err */
         $err = $result->thrown;
-        $this->assertSame('mapEach', $err->method);
+        $this->assertSame('bundle', $err->method);
     }
 
     /**
@@ -274,12 +279,12 @@ final class ParityErgonomicSeamTest extends TestCase
         /** @var array<string, string> $methods */
         $methods = $reflection->getReflectionConstant('ERGONOMIC_METHODS')->getValue();
         $this->assertSame(
-            ['watermark', 'archive', 'mapEach', 'bundle'],
+            ['watermark', 'archive', 'bundle'],
             \array_keys($methods),
             'ERGONOMIC_METHODS keyset drifted — update or revert if intentional. '
-            . 'Post-PHP-P3 (dxIeLVbP) only these four verbs remain parked: '
+            . 'Post-PHP-P4 (OMuSCt7y) only these three verbs remain parked: '
             . 'watermark+archive (deferred to preset/multi-input work), '
-            . 'mapEach+bundle (P4).',
+            . 'bundle (wpHoJhuo / P4b — single-workflow .mapEach().bundle()).',
         );
     }
 

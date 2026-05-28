@@ -72,9 +72,8 @@ final class Invoke
      */
     private const ERGONOMIC_METHODS = [
         'watermark' => 'lands alongside preset-matrix (v2 has no bare watermark op)',
-        'archive' => 'lands alongside P4 (.bundle archive — multi-input shape)',
-        'mapEach' => 'lands in P4 (.mapEach fan-out)',
-        'bundle' => 'lands in P4 (.bundle archive sugar + chain cardinality)',
+        'archive' => 'lands alongside wpHoJhuo (P4b — single-workflow .bundle archive sugar)',
+        'bundle' => 'lands in wpHoJhuo (P4b — single-workflow .mapEach().bundle() per lowering.md:381-394)',
     ];
 
     /**

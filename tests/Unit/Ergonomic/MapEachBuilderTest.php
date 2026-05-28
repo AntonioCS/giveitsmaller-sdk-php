@@ -78,4 +78,20 @@ final class MapEachBuilderTest extends TestCase
 
         $this->assertInstanceOf(MapEachBuilder::class, $mapEach);
     }
+
+    public function test_mapEach_constructor_rejects_non_callable_fn(): void
+    {
+        // P4 (OMuSCt7y) re-scope — mapEach is no longer parked in the
+        // ERGONOMIC_METHODS short-circuit; the scaffold is the public
+        // surface today. Pins the constructor guard: a non-callable fn
+        // must fail at construction, BEFORE any orchestration begins.
+        $client = GislErgonomicClientFactoryTestHelper::client();
+        $parent = $client->compress('/tmp/x', ['quality' => 80]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('MapEachBuilder fn must be callable');
+
+        // @phpstan-ignore-next-line — deliberately passing a non-callable to verify the guard.
+        new MapEachBuilder($parent, 'not-a-callable-value');
+    }
 }
