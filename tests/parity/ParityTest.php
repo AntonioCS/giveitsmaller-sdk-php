@@ -53,8 +53,9 @@ final class ParityTest extends TestCase
     private const KNOWN_DIVERGENCES = [
         // The PHP SDK hardcodes `Content-Type: application/octet-stream` for
         // the multipart `file` part in `singleShotUpload` / `multipartUpload`
-        // (`packages/php/src/GislClient.php:1994`, :2034). The TS reference
+        // (`packages/php/src/GislClient.php:2864`, :2904). The TS reference
         // forwards the caller's Blob.type. Fixture pins `text/plain`.
+        // See packages/php/tests/parity/KNOWN_DIVERGENCES.md (Trello RWWBYklu).
         'upload_small' =>
             'PHP SDK hardcodes Content-Type=application/octet-stream on the multipart file part; '
             . 'TS forwards Blob.type. Real divergence — file follow-up card to forward caller type.',
@@ -62,8 +63,10 @@ final class ParityTest extends TestCase
         // Generated `MultipartInitiateResponse::setRecommendedChunkSize`
         // rejects values below the 16 MiB minimum (raised 5 MiB -> 16 MiB by
         // CON-1 / contracts z4GDTUMx, ADR-0011). The fixtures pin small chunk
-        // sizes (~2 MB) so the binary payload stays compact, mirroring the TS
-        // runner which doesn't validate wire responses on hydrate.
+        // sizes (~2 MB) so the binary payload stays compact — a sub-contract
+        // value BOTH SDKs reject (the TS runner now enforces the same
+        // contract-range guard and skips the same 3 fixtures).
+        // See packages/php/tests/parity/KNOWN_DIVERGENCES.md (Trello 09eNib6R).
         'upload_multipart' =>
             'Generated MultipartInitiateResponse setter rejects recommendedChunkSize<16MiB '
             . '(CON-1/ADR-0011 raised the floor 5MiB->16MiB); '
