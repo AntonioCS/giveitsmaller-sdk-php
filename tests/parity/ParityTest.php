@@ -100,6 +100,10 @@ final class ParityTest extends TestCase
             $this->runWebhook($fixture);
             return;
         }
+        if ($fixture->mode === Fixture::MODE_LOCAL_VALIDATION_ERROR) {
+            $this->runLocalValidationError($fixture);
+            return;
+        }
 
         $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
         $result = Invoke::run($fixture, $stub);
@@ -108,6 +112,76 @@ final class ParityTest extends TestCase
         } finally {
             $result->cleanup();
         }
+    }
+
+    /**
+     * F4-A — mode=local_validation_error. The SDK is expected to throw
+     * BEFORE any HTTP call. Stub installed with empty response queue so
+     * a regression that DOES leak a request fails loudly.
+     */
+    private function runLocalValidationError(Fixture $fixture): void
+    {
+        $stub = new StubPsr18Client([], $fixture->absolutePath);
+        $result = Invoke::run($fixture, $stub);
+        try {
+            $captured = $stub->captured();
+            $this->assertCount(
+                0,
+                $captured,
+                "[{$fixture->name}] mode=local_validation_error must not issue any HTTP calls",
+            );
+            $this->assertNotNull(
+                $result->thrown,
+                "[{$fixture->name}] mode=local_validation_error expected the SDK to throw, but no error was caught",
+            );
+            if ($fixture->localValidationError !== null && $result->thrown !== null) {
+                $issues = Comparator::compareLocalValidationError(
+                    $fixture->localValidationError,
+                    $this->projectLocalValidationError($result->thrown),
+                );
+                $this->assertSame(
+                    [],
+                    $issues,
+                    "[{$fixture->name}] localValidationError parity failure:\n  - " . \implode("\n  - ", $issues),
+                );
+            }
+        } finally {
+            $result->cleanup();
+        }
+    }
+
+    /**
+     * Project a caught Throwable into the comparable
+     * `{category, code, conflictingFields, message}` shape T4b's
+     * GislConfigError exposes. Unknown error types fall back to
+     * category=unknown so the comparator can surface the mismatch
+     * cleanly.
+     *
+     * @return array<string, mixed>
+     */
+    private function projectLocalValidationError(\Throwable $thrown): array
+    {
+        // GislConfigError + subclasses are the only validation-category
+        // local errors today (T4b — packages/php/src/Errors/).
+        if ($thrown instanceof \Gisl\Sdk\Errors\GislConfigError) {
+            $out = [
+                'category' => 'validation',
+                'message' => $thrown->getMessage(),
+            ];
+            $reason = \method_exists($thrown, 'getReason') ? $thrown->getReason() : null;
+            if ($reason !== null) {
+                $out['code'] = $reason;
+            }
+            $fields = \method_exists($thrown, 'getConflictingFields') ? $thrown->getConflictingFields() : null;
+            if ($fields !== null) {
+                $out['conflictingFields'] = $fields;
+            }
+            return $out;
+        }
+        return [
+            'category' => 'unknown',
+            'message' => $thrown->getMessage(),
+        ];
     }
 
     private function runWebhook(Fixture $fixture): void
@@ -152,23 +226,88 @@ final class ParityTest extends TestCase
             return;
         }
 
-        if (!$fixture->hasExpectedReturn) {
-            return;
+        // Return-value comparison is conditional, NOT an early return — a
+        // fixture may pin only the v2 assertion blocks below (resolvedOptions
+        // / omittedFromWire) without an expected_return. Mirrors the TS
+        // reference (parity.test.ts), where absent expected_return skips the
+        // return compare but still runs the v2 checks.
+        if ($fixture->hasExpectedReturn) {
+            $observed = $fixture->mode === Fixture::MODE_SSE
+                ? $result->returnValue
+                : ReturnSerialiser::serialise($result->returnValue);
+
+            $returnIssues = Comparator::compareReturn(
+                $fixture->expectedReturn,
+                $observed,
+                'expected_return',
+            );
+            $this->assertSame(
+                [],
+                $returnIssues,
+                "[{$fixture->name}] return parity failure:\n  - " . \implode("\n  - ", $returnIssues),
+            );
         }
 
-        $observed = $fixture->mode === Fixture::MODE_SSE
-            ? $result->returnValue
-            : ReturnSerialiser::serialise($result->returnValue);
+        // F4-A — v2 assertion blocks. Additive on top of the wire+return
+        // comparisons, and run regardless of hasExpectedReturn. Skipped for
+        // v1 fixtures (loader rejects these blocks on v1).
+        if ($fixture->resolvedOptions !== null) {
+            $resolvedIssues = Comparator::compareResolvedOptions(
+                $fixture->resolvedOptions,
+                $this->projectResolvedOptions($result->returnValue),
+            );
+            $this->assertSame(
+                [],
+                $resolvedIssues,
+                "[{$fixture->name}] resolvedOptions parity failure:\n  - " . \implode("\n  - ", $resolvedIssues),
+            );
+        }
+        if ($fixture->omittedFromWire !== null && \count($fixture->omittedFromWire) > 0) {
+            $omittedIssues = Comparator::compareOmittedFromWire(
+                $fixture->omittedFromWire,
+                $stub->captured(),
+            );
+            $this->assertSame(
+                [],
+                $omittedIssues,
+                "[{$fixture->name}] omittedFromWire parity failure:\n  - " . \implode("\n  - ", $omittedIssues),
+            );
+        }
+    }
 
-        $returnIssues = Comparator::compareReturn(
-            $fixture->expectedReturn,
-            $observed,
-            'expected_return',
-        );
-        $this->assertSame(
-            [],
-            $returnIssues,
-            "[{$fixture->name}] return parity failure:\n  - " . \implode("\n  - ", $returnIssues),
-        );
+    /**
+     * Project the PHP ergonomic `Result` shape into the comparator's
+     * expected `{preset, applied, sources, presetVersion, presetConfigHash}`
+     * mapping. Returns null when the return value carries no
+     * resolvedOptions (non-ergonomic methods, error paths).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function projectResolvedOptions(mixed $returnValue): ?array
+    {
+        if (!\is_object($returnValue)) {
+            return null;
+        }
+        if (!\property_exists($returnValue, 'resolvedOptions')) {
+            return null;
+        }
+        $resolved = $returnValue->resolvedOptions;
+        if ($resolved === null) {
+            return null;
+        }
+        if (\is_array($resolved)) {
+            return $resolved;
+        }
+        if (!\is_object($resolved)) {
+            return null;
+        }
+        // PHP ResolvedOptions DTO → array via get_object_vars; nested
+        // sources object similarly projected so the comparator sees a
+        // pure mapping shape.
+        $arr = \get_object_vars($resolved);
+        if (isset($arr['sources']) && \is_object($arr['sources'])) {
+            $arr['sources'] = \get_object_vars($arr['sources']);
+        }
+        return $arr;
     }
 }

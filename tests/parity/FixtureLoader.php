@@ -86,6 +86,12 @@ final class FixtureLoader
         Fixture::MODE_REQUEST_RESPONSE,
         Fixture::MODE_SSE,
         Fixture::MODE_WEBHOOK,
+        Fixture::MODE_LOCAL_VALIDATION_ERROR,
+    ];
+
+    private const ALLOWED_SCHEMA_VERSIONS = [
+        Fixture::SCHEMA_VERSION_V1,
+        Fixture::SCHEMA_VERSION_V2,
     ];
 
     /**
@@ -197,6 +203,18 @@ final class FixtureLoader
                 );
             }
         }
+        if ($mode === Fixture::MODE_LOCAL_VALIDATION_ERROR) {
+            if (\count($requests) !== 0 || \count($responses) !== 0) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=local_validation_error must declare zero requests + zero responses",
+                );
+            }
+            if (!\array_key_exists('localValidationError', $raw)) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=local_validation_error requires a localValidationError block",
+                );
+            }
+        }
 
         $webhook = null;
         if ($mode === Fixture::MODE_WEBHOOK) {
@@ -236,6 +254,90 @@ final class FixtureLoader
         $expectedReturn = $hasExpectedReturn ? $raw['expected_return'] : null;
         $expectsError = ($raw['expects_error'] ?? false) === true;
 
+        // F4-A — schema-version discrimination + v2 assertion blocks.
+        // PHP loader is naturally tolerant of unknown top-level keys; the
+        // schema-version branch here is enforcement, not gatekeeping. v2
+        // blocks on a v1 fixture are an authoring mistake.
+        $schemaVersion = Fixture::SCHEMA_VERSION_V1;
+        if (\array_key_exists('fixtureSchemaVersion', $raw)) {
+            $rawVersion = $raw['fixtureSchemaVersion'];
+            if (!\is_string($rawVersion) || !\in_array($rawVersion, self::ALLOWED_SCHEMA_VERSIONS, true)) {
+                throw new \RuntimeException(
+                    "[{$base}] fixtureSchemaVersion must be '1.0.0' or '2.0.0'",
+                );
+            }
+            $schemaVersion = $rawVersion;
+        }
+        $hasV2Block =
+            \array_key_exists('resolvedOptions', $raw)
+            || \array_key_exists('omittedFromWire', $raw)
+            || \array_key_exists('localValidationError', $raw);
+        if ($schemaVersion === Fixture::SCHEMA_VERSION_V1 && $hasV2Block) {
+            throw new \RuntimeException(
+                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError) require fixtureSchemaVersion: '2.0.0'",
+            );
+        }
+        if ($mode === Fixture::MODE_LOCAL_VALIDATION_ERROR && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
+            throw new \RuntimeException(
+                "[{$base}] mode='local_validation_error' requires fixtureSchemaVersion: '2.0.0'",
+            );
+        }
+
+        // Use array_key_exists (NOT isset) so an explicit `resolvedOptions:
+        // null` is rejected rather than silently treated as absent — isset()
+        // returns false on null, which would pass the v2-block gate above
+        // (which uses array_key_exists) yet skip the assertion. The TS loader
+        // enters validation on `!== undefined` and throws on null, so PHP must
+        // too or the two runners diverge on the same fixture.
+        $resolvedOptions = null;
+        if (\array_key_exists('resolvedOptions', $raw)) {
+            if (!\is_array($raw['resolvedOptions']) || \array_is_list($raw['resolvedOptions'])) {
+                throw new \RuntimeException("[{$base}] resolvedOptions must be a mapping");
+            }
+            /** @var array<string, mixed> $resolvedOptions */
+            $resolvedOptions = $raw['resolvedOptions'];
+        }
+
+        $omittedFromWire = null;
+        if (\array_key_exists('omittedFromWire', $raw)) {
+            if (!\is_array($raw['omittedFromWire']) || !\array_is_list($raw['omittedFromWire'])) {
+                throw new \RuntimeException(
+                    "[{$base}] omittedFromWire must be a sequence of strings",
+                );
+            }
+            foreach ($raw['omittedFromWire'] as $idx => $field) {
+                if (!\is_string($field) || $field === '') {
+                    throw new \RuntimeException(
+                        "[{$base}] omittedFromWire[{$idx}] must be a non-empty string",
+                    );
+                }
+            }
+            /** @var list<string> $omittedFromWire */
+            $omittedFromWire = $raw['omittedFromWire'];
+        }
+
+        $localValidationError = null;
+        if (\array_key_exists('localValidationError', $raw)) {
+            if (!\is_array($raw['localValidationError']) || \array_is_list($raw['localValidationError'])) {
+                throw new \RuntimeException(
+                    "[{$base}] localValidationError must be a mapping",
+                );
+            }
+            /** @var array<string, mixed> $localValidationError */
+            $localValidationError = $raw['localValidationError'];
+            $category = $localValidationError['category'] ?? null;
+            if ($category !== 'validation' && $category !== 'config') {
+                throw new \RuntimeException(
+                    "[{$base}] localValidationError.category must be 'validation' or 'config'",
+                );
+            }
+            if (!isset($localValidationError['code']) || !\is_string($localValidationError['code']) || $localValidationError['code'] === '') {
+                throw new \RuntimeException(
+                    "[{$base}] localValidationError.code must be a non-empty string",
+                );
+            }
+        }
+
         return new Fixture(
             name: $name,
             description: $description,
@@ -249,7 +351,24 @@ final class FixtureLoader
             webhook: $webhook,
             expectsError: $expectsError,
             absolutePath: $file,
+            schemaVersion: $schemaVersion,
+            resolvedOptions: $resolvedOptions,
+            omittedFromWire: $omittedFromWire,
+            localValidationError: $localValidationError,
         );
+    }
+
+    /**
+     * Load and validate one fixture by absolute path. F4-A — exposed so
+     * the (future) F4-B conformance meta-tests can load named fixtures
+     * without scanning the whole directory.
+     *
+     * @param string $absolutePath
+     */
+    public static function loadByPath(string $absolutePath): Fixture
+    {
+        $raw = Yaml::parseFile($absolutePath);
+        return self::validate($raw, $absolutePath);
     }
 
     /**

@@ -686,4 +686,182 @@ final class Comparator
         }
         return false;
     }
+
+    // -----------------------------------------------------------------
+    // F4-A (C45ogrGx) — v2 assertion-block comparators.
+    // -----------------------------------------------------------------
+
+    private const PRESET_CONFIG_HASH_RE = '/^sha256:[0-9a-f]{64}$/';
+
+    /**
+     * @param array<string, mixed> $expected Fixture-side resolvedOptions block.
+     * @param array<string, mixed>|null $actual  Adapter-side captured projection.
+     * @return list<string>
+     */
+    public static function compareResolvedOptions(array $expected, ?array $actual, string $path = 'resolvedOptions'): array
+    {
+        if ($actual === null) {
+            return ["{$path}: expected resolvedOptions but result carried none"];
+        }
+        $issues = [];
+        $expectedPreset = $expected['preset'] ?? null;
+        $actualPreset = $actual['preset'] ?? null;
+        if ($expectedPreset !== $actualPreset) {
+            $issues[] = "{$path}.preset: expected " . \json_encode($expectedPreset) . ', got ' . \json_encode($actualPreset);
+        }
+        $expectedVersion = $expected['presetVersion'] ?? null;
+        $actualVersion = $actual['presetVersion'] ?? null;
+        if ($expectedVersion !== $actualVersion) {
+            $issues[] = "{$path}.presetVersion: expected " . \json_encode($expectedVersion) . ', got ' . \json_encode($actualVersion);
+        }
+        if (isset($expected['applied']) || isset($actual['applied'])) {
+            $expApplied = $expected['applied'] ?? [];
+            $actApplied = $actual['applied'] ?? [];
+            $issues = \array_merge(
+                $issues,
+                self::compareReturn($expApplied, $actApplied, "{$path}.applied"),
+            );
+        }
+        $expSources = $expected['sources'] ?? [];
+        $actSources = $actual['sources'] ?? [];
+        if (!\is_array($expSources) || !\is_array($actSources)) {
+            $issues[] = "{$path}.sources must be a mapping on both sides";
+        } else {
+            foreach (['sdkDefault', 'clientDefault', 'scopedDefault', 'callPresetOverride', 'explicit'] as $bucket) {
+                $expBucket = $expSources[$bucket] ?? [];
+                $actBucket = $actSources[$bucket] ?? [];
+                if ($expBucket !== $actBucket) {
+                    $issues[] = "{$path}.sources.{$bucket}: expected " . \json_encode($expBucket) . ', got ' . \json_encode($actBucket);
+                }
+            }
+        }
+        // presetConfigHash — fixtures pin presence (any sha256: string)
+        // OR explicit null/absent. Content-derived → regex-match only.
+        $expectedHash = $expected['presetConfigHash'] ?? null;
+        $actualHash = $actual['presetConfigHash'] ?? null;
+        if (\array_key_exists('presetConfigHash', $expected)) {
+            if ($expectedHash === null) {
+                if ($actualHash !== null) {
+                    $issues[] = "{$path}.presetConfigHash: expected absent/null, got " . \json_encode($actualHash);
+                }
+            } elseif (!\is_string($actualHash) || \preg_match(self::PRESET_CONFIG_HASH_RE, $actualHash) !== 1) {
+                $issues[] = "{$path}.presetConfigHash: expected /^sha256:[0-9a-f]{64}$/, got " . \json_encode($actualHash);
+            }
+        }
+        return $issues;
+    }
+
+    /**
+     * Assert that none of the listed wire fields appears in any
+     * captured request body. Returns empty list on pass.
+     *
+     * @param list<string>       $omitted  Fields that MUST NOT appear.
+     * @param list<CapturedRequest> $captured Captured outbound requests.
+     * @return list<string>
+     */
+    public static function compareOmittedFromWire(array $omitted, array $captured, string $path = 'omittedFromWire'): array
+    {
+        $issues = [];
+        foreach ($omitted as $field) {
+            foreach ($captured as $idx => $req) {
+                if (self::bodyContainsField($req, $field)) {
+                    $issues[] = "{$path}.{$field}: field appeared in captured requests[{$idx}] body but fixture asserts it should be omitted from the wire";
+                }
+            }
+        }
+        return $issues;
+    }
+
+    private static function bodyContainsField(CapturedRequest $req, string $field): bool
+    {
+        $body = $req->body;
+        $type = $body['type'] ?? null;
+        if ($type === 'json' && isset($body['value']) && \is_array($body['value'])) {
+            return self::arrayContainsField($body['value'], $field);
+        }
+        if ($type === 'multipart') {
+            foreach ($req->multipartParts as $part) {
+                // Captured multipart parts carry their decoded payload as
+                // `text` or `bytes` directly (see StubPsr18Client::parseMultipart),
+                // NOT a `content` sub-array. If the part looks like JSON (by
+                // contentType or first-char sniff), parse and recurse; non-JSON
+                // parts can't carry structured fields so they trivially satisfy
+                // the omitted-from-wire assertion. Mirrors the TS bodyContainsField.
+                $text = isset($part['text'])
+                    ? (string) $part['text']
+                    : (isset($part['bytes']) ? (string) $part['bytes'] : null);
+                if ($text === null) {
+                    continue;
+                }
+                $ct = \strtolower((string) ($part['contentType'] ?? ''));
+                $trimmed = \ltrim($text);
+                $looksJson = \str_contains($ct, 'json')
+                    || \str_starts_with($trimmed, '{')
+                    || \str_starts_with($trimmed, '[');
+                if (!$looksJson) {
+                    continue;
+                }
+                try {
+                    /** @var mixed $parsed */
+                    $parsed = \json_decode($text, associative: true, flags: JSON_THROW_ON_ERROR);
+                } catch (\JsonException) {
+                    continue;
+                }
+                if (\is_array($parsed) && self::arrayContainsField($parsed, $field)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param array<string|int, mixed> $value
+     */
+    private static function arrayContainsField(array $value, string $field): bool
+    {
+        if (\array_key_exists($field, $value)) {
+            return true;
+        }
+        foreach ($value as $nested) {
+            if (\is_array($nested) && self::arrayContainsField($nested, $field)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Compare the SDK's caught local-validation error (projected by the
+     * runner into the standard `{category, code, conflictingFields,
+     * message}` shape) against the fixture's expectation.
+     *
+     * @param array<string, mixed> $expected Fixture localValidationError block.
+     * @param array<string, mixed>|null $actual   Projected captured error or null.
+     * @return list<string>
+     */
+    public static function compareLocalValidationError(array $expected, ?array $actual, string $path = 'localValidationError'): array
+    {
+        if ($actual === null) {
+            return ["{$path}: expected a local validation error to be thrown, but no error was caught"];
+        }
+        $issues = [];
+        if (($expected['category'] ?? null) !== ($actual['category'] ?? null)) {
+            $issues[] = "{$path}.category: expected " . \json_encode($expected['category'] ?? null) . ', got ' . \json_encode($actual['category'] ?? null);
+        }
+        if (($expected['code'] ?? null) !== ($actual['code'] ?? null)) {
+            $issues[] = "{$path}.code: expected " . \json_encode($expected['code'] ?? null) . ', got ' . \json_encode($actual['code'] ?? null);
+        }
+        if (\array_key_exists('conflictingFields', $expected)) {
+            $exp = $expected['conflictingFields'] ?? [];
+            $act = $actual['conflictingFields'] ?? [];
+            if ($exp !== $act) {
+                $issues[] = "{$path}.conflictingFields: expected " . \json_encode($exp) . ', got ' . \json_encode($act);
+            }
+        }
+        if (\array_key_exists('message', $expected) && ($expected['message'] ?? null) !== ($actual['message'] ?? null)) {
+            $issues[] = "{$path}.message: expected " . \json_encode($expected['message'] ?? null) . ', got ' . \json_encode($actual['message'] ?? null);
+        }
+        return $issues;
+    }
 }
