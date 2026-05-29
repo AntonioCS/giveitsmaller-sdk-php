@@ -6,6 +6,8 @@ namespace Gisl\Sdk;
 
 use Gisl\Sdk\Errors\GislFeatureRequiresAuthError;
 use Gisl\Sdk\Errors\GislMissingCredentialsError;
+use Gisl\Sdk\Http\CurlMultiPartUploader;
+use Gisl\Sdk\Http\MultipartPartUploader;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
@@ -216,6 +218,7 @@ final class Gisl
                 $requestFactory,
                 $streamFactory,
                 $presetDefaults,
+                partUploader: self::partUploaderFor($config),
             );
         }
 
@@ -261,6 +264,27 @@ final class Gisl
             $requestFactory,
             $streamFactory,
             $presetDefaults,
+            partUploader: self::partUploaderFor($config),
         );
+    }
+
+    /**
+     * Production part-uploader for multipart uploads (z9bDW2iH): a
+     * {@see CurlMultiPartUploader} for bounded-concurrent chunk PUTs when
+     * ext-curl is available and `multipartConcurrency > 1`; otherwise null so
+     * {@see GislClient} uses its sequential PSR-18 loop. Wired here (the
+     * factory) rather than as a `GislClient` ctor default so that direct
+     * construction — the `StubPsr18Client` parity/unit suites — stays on the
+     * sequential, capturable path.
+     */
+    private static function partUploaderFor(GislClientConfig $config): ?MultipartPartUploader
+    {
+        if ($config->multipartConcurrency > 1 && CurlMultiPartUploader::isSupported()) {
+            return new CurlMultiPartUploader(
+                $config->multipartMaxAttempts,
+                $config->multipartRetryBaseMs,
+            );
+        }
+        return null;
     }
 }

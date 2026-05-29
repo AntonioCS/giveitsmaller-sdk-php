@@ -8,9 +8,11 @@ namespace Gisl\Sdk;
  * Immutable configuration for {@see GislClient}.
  *
  * Multipart-related fields (`multipartThreshold`, `multipartConcurrency`,
- * `multipartMaxAttempts`, `multipartRetryBaseMs`) are read by the constructor
- * and held for the multipart upload path that arrives in VOxtu0RZ-B2. They are
- * sanitised here so the contract is locked before that code lands.
+ * `multipartMaxAttempts`, `multipartRetryBaseMs`) drive the multipart upload
+ * path. `multipartConcurrency` bounds how many chunk PUTs run in flight at once
+ * when the client is built via {@see Gisl::create()} with ext-curl present (the
+ * `curl_multi` uploader, z9bDW2iH); 1 forces the sequential path. They are
+ * sanitised here so the contract is consistent across both paths.
  *
  * Note on `$timeoutMs`: the SDK records the value but does NOT enforce it
  * directly — PSR-18 has no standardised timeout knob, so concrete enforcement

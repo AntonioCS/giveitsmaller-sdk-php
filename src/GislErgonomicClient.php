@@ -9,6 +9,7 @@ use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Gisl\Sdk\Http\MultipartPartUploader;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
@@ -61,8 +62,9 @@ class GislErgonomicClient extends GislClient
         ?StreamFactoryInterface $streamFactory = null,
         private readonly ?PresetDefaults $presetDefaults = null,
         ?PresetDefaults $scopedPresetDefaults = null,
+        ?MultipartPartUploader $partUploader = null,
     ) {
-        parent::__construct($config, $httpClient, $requestFactory, $streamFactory);
+        parent::__construct($config, $httpClient, $requestFactory, $streamFactory, $partUploader);
         $this->scopedPresetDefaults = $scopedPresetDefaults;
     }
 

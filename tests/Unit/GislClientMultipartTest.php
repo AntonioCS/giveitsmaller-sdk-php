@@ -10,6 +10,7 @@ use Gisl\Sdk\Errors\GislMultipartPartCountError;
 use Gisl\Sdk\Errors\GislMultipartPartError;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
+use Gisl\Sdk\Http\MultipartPartUploader;
 use Gisl\Sdk\UploadOptions;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
@@ -106,6 +107,81 @@ final class GislClientMultipartTest extends TestCase
         ], $completeBody);
 
         // Progress should fire after first chunk and after the remaining chunk.
+        self::assertSame([
+            [self::FIRST_CHUNK_SIZE, self::TOTAL_SIZE],
+            [self::TOTAL_SIZE, self::TOTAL_SIZE],
+        ], $progress);
+    }
+
+    public function testDelegatesPartPutsToInjectedConcurrentUploader(): void
+    {
+        $filePath = $this->writeBigFile(self::TOTAL_SIZE);
+
+        // No S3 PUT in the queue — the injected uploader owns the part PUTs,
+        // so only initiate + complete go through the PSR-18 client.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->initiateEnvelope(remainingChunks: 1, chunkSize: self::CHUNK_SIZE)),
+            $this->jsonResponse(200, $this->completeEnvelope('completed')),
+        ], $captured);
+
+        $fake = new class implements MultipartPartUploader {
+            /** @var list<array{part: int, offset: int, length: int, concurrency: int}> */
+            public array $seen = [];
+
+            public function uploadParts(
+                string $filePath,
+                array $parts,
+                string $uploadId,
+                int $concurrency,
+                callable $onPartComplete,
+            ): array {
+                $etags = [];
+                foreach ($parts as $d) {
+                    $pn = $d['presigned']->getPartNumber() ?? 0;
+                    $this->seen[] = [
+                        'part' => $pn,
+                        'offset' => $d['offset'],
+                        'length' => $d['length'],
+                        'concurrency' => $concurrency,
+                    ];
+                    $etags[$pn] = "\"etag-{$pn}\"";
+                    $onPartComplete($pn, $d['length']);
+                }
+
+                return $etags;
+            }
+        };
+
+        $progress = [];
+        $client = $this->makeClient($http, partUploader: $fake);
+        $result = $client->uploadFile(
+            $filePath,
+            new UploadOptions(
+                onProgress: static function (int $u, int $t) use (&$progress): void {
+                    $progress[] = [$u, $t];
+                },
+            ),
+        );
+
+        self::assertSame(self::UPLOAD_ID, $result->getFileId());
+        // Only initiate + complete hit HTTP — the part PUT went via the uploader.
+        self::assertCount(2, $captured);
+        // Uploader got the single remaining part (#2) at the right offset/length,
+        // with the config's multipartConcurrency (default 4).
+        self::assertSame([[
+            'part' => 2,
+            'offset' => self::FIRST_CHUNK_SIZE,
+            'length' => self::CHUNK_SIZE,
+            'concurrency' => 4,
+        ]], $fake->seen);
+        // /complete carries the uploader's ETag, part_number ascending.
+        $completeBody = \json_decode((string) $captured[1]->getBody(), true, flags: \JSON_THROW_ON_ERROR);
+        self::assertSame([
+            'upload_id' => self::UPLOAD_ID,
+            'parts' => [['part_number' => 2, 'etag' => '"etag-2"']],
+        ], $completeBody);
+        // Progress fires after the first chunk (initiate) + after the part.
         self::assertSame([
             [self::FIRST_CHUNK_SIZE, self::TOTAL_SIZE],
             [self::TOTAL_SIZE, self::TOTAL_SIZE],
@@ -590,6 +666,7 @@ final class GislClientMultipartTest extends TestCase
     private function makeClient(
         ClientInterface $http,
         ?int $multipartRetryBaseMs = null,
+        ?MultipartPartUploader $partUploader = null,
     ): GislClient {
         return new GislClient(
             config: new GislClientConfig(
@@ -601,6 +678,7 @@ final class GislClientMultipartTest extends TestCase
             httpClient: $http,
             requestFactory: $this->factory,
             streamFactory: $this->factory,
+            partUploader: $partUploader,
         );
     }
 

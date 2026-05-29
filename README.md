@@ -2,7 +2,7 @@
 
 Customer-facing PHP SDK for the GISL (Give It Smaller) file compression service.
 
-> **Status:** v0.2 (sub-cards `VOxtu0RZ-A`, `VOxtu0RZ-B1`, `VOxtu0RZ-B2.3`). Single-shot upload, sequential multipart upload (>10 MB), workflow create + status, workflow downloads, webhook verification, plus the workflow lifecycle surface: `cancelWorkflow`, `resumeWorkflow`, `retryOperation`, `waitForWorkflow`, and `getMetadata`. SSE and the parity runner land in the remaining `VOxtu0RZ-B2` cards (`bf68ju2r`). Concurrent multipart for Guzzle / Symfony HttpClient is tracked separately as `lv43MVSl`.
+> **Status:** v0.2 (sub-cards `VOxtu0RZ-A`, `VOxtu0RZ-B1`, `VOxtu0RZ-B2.3`). Single-shot upload, concurrent multipart upload (>10 MB, chunks PUT in parallel via `curl_multi` — `z9bDW2iH`), workflow create + status, workflow downloads, webhook verification, plus the workflow lifecycle surface: `cancelWorkflow`, `resumeWorkflow`, `retryOperation`, `waitForWorkflow`, and `getMetadata`. SSE and the parity runner land in the remaining `VOxtu0RZ-B2` cards (`bf68ju2r`). Concurrent resume of an interrupted multipart upload is tracked as a follow-up.
 
 ## Install
 
@@ -29,8 +29,9 @@ $client = new GislClient(new GislClientConfig(
     apiKey: 'sk_...',
 ));
 
-// Single-shot upload (files at-or-below 10 MB) or sequential multipart for
-// larger files. The same call routes both — pass an `UploadOptions` to
+// Single-shot upload (files at-or-below 10 MB) or concurrent multipart for
+// larger files (chunks PUT in parallel via curl_multi; see "Multipart upload
+// concurrency"). The same call routes both — pass an `UploadOptions` to
 // receive progress callbacks.
 $upload = $client->uploadFile('/path/to/photo.jpg');
 
@@ -318,7 +319,9 @@ Aggregation is structural — `ok` / `rejected` carry typed `UploadProbeResponse
 
 ## Multipart upload concurrency
 
-`GislClientConfig::$multipartConcurrency` is recorded but currently **advisory** — multipart uploads in v0.x run sequentially (one chunk in flight at a time). This keeps the SDK abstraction PSR-18-compatible across every supported HTTP client. Concurrent multipart for shops on Guzzle or Symfony HttpClient is tracked separately as [lv43MVSl](https://trello.com/c/lv43MVSl) and will detect the concrete client at runtime, falling back to sequential for other PSR-18 implementations.
+`GislClientConfig::$multipartConcurrency` (default 4) bounds how many chunk PUTs are in flight at once. When you construct the client via `Gisl::create(...)` and ext-curl is present, fresh multipart uploads (files over 10 MB) PUT their chunks concurrently through a `curl_multi` uploader — the presigned part URLs are plain S3 PUTs, so this is independent of the injected PSR-18 client. Set `multipartConcurrency: 1` to force the sequential one-chunk-at-a-time path; the SDK also falls back to sequential automatically when ext-curl is unavailable.
+
+The concurrency knob applies to **fresh** uploads. Resuming an interrupted upload (`resumeUploadId`) still PUTs its missing chunks sequentially — concurrent resume is tracked as a follow-up. Directly constructing `GislClient`/`GislErgonomicClient` without injecting an uploader (as the test suites do) also stays sequential.
 
 ## Generated DTOs
 
@@ -360,14 +363,15 @@ make project/sdk/php/check
 | Card | Scope |
 |---|---|
 | `VOxtu0RZ-A` | Scaffold + single-shot upload + workflow create + status |
-| `VOxtu0RZ-B1` | Sequential multipart upload + webhook verification + workflow downloads |
+| `VOxtu0RZ-B1` | Multipart upload + webhook verification + workflow downloads |
 | `VOxtu0RZ-B2.1` (`dQDXROmB`) | Typed error tree + i18n triple |
 | `VOxtu0RZ-B2.2` (`DI4x9bjG`) | SSE consumer streamEvents |
 | `VOxtu0RZ-B2.3` (`lT54YsPS`) | Workflow lifecycle (cancel/resume/retry/wait) + getMetadata |
 | `VOxtu0RZ-B2.4` (`zxGUQSmI`) | Auth + credits + contact |
 | `VOxtu0RZ-B2.5` (`pxJ1Gal9`, this) | Planned-tier ops + getSchema |
 | `VOxtu0RZ-B2.6` (`SeM2f5Og`) | PHP parity runner |
-| `lv43MVSl` | Concurrent multipart upload (Guzzle Pool / Symfony HttpClient) |
+| `z9bDW2iH` | Concurrent multipart upload (curl_multi fresh-upload fan-out) — shipped |
+| _follow-up_ | Concurrent resume of an interrupted multipart upload |
 | `Wwcrdi73` | Packagist publish (mirror repo + auto-build) |
 
 ## License

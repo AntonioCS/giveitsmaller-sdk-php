@@ -46,6 +46,7 @@ use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislMultipartPartCountError;
 use Gisl\Sdk\Errors\GislMultipartPartError;
+use Gisl\Sdk\Http\MultipartPartUploader;
 use Gisl\Sdk\Errors\GislMultipartSessionAuthRequiredError;
 use Gisl\Sdk\Errors\GislMultipartSessionNotFoundError;
 use Gisl\Sdk\Errors\GislMultipartSessionOwnershipError;
@@ -97,12 +98,14 @@ use Psr\Http\Message\StreamFactoryInterface;
  * workloads under cookie auth should construct one GislClient per fiber /
  * worker.
  *
- * Multipart routing is sequential in v0.x: chunks are PUT to S3 one at a
- * time regardless of `GislClientConfig::$multipartConcurrency`. The config
- * field is recorded for forward compatibility — concurrent multipart uploads
- * (Guzzle Pool / Symfony HttpClient) arrive in a separate follow-up card
- * (`lv43MVSl`). SSE and the parity runner arrive in `VOxtu0RZ-B2`
- * (`bf68ju2r`).
+ * Multipart routing: when an injected {@see Http\MultipartPartUploader} is
+ * present (the `curl_multi` uploader wired by {@see Gisl::create()} with
+ * ext-curl + `multipartConcurrency > 1`, z9bDW2iH), fresh-upload chunks are PUT
+ * to S3 concurrently, bounded by `GislClientConfig::$multipartConcurrency`.
+ * With no uploader injected (direct construction, or concurrency 1, or
+ * ext-curl absent) chunks are PUT one at a time. The resume path
+ * (`resumeUploadId`) is still sequential — concurrent resume is a follow-up.
+ * SSE and the parity runner arrive in `VOxtu0RZ-B2` (`bf68ju2r`).
  *
  * The HTTP transport is PSR-18 abstract — callers may inject their own
  * client / factories, or let php-http/discovery resolve installed
@@ -133,15 +136,26 @@ class GislClient
      */
     private ?string $sessionCookie = null;
 
+    /**
+     * Concurrent multipart part-uploader (z9bDW2iH). NULL ⇒ the sequential
+     * PSR-18 chunk loop (the default for direct construction, so the
+     * `StubPsr18Client` parity/unit suites keep capturing part PUTs). The
+     * ergonomic factory {@see Gisl::create()} injects a {@see CurlMultiPartUploader}
+     * for production, gated on ext-curl + `multipartConcurrency > 1`.
+     */
+    private readonly ?MultipartPartUploader $partUploader;
+
     public function __construct(
         public readonly GislClientConfig $config,
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
+        ?MultipartPartUploader $partUploader = null,
     ) {
         $this->httpClient = $httpClient ?? Psr18ClientDiscovery::find();
         $this->requestFactory = $requestFactory ?? Psr17FactoryDiscovery::findRequestFactory();
         $this->streamFactory = $streamFactory ?? Psr17FactoryDiscovery::findStreamFactory();
+        $this->partUploader = $partUploader;
     }
 
     /**
@@ -248,17 +262,19 @@ class GislClient
     }
 
     /**
-     * Sequential multipart upload.
+     * Fresh multipart upload.
      *
      * Three phases:
      *   1. POST /api/uploads/multipart/initiate with first 8 MiB as form-data.
      *      Server returns `upload_id`, `presigned_urls` for parts 2..N, the
      *      recommended chunk size, and the first-chunk etag (which it tracks
      *      server-side; the SDK does NOT submit part 1 in the complete call).
-     *   2. PUT each remaining chunk to its presigned S3 URL, in order, with
-     *      bounded retry + full-jitter backoff per part. `multipartConcurrency`
-     *      is recorded but currently advisory — see `lv43MVSl` for the
-     *      concurrent variant.
+     *   2. PUT each remaining chunk to its presigned S3 URL with bounded retry +
+     *      full-jitter backoff per part. When an injected
+     *      {@see Http\MultipartPartUploader} is present the PUTs run
+     *      concurrently, bounded by `multipartConcurrency` (z9bDW2iH); otherwise
+     *      they run sequentially in part order. Either way the collected etags
+     *      are assembled in ascending part order for /complete.
      *   3. POST /api/uploads/multipart/complete with the collected etags.
      *
      * Returns a synthesised {@see UploadResponse} so the public `uploadFile()`
@@ -359,41 +375,69 @@ class GislClient
             throw new GislError('Multipart initiate response missing upload_id.');
         }
 
-        /** @var list<array{part_number: int, etag: string}> $parts */
-        $parts = [];
-
+        // Build lazy part descriptors (offset/length index into the file — no
+        // chunk is materialised until its PUT runs).
+        /** @var list<array{presigned: PresignedUrlPart, offset: int, length: int}> $descriptors */
+        $descriptors = [];
         foreach ($presignedUrls as $index => $part) {
             if (!$part instanceof PresignedUrlPart) {
                 throw new GislError("Multipart initiate response had a malformed presigned URL at index {$index}.");
             }
-            $start = $firstChunkSize + $index * $chunkSize;
-            $end = \min($start + $chunkSize, $totalSize);
-            $contentLength = $end - $start;
-
-            $etag = $this->putChunkWithRetry(
-                presigned: $part,
-                filePath: $filePath,
-                offset: $start,
-                length: $contentLength,
-                uploadId: $uploadId,
-            );
-
-            $partNumber = $part->getPartNumber();
-            if ($partNumber === null) {
+            if ($part->getPartNumber() === null) {
                 throw new GislError("Presigned URL at index {$index} missing part_number.");
             }
-            $parts[] = ['part_number' => $partNumber, 'etag' => $etag];
-
-            $uploadedBytes += $contentLength;
-            $this->fireProgress($options, $uploadedBytes, $totalSize);
+            $start = $firstChunkSize + $index * $chunkSize;
+            $end = \min($start + $chunkSize, $totalSize);
+            $descriptors[] = ['presigned' => $part, 'offset' => $start, 'length' => $end - $start];
         }
 
-        // Wire shape the server expects on /multipart/complete. Iteration
-        // order over `$presignedUrls` is part_number ascending per the v2
-        // contract; we don't re-sort here so a wire shape that drifts from
-        // that contract surfaces in fixture snapshots rather than getting
-        // hidden by a defensive sort. `$uploadId` was already resolved +
-        // validated above the chunk loop.
+        // Progress fires after EACH successful part (concurrent or sequential).
+        $onPartComplete = function (int $partNumber, int $bytes) use (&$uploadedBytes, $options, $totalSize): void {
+            $uploadedBytes += $bytes;
+            $this->fireProgress($options, $uploadedBytes, $totalSize);
+        };
+
+        // z9bDW2iH: when a concurrent uploader is injected (production via
+        // Gisl::create on ext-curl), PUT parts with bounded fan-out; otherwise
+        // the sequential PSR-18 loop — the default, and the path the
+        // StubPsr18Client parity suite captures. Both preserve the typed
+        // errors + per-part progress.
+        if ($this->partUploader !== null) {
+            $etagByPart = $this->partUploader->uploadParts(
+                $filePath,
+                $descriptors,
+                $uploadId,
+                $this->config->multipartConcurrency,
+                $onPartComplete,
+            );
+        } else {
+            /** @var array<int, string> $etagByPart */
+            $etagByPart = [];
+            foreach ($descriptors as $d) {
+                $etag = $this->putChunkWithRetry(
+                    presigned: $d['presigned'],
+                    filePath: $filePath,
+                    offset: $d['offset'],
+                    length: $d['length'],
+                    uploadId: $uploadId,
+                );
+                /** @var int $pn */
+                $pn = $d['presigned']->getPartNumber();
+                $etagByPart[$pn] = $etag;
+                $onPartComplete($pn, $d['length']);
+            }
+        }
+
+        // Assemble the /multipart/complete part list in part_number-ascending
+        // order — parts may finish out of order under concurrency, so sort by
+        // key (the v2 contract orders parts ascending; ksort makes that
+        // deterministic for both paths).
+        \ksort($etagByPart);
+        /** @var list<array{part_number: int, etag: string}> $parts */
+        $parts = [];
+        foreach ($etagByPart as $pn => $etag) {
+            $parts[] = ['part_number' => $pn, 'etag' => $etag];
+        }
 
         $completeBody = $this->jsonEncode([
             'upload_id' => $uploadId,

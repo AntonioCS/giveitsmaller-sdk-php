@@ -11,6 +11,7 @@ use Gisl\Sdk\Errors\GislFeatureRequiresAuthError;
 use Gisl\Sdk\Errors\GislMissingCredentialsError;
 use Gisl\Sdk\Gisl;
 use Gisl\Sdk\GislClient;
+use Gisl\Sdk\Http\CurlMultiPartUploader;
 use GuzzleHttp\Psr7\HttpFactory;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
@@ -72,6 +73,45 @@ final class GislTest extends TestCase
         self::assertInstanceOf(GislClient::class, $client);
         self::assertSame('explicit-key', $client->config->apiKey);
         self::assertSame('https://api.giveitsmaller.com', $client->config->baseUrl);
+    }
+
+    public function testCreateWiresConcurrentUploaderByDefault(): void
+    {
+        $client = Gisl::create(
+            apiKey: 'explicit-key',
+            httpClient: $this->stubClient(),
+            requestFactory: $this->factory,
+            streamFactory: $this->factory,
+        );
+
+        // Default multipartConcurrency (4) + ext-curl present -> concurrent path.
+        // (Skips if the test image somehow lacks ext-curl; CI always has it.)
+        if (!CurlMultiPartUploader::isSupported()) {
+            self::markTestSkipped('ext-curl not loaded');
+        }
+        self::assertInstanceOf(CurlMultiPartUploader::class, $this->readPartUploader($client));
+    }
+
+    public function testCreateWithConcurrencyOneStaysSequential(): void
+    {
+        $client = Gisl::create(
+            apiKey: 'explicit-key',
+            multipartConcurrency: 1,
+            httpClient: $this->stubClient(),
+            requestFactory: $this->factory,
+            streamFactory: $this->factory,
+        );
+
+        // concurrency == 1 -> no concurrent uploader injected; GislClient uses
+        // its sequential PSR-18 loop.
+        self::assertNull($this->readPartUploader($client));
+    }
+
+    private function readPartUploader(GislClient $client): mixed
+    {
+        $prop = new \ReflectionProperty(GislClient::class, 'partUploader');
+
+        return $prop->getValue($client);
     }
 
     public function testCreateResolvesApiKeyFromEnvironment(): void
