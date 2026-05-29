@@ -99,6 +99,113 @@ final class PresetDefaults
     }
 
     /**
+     * Deep-merge two {@see PresetDefaults} into a new instance (P7 /
+     * `5k3ZWo6B`). Used by {@see GislErgonomicClient::withPresetDefaults()} to
+     * stack scoped derives: `withPresetDefaults($a)->withPresetDefaults($b)`
+     * yields a scoped layer equivalent to `merge($a, $b)` — `$child`'s per-cell
+     * fields override `$parent`'s where defined; `$parent`'s fields fill the
+     * gaps. A `(mediaOpKey, level)` present in only one side is taken verbatim.
+     *
+     * Per-cell semantics are scalar-leaf (every leaf-DTO field is a primitive,
+     * enum case, or `string|int` targetSize), so a field-wise `?? ` overlay
+     * gives the correct override. Mirrors the TS `PresetDefaults.merge` +
+     * `mergePresetOptions` (`packages/typescript/src/ergonomic/presets/index.ts`).
+     *
+     * Both `$parent` and `$child` are left unchanged.
+     */
+    public static function merge(self $parent, self $child): self
+    {
+        $cells = $parent->cells;
+        foreach ($child->cells as $key => $childDelta) {
+            $existing = $cells[$key] ?? null;
+            $cells[$key] = $existing === null ? $childDelta : self::mergeCell($existing, $childDelta);
+        }
+
+        return new self($cells);
+    }
+
+    /**
+     * Field-wise merge of two same-class leaf DTOs: `$child` field wins where
+     * non-null, `$parent` fills the gaps. Dispatches on the concrete leaf type
+     * so the typed constructor is called with statically-known field types
+     * (mirrors the TS `switch (cellKey)` in `mergePresetOptions`). `$parent` and
+     * `$child` are always the same class (same `(mediaOpKey, level)` cell).
+     *
+     * @param PresetCellDelta $parent
+     * @param PresetCellDelta $child
+     *
+     * @return PresetCellDelta
+     */
+    private static function mergeCell(object $parent, object $child): object
+    {
+        return match (true) {
+            $parent instanceof ImageCompressPresetOptions && $child instanceof ImageCompressPresetOptions
+                => new ImageCompressPresetOptions(
+                    mode: $child->mode ?? $parent->mode,
+                    quality: $child->quality ?? $parent->quality,
+                    width: $child->width ?? $parent->width,
+                    height: $child->height ?? $parent->height,
+                    fit: $child->fit ?? $parent->fit,
+                    metadata: $child->metadata ?? $parent->metadata,
+                    iccProfile: $child->iccProfile ?? $parent->iccProfile,
+                    autoOrient: $child->autoOrient ?? $parent->autoOrient,
+                    progressive: $child->progressive ?? $parent->progressive,
+                    outputFormat: $child->outputFormat ?? $parent->outputFormat,
+                ),
+            $parent instanceof AudioCompressPresetOptions && $child instanceof AudioCompressPresetOptions
+                => new AudioCompressPresetOptions(
+                    bitrate: $child->bitrate ?? $parent->bitrate,
+                    channels: $child->channels ?? $parent->channels,
+                    sampleRate: $child->sampleRate ?? $parent->sampleRate,
+                    normalize: $child->normalize ?? $parent->normalize,
+                ),
+            $parent instanceof VideoCompressPresetOptions && $child instanceof VideoCompressPresetOptions
+                => new VideoCompressPresetOptions(
+                    codec: $child->codec ?? $parent->codec,
+                    targetSize: $child->targetSize ?? $parent->targetSize,
+                    crf: $child->crf ?? $parent->crf,
+                    preset: $child->preset ?? $parent->preset,
+                    width: $child->width ?? $parent->width,
+                    height: $child->height ?? $parent->height,
+                    fit: $child->fit ?? $parent->fit,
+                    fps: $child->fps ?? $parent->fps,
+                    faststart: $child->faststart ?? $parent->faststart,
+                    audioCodec: $child->audioCodec ?? $parent->audioCodec,
+                    audioBitrate: $child->audioBitrate ?? $parent->audioBitrate,
+                ),
+            $parent instanceof DocumentPdfCompressPresetOptions && $child instanceof DocumentPdfCompressPresetOptions
+                => new DocumentPdfCompressPresetOptions(
+                    profile: $child->profile ?? $parent->profile,
+                    colorspace: $child->colorspace ?? $parent->colorspace,
+                    flattenForms: $child->flattenForms ?? $parent->flattenForms,
+                ),
+            $parent instanceof DocumentOfficeCompressPresetOptions && $child instanceof DocumentOfficeCompressPresetOptions
+                => new DocumentOfficeCompressPresetOptions(
+                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
+                    stripMacros: $child->stripMacros ?? $parent->stripMacros,
+                    stripHiddenData: $child->stripHiddenData ?? $parent->stripHiddenData,
+                    stripUnusedFonts: $child->stripUnusedFonts ?? $parent->stripUnusedFonts,
+                ),
+            $parent instanceof DocumentOdfCompressPresetOptions && $child instanceof DocumentOdfCompressPresetOptions
+                => new DocumentOdfCompressPresetOptions(
+                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
+                    stripMetadata: $child->stripMetadata ?? $parent->stripMetadata,
+                    stripUnusedStyles: $child->stripUnusedStyles ?? $parent->stripUnusedStyles,
+                ),
+            $parent instanceof DocumentEpubCompressPresetOptions && $child instanceof DocumentEpubCompressPresetOptions
+                => new DocumentEpubCompressPresetOptions(
+                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
+                    fontSubsetting: $child->fontSubsetting ?? $parent->fontSubsetting,
+                    stripUnusedCss: $child->stripUnusedCss ?? $parent->stripUnusedCss,
+                ),
+            default => throw new \LogicException(
+                'Preset cell merge received mismatched or unknown leaf types: '
+                . $parent::class . ' vs ' . $child::class . '.',
+            ),
+        };
+    }
+
+    /**
      * @param PresetCellDelta $delta
      */
     private function with(string $mediaOpKey, OptimizeFor $level, object $delta): self

@@ -43,14 +43,60 @@ class GislErgonomicClient extends GislClient
      * construction keep working — it defaults to null. LSP holds:
      * `instanceof GislClient` is unaffected.
      */
+    /**
+     * Scoped preset defaults attached via {@see withPresetDefaults()} (P7 /
+     * `5k3ZWo6B`). Layered between the client-default and per-call-override
+     * layers in the resolver. NON-readonly because the immutable derive is a
+     * clone-wither and PHP 8.1 forbids modifying a readonly property on a
+     * clone; only {@see withPresetDefaults()} ever writes it, and only on the
+     * freshly-cloned copy — `$this` is never mutated. (`sessionCookie` on the
+     * parent {@see GislClient} is the existing non-readonly-property precedent.)
+     */
+    private ?PresetDefaults $scopedPresetDefaults;
+
     public function __construct(
         GislClientConfig $config,
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
         private readonly ?PresetDefaults $presetDefaults = null,
+        ?PresetDefaults $scopedPresetDefaults = null,
     ) {
         parent::__construct($config, $httpClient, $requestFactory, $streamFactory);
+        $this->scopedPresetDefaults = $scopedPresetDefaults;
+    }
+
+    /**
+     * Immutable scoped derive (P7 / `5k3ZWo6B`, TS T4c). Returns a NEW client
+     * that resolves compress presets with `$defaults` layered on top of any
+     * existing scoped defaults — `$defaults`' per-cell fields win, the prior
+     * scope fills the gaps (see {@see PresetDefaults::merge()}). Chains:
+     * `$client->withPresetDefaults($a)->withPresetDefaults($b)`.
+     *
+     * The derive is a `clone` of this client, so the underlying transport
+     * (`httpClient`/`requestFactory`/`streamFactory`), `config`, credentials,
+     * and the `sessionCookie` value are carried over BY the clone — there is
+     * NO env/profile re-resolution and the parent is left completely unchanged
+     * (concurrency-safe).
+     *
+     * **Divergence from the TS reference (intentional):** TS `withPresetDefaults`
+     * returns a Proxy wrapping the SAME live `GislClient` target
+     * (`packages/typescript/src/gisl.ts:141-156`), so a later `login()` on the
+     * parent is observed by the derived client. PHP has no Proxy seam — this
+     * subclass IS the client — so `clone` takes a derive-time SNAPSHOT of the
+     * session-cookie state; a post-derive `login()`/`logout()` on the parent
+     * (or child) does NOT propagate to the other. This satisfies the "preserve
+     * session-cookie state exactly" contract at derive time and is harmless for
+     * the documented "configure the next N jobs" use case.
+     */
+    public function withPresetDefaults(PresetDefaults $defaults): self
+    {
+        $derived = clone $this;
+        $derived->scopedPresetDefaults = $this->scopedPresetDefaults === null
+            ? $defaults
+            : PresetDefaults::merge($this->scopedPresetDefaults, $defaults);
+
+        return $derived;
     }
 
     /**
@@ -58,7 +104,7 @@ class GislErgonomicClient extends GislClient
      */
     public function compress(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'compress', $input, $options, $this->presetDefaults);
+        return new OperationBuilder($this, 'compress', $input, $options, $this->presetDefaults, $this->scopedPresetDefaults);
     }
 
     /**
@@ -66,7 +112,7 @@ class GislErgonomicClient extends GislClient
      */
     public function thumbnail(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'thumbnail', $input, $options, $this->presetDefaults);
+        return new OperationBuilder($this, 'thumbnail', $input, $options, $this->presetDefaults, $this->scopedPresetDefaults);
     }
 
     /**
@@ -74,7 +120,7 @@ class GislErgonomicClient extends GislClient
      */
     public function convert(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'convert', $input, $options, $this->presetDefaults);
+        return new OperationBuilder($this, 'convert', $input, $options, $this->presetDefaults, $this->scopedPresetDefaults);
     }
 
     /**

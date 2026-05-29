@@ -8,6 +8,7 @@ use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\ResolvedOptions;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\IccProfilePolicy;
+use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoCodec;
@@ -431,6 +432,60 @@ final class PresetResolverTest extends TestCase
             $this->assertSame('unknown_field', $e->reason);
             $this->assertSame(['bogus'], $e->conflictingFields);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Scoped layer (P7 / 5k3ZWo6B) — layer 3
+    // -----------------------------------------------------------------
+
+    public function testScopedDefaultBeatsClientDefault(): void
+    {
+        $client = PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 70));
+        $scoped = PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 85));
+
+        $out = PresetResolver::resolveCompress('image', $client, $scoped, null, OptimizeFor::Size, []);
+        $ro = $out['resolvedOptions'];
+
+        $this->assertSame(85, $out['wireOptions']['quality']);
+        $this->assertSame(['quality'], $ro->sources->scopedDefault);
+        $this->assertNotContains('quality', $ro->sources->clientDefault);
+        $this->assertNotContains('quality', $ro->sources->sdkDefault);
+    }
+
+    public function testExplicitBeatsScopedDefault(): void
+    {
+        $scoped = PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 85));
+
+        $out = PresetResolver::resolveCompress('image', null, $scoped, null, OptimizeFor::Size, ['quality' => 100]);
+        $ro = $out['resolvedOptions'];
+
+        $this->assertSame(100, $out['wireOptions']['quality']);
+        $this->assertSame(['quality'], $ro->sources->explicit);
+        $this->assertNotContains('quality', $ro->sources->scopedDefault);
+    }
+
+    public function testScopedMergeNotReplacePreservesClientField(): void
+    {
+        // T4c headline footgun: a scoped `quality` override must NOT wipe the
+        // client-default's `outputFormat` — they land in distinct buckets and
+        // both reach the wire.
+        $client = PresetDefaults::create()->imageCompress(
+            OptimizeFor::Size,
+            new ImageCompressPresetOptions(outputFormat: ImageFormat::Auto),
+        );
+        $scoped = PresetDefaults::create()->imageCompress(
+            OptimizeFor::Size,
+            new ImageCompressPresetOptions(quality: 92),
+        );
+
+        $out = PresetResolver::resolveCompress('image', $client, $scoped, null, OptimizeFor::Size, []);
+        $ro = $out['resolvedOptions'];
+
+        $this->assertSame(92, $out['wireOptions']['quality']);
+        $this->assertArrayHasKey('output_format', $out['wireOptions']);
+        $this->assertSame(['quality'], $ro->sources->scopedDefault);
+        $this->assertSame(['output_format'], $ro->sources->clientDefault);
+        $this->assertIsString($ro->presetConfigHash);
     }
 
     public function testParseTargetSizeRejectsNonStringNonIntWithConflictingFields(): void
