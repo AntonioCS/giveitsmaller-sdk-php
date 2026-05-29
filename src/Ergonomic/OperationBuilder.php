@@ -6,10 +6,13 @@ namespace Gisl\Sdk\Ergonomic;
 
 use Gisl\Generated\OpenApi\Model\OperationDownload;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
+use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
+use Gisl\Sdk\PresetDefaults;
 use Gisl\Sdk\Sources;
 use Gisl\Sdk\UploadOptions;
 use Gisl\Sdk\WorkflowCreatePayload;
@@ -59,14 +62,158 @@ use Gisl\Sdk\WorkflowCreatePayload;
 final class OperationBuilder
 {
     /**
-     * @param array<string, mixed> $opOptions
+     * @param array<string, mixed> $opOptions Operation options. For compress these may include the
+     *                                         ergonomic `optimize` (OptimizeFor|string) and
+     *                                         `presetOverrides` (a `*CompressPresetOptions` leaf DTO
+     *                                         or a camelCase array) keys, consumed by the resolver.
+     * @param PresetDefaults|null  $presetDefaults       Client-scope preset defaults wired through from
+     *                                                   `Gisl::create(presetDefaults: ...)` (P6). When
+     *                                                   set AND opType is `compress`, run()/submit()
+     *                                                   walk the resolver before building the payload.
+     * @param PresetDefaults|null  $scopedPresetDefaults Scoped defaults from `withPresetDefaults(...)`
+     *                                                   (P7 — `5k3ZWo6B`); null in P6.
      */
     public function __construct(
         private readonly GislClient $client,
         private readonly string $opType,
         private readonly string $input,
         private readonly array $opOptions,
+        private readonly ?PresetDefaults $presetDefaults = null,
+        private readonly ?PresetDefaults $scopedPresetDefaults = null,
     ) {
+    }
+
+    /**
+     * Run the preset resolver for compress operations and return the
+     * resolved `{wireOptions, resolvedOptions}` tuple. For non-compress
+     * operations (or when the input has no recognised compress media
+     * fingerprint), returns the legacy passthrough — `opOptions` direct to
+     * the wire, `resolvedOptions: null` (the projector then emits the
+     * placeholder shape). Throws {@see GislConfigError} for invalid combos
+     * BEFORE any network round-trip. Mirrors `builder.ts:405-439`.
+     *
+     * @return array{wireOptions: array<string, mixed>, resolvedOptions: ResolvedOptions|null}
+     */
+    private function resolve(): array
+    {
+        if ($this->opType !== 'compress') {
+            return ['wireOptions' => $this->opOptions, 'resolvedOptions' => null];
+        }
+        $media = self::detectCompressMedia($this->input);
+        if ($media === null) {
+            // Unknown media (unrecognised extension) — passthrough, no
+            // preset resolution. Mirrors builder.ts:410-414.
+            return ['wireOptions' => $this->opOptions, 'resolvedOptions' => null];
+        }
+
+        $explicit = $this->opOptions;
+        $optimizeRaw = $explicit['optimize'] ?? null;
+        unset($explicit['optimize']);
+        $presetOverridesRaw = $explicit['presetOverrides'] ?? null;
+        unset($explicit['presetOverrides']);
+
+        $resolved = PresetResolver::resolveCompress(
+            media: $media,
+            presetDefaults: $this->presetDefaults,
+            scopedDefaults: $this->scopedPresetDefaults,
+            presetOverrides: self::normalisePresetOverrides($presetOverridesRaw),
+            optimize: self::coerceOptimize($optimizeRaw),
+            explicitOptions: $explicit,
+        );
+
+        return ['wireOptions' => $resolved['wireOptions'], 'resolvedOptions' => $resolved['resolvedOptions']];
+    }
+
+    /**
+     * Detect the compress media class from a filesystem path's extension.
+     * Returns null for unrecognised extensions (caller falls back to
+     * passthrough). MIME-less PHP analogue of `_detectCompressMedia`
+     * (`builder.ts:67-113`) — PHP inputs are always filesystem paths.
+     *
+     * @internal Exposed for unit tests.
+     *
+     * @return 'image'|'audio'|'video'|'document_pdf'|'document_office'|'document_odf'|'document_epub'|null
+     */
+    public static function detectCompressMedia(string $input): ?string
+    {
+        $dot = \strrpos($input, '.');
+        if ($dot === false) {
+            return null;
+        }
+        $ext = \strtolower(\substr($input, $dot + 1));
+        if ($ext === '') {
+            return null;
+        }
+        if (\in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'avif', 'gif', 'tiff', 'tif', 'bmp', 'heic', 'heif'], true)) {
+            return 'image';
+        }
+        if (\in_array($ext, ['mp3', 'aac', 'm4a', 'ogg', 'oga', 'flac', 'wav', 'opus'], true)) {
+            return 'audio';
+        }
+        if (\in_array($ext, ['mp4', 'mov', 'mkv', 'webm', 'avi', 'wmv', 'flv', 'm4v'], true)) {
+            return 'video';
+        }
+        if ($ext === 'pdf') {
+            return 'document_pdf';
+        }
+        if ($ext === 'epub') {
+            return 'document_epub';
+        }
+        if (\in_array($ext, ['odt', 'ods', 'odp'], true)) {
+            return 'document_odf';
+        }
+        if (\in_array($ext, ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'], true)) {
+            return 'document_office';
+        }
+        return null;
+    }
+
+    private static function coerceOptimize(mixed $raw): ?OptimizeFor
+    {
+        if ($raw === null) {
+            return null;
+        }
+        if ($raw instanceof OptimizeFor) {
+            return $raw;
+        }
+        if (\is_string($raw)) {
+            $level = OptimizeFor::tryFrom($raw);
+            if ($level === null) {
+                $allowed = \implode(', ', \array_map(static fn (OptimizeFor $o): string => $o->value, OptimizeFor::cases()));
+                throw new GislConfigError(
+                    "compress 'optimize' must be one of {$allowed}; got '{$raw}'.",
+                    reason: 'invalid_optimize',
+                    conflictingFields: ['optimize'],
+                );
+            }
+            return $level;
+        }
+        $type = \get_debug_type($raw);
+        throw new GislConfigError(
+            "compress 'optimize' must be an OptimizeFor or its string value; got {$type}.",
+            reason: 'invalid_optimize',
+            conflictingFields: ['optimize'],
+        );
+    }
+
+    /**
+     * @return object|array<string, mixed>|null
+     */
+    private static function normalisePresetOverrides(mixed $raw): object|array|null
+    {
+        if ($raw === null || \is_object($raw)) {
+            return $raw;
+        }
+        if (\is_array($raw)) {
+            /** @var array<string, mixed> $raw */
+            return $raw;
+        }
+        $type = \get_debug_type($raw);
+        throw new GislConfigError(
+            "compress 'presetOverrides' must be a *CompressPresetOptions instance or a camelCase array; got {$type}.",
+            reason: 'invalid_preset_overrides',
+            conflictingFields: ['presetOverrides'],
+        );
     }
 
     /**
@@ -80,6 +227,11 @@ final class OperationBuilder
     {
         $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($options->maxWait);
         $onProgress = BuilderInternals::callableOrNull($options->onProgress, 'RunOptions::$onProgress');
+
+        // 0. Resolve presets FIRST so a GislConfigError fails the call
+        // before any I/O — the SDK promised fail-early for invalid combos.
+        // Mirrors builder.ts:453-455.
+        $resolved = $this->resolve();
 
         // 1. Upload — emits UploadProgressEvent from the byte counter.
         $uploadOpts = null;
@@ -101,9 +253,9 @@ final class OperationBuilder
             );
         }
 
-        // 2. Build + create the workflow.
+        // 2. Build + create the workflow with the resolved wire options.
         $job = new JobDefinitionPayload(
-            operations: [new OperationDef(type: $this->opType, options: $this->opOptions)],
+            operations: [new OperationDef(type: $this->opType, options: $resolved['wireOptions'])],
             id: 'op',
             source: Sources::upload($uploadResp->getFileId() ?? ''),
         );
@@ -131,7 +283,12 @@ final class OperationBuilder
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
 
-        return self::projectResult($finalStatus, $downloads->getDownloads() ?? [], $this->opOptions);
+        return self::projectResult(
+            $finalStatus,
+            $downloads->getDownloads() ?? [],
+            $resolved['wireOptions'],
+            $resolved['resolvedOptions'],
+        );
     }
 
     /**
@@ -143,10 +300,13 @@ final class OperationBuilder
      */
     public function submit(SubmitOptions $options): Handle
     {
+        // Resolve presets before any I/O so a GislConfigError fails the
+        // call before the upload — same fail-early contract as run().
+        $resolved = $this->resolve();
         $uploadResp = $this->client->uploadFile($this->input);
 
         $job = new JobDefinitionPayload(
-            operations: [new OperationDef(type: $this->opType, options: $this->opOptions)],
+            operations: [new OperationDef(type: $this->opType, options: $resolved['wireOptions'])],
             id: 'op',
             source: Sources::upload($uploadResp->getFileId() ?? ''),
         );
@@ -179,6 +339,11 @@ final class OperationBuilder
      *   (The openapi-generator emits the parent collection as
      *   `array<JobDownload>` rather than `list<JobDownload>`; callers
      *   pass the getter's return value through unchanged.)
+     * @param ResolvedOptions|null $resolvedOptionsOverride P6 — when provided (the compress resolver
+     *                                                      path), supplants the placeholder projection.
+     *                                                      MergeBuilder + the passthrough path omit it
+     *                                                      and receive the legacy empty-buckets shape.
+     *                                                      Mirrors `_projectResult`'s arg at builder.ts:900.
      *
      * @internal Exposed for {@see MapEachBuilder} + {@see MergeBuilder}
      *           reuse. Not part of the public API.
@@ -187,6 +352,7 @@ final class OperationBuilder
         WorkflowStatusResponse $status,
         ?array $jobDownloads,
         array $appliedOptions,
+        ?ResolvedOptions $resolvedOptionsOverride = null,
     ): Result {
         $artifacts = [];
         foreach ($jobDownloads ?? [] as $job) {
@@ -242,11 +408,12 @@ final class OperationBuilder
             artifacts: $artifacts,
             jobs: $jobs,
             url: \count($artifacts) === 1 ? $artifacts[0]->url : null,
-            resolvedOptions: new ResolvedOptions(
+            resolvedOptions: $resolvedOptionsOverride ?? new ResolvedOptions(
                 preset: null,
                 applied: $appliedOptions,
                 overrides: [],
-                presetVersion: '1.0',
+                presetVersion: PresetResolver::PRESET_VERSION,
+                sources: ResolvedOptionsSources::empty(),
             ),
         );
     }

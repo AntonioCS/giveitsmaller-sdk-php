@@ -9,6 +9,9 @@ use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\StreamFactoryInterface;
 
 /**
  * Ergonomic-surface subclass of {@see GislClient}. Adds per-operation
@@ -33,11 +36,29 @@ use Gisl\Sdk\Ergonomic\OperationBuilder;
 class GislErgonomicClient extends GislClient
 {
     /**
+     * Mirrors the TS `wrapErgonomic` closure (`gisl.ts:116-136`) that captures
+     * `presetDefaults` and injects it into each `new OperationBuilder(...)`.
+     * The extra parameter is appended AFTER the inherited four so existing
+     * positional (`Gisl::createInternal`) and named-argument (parity adapter)
+     * construction keep working — it defaults to null. LSP holds:
+     * `instanceof GislClient` is unaffected.
+     */
+    public function __construct(
+        GislClientConfig $config,
+        ?ClientInterface $httpClient = null,
+        ?RequestFactoryInterface $requestFactory = null,
+        ?StreamFactoryInterface $streamFactory = null,
+        private readonly ?PresetDefaults $presetDefaults = null,
+    ) {
+        parent::__construct($config, $httpClient, $requestFactory, $streamFactory);
+    }
+
+    /**
      * @param array<string, mixed> $options
      */
     public function compress(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'compress', $input, $options);
+        return new OperationBuilder($this, 'compress', $input, $options, $this->presetDefaults);
     }
 
     /**
@@ -45,7 +66,7 @@ class GislErgonomicClient extends GislClient
      */
     public function thumbnail(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'thumbnail', $input, $options);
+        return new OperationBuilder($this, 'thumbnail', $input, $options, $this->presetDefaults);
     }
 
     /**
@@ -53,7 +74,7 @@ class GislErgonomicClient extends GislClient
      */
     public function convert(string $input, array $options = []): OperationBuilder
     {
-        return new OperationBuilder($this, 'convert', $input, $options);
+        return new OperationBuilder($this, 'convert', $input, $options, $this->presetDefaults);
     }
 
     /**

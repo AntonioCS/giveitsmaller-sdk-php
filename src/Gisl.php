@@ -80,6 +80,9 @@ final class Gisl
      * @param ClientInterface|null      $httpClient       Inject a PSR-18 client; defaults to discovery.
      * @param RequestFactoryInterface|null $requestFactory PSR-17 request factory; defaults to discovery.
      * @param StreamFactoryInterface|null  $streamFactory  PSR-17 stream factory; defaults to discovery.
+     * @param PresetDefaults|null           $presetDefaults Client-scope layered compress presets (P6).
+     *                                                      When set, `compress()` calls resolve options
+     *                                                      through the preset chain before the wire.
      */
     public static function create(
         ?string $apiKey = null,
@@ -97,6 +100,7 @@ final class Gisl
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
+        ?PresetDefaults $presetDefaults = null,
     ): GislErgonomicClient {
         return self::createInternal(
             apiKey: $apiKey,
@@ -115,6 +119,7 @@ final class Gisl
             requestFactory: $requestFactory,
             streamFactory: $streamFactory,
             allowAnonymous: false,
+            presetDefaults: $presetDefaults,
         );
     }
 
@@ -183,6 +188,7 @@ final class Gisl
         ?RequestFactoryInterface $requestFactory,
         ?StreamFactoryInterface $streamFactory,
         bool $allowAnonymous,
+        ?PresetDefaults $presetDefaults = null,
     ): GislErgonomicClient {
         $resolvedBaseUrl = Credentials::resolveEndpoint(
             baseUrl: $baseUrl,
@@ -209,6 +215,7 @@ final class Gisl
                 $httpClient,
                 $requestFactory,
                 $streamFactory,
+                $presetDefaults,
             );
         }
 
@@ -253,6 +260,7 @@ final class Gisl
             $httpClient,
             $requestFactory,
             $streamFactory,
+            $presetDefaults,
         );
     }
 }
