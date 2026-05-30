@@ -9,6 +9,8 @@ use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\Http\MultipartPartUploader;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -99,6 +101,26 @@ class GislErgonomicClient extends GislClient
             : PresetDefaults::merge($this->scopedPresetDefaults, $defaults);
 
         return $derived;
+    }
+
+    /**
+     * File-first entry point — the subject of the file-first ergonomic surface.
+     * Returns an immutable {@see Recipe} you call operations on
+     * (`->compress()`, `->convert()`, `->thumbnail()`, `->textWatermark()`),
+     * chaining sequentially. A bare string is treated as a filesystem path; pass
+     * a {@see FileInput} (e.g. {@see FileInput::uploadId()}) to reuse a
+     * pre-uploaded file.
+     *
+     * `$key` is RESULT-addressing only (`$result->byKey($key)` in FF2b) — never
+     * input wiring.
+     *
+     * FF2a builds the recipe + lowering only; execution (`run()`) lands in FF2b.
+     */
+    public function file(string|FileInput $input, ?string $key = null): Recipe
+    {
+        $fileInput = $input instanceof FileInput ? $input : FileInput::path($input);
+
+        return new Recipe($fileInput, $key, [], $this->presetDefaults, $this->scopedPresetDefaults);
     }
 
     /**

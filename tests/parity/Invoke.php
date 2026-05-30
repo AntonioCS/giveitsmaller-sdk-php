@@ -14,6 +14,8 @@ use Gisl\Sdk\Ergonomic\OperationBuilder;
 use Gisl\Sdk\Ergonomic\RunOptions;
 use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\NotYetImplementedDispatch;
+use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
@@ -165,6 +167,57 @@ final class Invoke
                 tempFiles: $tempFiles,
             );
         }
+    }
+
+    /**
+     * FF2a (`MfV0PDok`) — mode=lowering dispatch. Builds a file-first
+     * {@see Recipe} from the fixture's `lowering` block, applies each op in
+     * order, and lowers against `resolvedFileId` to the wire payload. Pure +
+     * network-free — no client, no HTTP stub. The caller deep-compares the
+     * returned array to `expected_payload`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function lower(Fixture $fixture): array
+    {
+        $spec = $fixture->lowering;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] mode=lowering requires a lowering block");
+        }
+        /** @var array<string, mixed> $file */
+        $file = $spec['file'];
+        $key = isset($file['key']) && \is_string($file['key']) ? $file['key'] : null;
+        $input = ($file['kind'] ?? null) === 'upload_id'
+            ? FileInput::uploadId((string) $file['uploadId'])
+            : FileInput::path((string) $file['path']);
+
+        $recipe = new Recipe($input, $key);
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyLoweringOp($recipe, $op);
+        }
+
+        return $recipe->toWorkflowPayload((string) $spec['resolvedFileId'])->toWire();
+    }
+
+    /**
+     * @param array<string, mixed> $op
+     */
+    private static function applyLoweringOp(Recipe $recipe, array $op): Recipe
+    {
+        return match ($op['op']) {
+            'compress' => $recipe->compress(
+                isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
+            ),
+            'convert' => $recipe->convert((string) $op['format']),
+            'thumbnail' => $recipe->thumbnail(
+                isset($op['width']) ? (int) $op['width'] : null,
+                isset($op['height']) ? (int) $op['height'] : null,
+            ),
+            'text_watermark' => $recipe->textWatermark((string) $op['text']),
+            default => throw new \RuntimeException("Unknown lowering op '" . \var_export($op['op'] ?? null, true) . "'"),
+        };
     }
 
     /**

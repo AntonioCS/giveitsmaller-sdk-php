@@ -74,6 +74,10 @@ final class FixtureLoader
         'convert',
         // Multi-input ergonomic verbs (PHP P3 / dxIeLVbP).
         'merge',
+        // File-first builder-chain LOWERING marker (FF2a / MfV0PDok). Not a
+        // GislClient method — `mode=lowering` dispatches off the `lowering`
+        // block, not the method; `file` is the entry point it exercises.
+        'file',
     ];
 
     private const ALLOWED_REQUEST_METHODS = [
@@ -87,7 +91,13 @@ final class FixtureLoader
         Fixture::MODE_SSE,
         Fixture::MODE_WEBHOOK,
         Fixture::MODE_LOCAL_VALIDATION_ERROR,
+        Fixture::MODE_LOWERING,
     ];
+
+    private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark'];
+    private const LOWERING_KEYS = ['file', 'resolvedFileId', 'operations'];
+    private const LOWERING_FILE_KEYS = ['kind', 'path', 'uploadId', 'key'];
+    private const LOWERING_OP_KEYS = ['op', 'optimize', 'format', 'width', 'height', 'text'];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -215,6 +225,23 @@ final class FixtureLoader
                 );
             }
         }
+        if ($mode === Fixture::MODE_LOWERING) {
+            if (\count($requests) !== 0 || \count($responses) !== 0) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=lowering must declare zero requests + zero responses (lowering is network-free)",
+                );
+            }
+            if ($method !== 'file') {
+                throw new \RuntimeException(
+                    "[{$base}] mode=lowering requires sdk.method=\"file\" (got \"{$method}\")",
+                );
+            }
+            if (!\array_key_exists('lowering', $raw) || !\array_key_exists('expected_payload', $raw)) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=lowering requires both a lowering block and an expected_payload block",
+                );
+            }
+        }
 
         $webhook = null;
         if ($mode === Fixture::MODE_WEBHOOK) {
@@ -271,15 +298,22 @@ final class FixtureLoader
         $hasV2Block =
             \array_key_exists('resolvedOptions', $raw)
             || \array_key_exists('omittedFromWire', $raw)
-            || \array_key_exists('localValidationError', $raw);
+            || \array_key_exists('localValidationError', $raw)
+            || \array_key_exists('lowering', $raw)
+            || \array_key_exists('expected_payload', $raw);
         if ($schemaVersion === Fixture::SCHEMA_VERSION_V1 && $hasV2Block) {
             throw new \RuntimeException(
-                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError) require fixtureSchemaVersion: '2.0.0'",
+                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload) require fixtureSchemaVersion: '2.0.0'",
             );
         }
         if ($mode === Fixture::MODE_LOCAL_VALIDATION_ERROR && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
             throw new \RuntimeException(
                 "[{$base}] mode='local_validation_error' requires fixtureSchemaVersion: '2.0.0'",
+            );
+        }
+        if ($mode === Fixture::MODE_LOWERING && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
+            throw new \RuntimeException(
+                "[{$base}] mode='lowering' requires fixtureSchemaVersion: '2.0.0'",
             );
         }
 
@@ -338,6 +372,13 @@ final class FixtureLoader
             }
         }
 
+        $lowering = null;
+        $expectedPayload = null;
+        if (\array_key_exists('lowering', $raw)) {
+            $lowering = self::validateLowering($raw['lowering'], $base);
+            $expectedPayload = $raw['expected_payload'] ?? null;
+        }
+
         return new Fixture(
             name: $name,
             description: $description,
@@ -355,7 +396,123 @@ final class FixtureLoader
             resolvedOptions: $resolvedOptions,
             omittedFromWire: $omittedFromWire,
             localValidationError: $localValidationError,
+            lowering: $lowering,
+            expectedPayload: $expectedPayload,
         );
+    }
+
+    /**
+     * Validate the FF2a `lowering` block: `{file: {kind, path?/uploadId?,
+     * key?}, resolvedFileId, operations: [{op, ...params}]}`. Mirrors the TS
+     * loader's validation so both runners reject the same authoring typos.
+     *
+     * @return array<string, mixed>
+     */
+    private static function validateLowering(mixed $raw, string $base): array
+    {
+        if (!\is_array($raw) || \array_is_list($raw)) {
+            throw new \RuntimeException("[{$base}] lowering must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($raw, self::LOWERING_KEYS, "{$base} lowering");
+        $file = $raw['file'] ?? null;
+        if (!\is_array($file) || \array_is_list($file)) {
+            throw new \RuntimeException("[{$base}] lowering.file must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($file, self::LOWERING_FILE_KEYS, "{$base} lowering.file");
+        $kind = $file['kind'] ?? null;
+        if ($kind !== 'path' && $kind !== 'upload_id') {
+            throw new \RuntimeException("[{$base}] lowering.file.kind must be 'path' or 'upload_id'");
+        }
+        if ($kind === 'path' && (!isset($file['path']) || !\is_string($file['path']) || $file['path'] === '')) {
+            throw new \RuntimeException("[{$base}] lowering.file.path must be a non-empty string when kind=path");
+        }
+        if ($kind === 'upload_id' && (!isset($file['uploadId']) || !\is_string($file['uploadId']) || $file['uploadId'] === '')) {
+            throw new \RuntimeException("[{$base}] lowering.file.uploadId must be a non-empty string when kind=upload_id");
+        }
+        $resolvedFileId = self::requireString($raw, 'resolvedFileId', $base . ' lowering');
+        // For a pre-uploaded input the resolved source id IS the upload id —
+        // enforce they match so a mismatched fixture can't silently lower
+        // against `resolvedFileId` and mask the wrong intent.
+        if ($kind === 'upload_id' && isset($file['uploadId']) && $file['uploadId'] !== $resolvedFileId) {
+            throw new \RuntimeException(
+                "[{$base}] lowering.resolvedFileId must equal lowering.file.uploadId for kind=upload_id",
+            );
+        }
+        $ops = $raw['operations'] ?? null;
+        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
+            throw new \RuntimeException("[{$base}] lowering.operations must be a non-empty sequence");
+        }
+        foreach ($ops as $i => $op) {
+            if (!\is_array($op) || \array_is_list($op)) {
+                throw new \RuntimeException("[{$base}] lowering.operations[{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($op, self::LOWERING_OP_KEYS, "{$base} lowering.operations[{$i}]");
+            $opName = $op['op'] ?? null;
+            if (!\is_string($opName) || !\in_array($opName, self::LOWERING_OPS, true)) {
+                throw new \RuntimeException(
+                    "[{$base}] lowering.operations[{$i}].op must be one of " . \implode('|', self::LOWERING_OPS),
+                );
+            }
+            self::validateLoweringOpParams($opName, $op, "{$base} lowering.operations[{$i}]");
+        }
+        /** @var array<string, mixed> $raw */
+        return $raw;
+    }
+
+    /**
+     * Reject unknown keys in a lowering sub-map so a fixture typo fails fast in
+     * PHP too (the TS loader already rejects via `rejectUnknownKeys`). Mirrors
+     * the TS allowlists so both runners reject the same authoring mistakes.
+     *
+     * @param array<string, mixed> $raw
+     * @param list<string>         $allowed
+     */
+    private static function rejectUnknownLoweringKeys(array $raw, array $allowed, string $ctx): void
+    {
+        $extras = \array_diff(\array_keys($raw), $allowed);
+        if (\count($extras) > 0) {
+            throw new \RuntimeException(
+                "[{$ctx}] unknown key(s): " . \implode(', ', $extras) . '. Allowed: ' . \implode(', ', $allowed),
+            );
+        }
+    }
+
+    /**
+     * Validate per-op required params + scalar types so a malformed fixture
+     * fails at load instead of casting (`(string) null` → `''`, `(int) null`
+     * → `0`) and comparing a payload the author never intended.
+     *
+     * @param array<string, mixed> $op
+     */
+    private static function validateLoweringOpParams(string $opName, array $op, string $ctx): void
+    {
+        switch ($opName) {
+            case 'convert':
+                if (!isset($op['format']) || !\is_string($op['format']) || $op['format'] === '') {
+                    throw new \RuntimeException("[{$ctx}] convert requires a non-empty string 'format'");
+                }
+                break;
+            case 'text_watermark':
+                if (!isset($op['text']) || !\is_string($op['text']) || $op['text'] === '') {
+                    throw new \RuntimeException("[{$ctx}] text_watermark requires a non-empty string 'text'");
+                }
+                break;
+            case 'thumbnail':
+                foreach (['width', 'height'] as $dim) {
+                    if (\array_key_exists($dim, $op) && (!\is_int($op[$dim]) || $op[$dim] < 1)) {
+                        throw new \RuntimeException("[{$ctx}] thumbnail '{$dim}' must be a positive integer");
+                    }
+                }
+                if (!\array_key_exists('width', $op) && !\array_key_exists('height', $op)) {
+                    throw new \RuntimeException("[{$ctx}] thumbnail requires at least one of width/height");
+                }
+                break;
+            case 'compress':
+                if (\array_key_exists('optimize', $op) && (!\is_string($op['optimize']) || $op['optimize'] === '')) {
+                    throw new \RuntimeException("[{$ctx}] compress 'optimize' must be a non-empty string when present");
+                }
+                break;
+        }
     }
 
     /**

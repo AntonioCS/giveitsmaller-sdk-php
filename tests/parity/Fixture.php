@@ -25,6 +25,14 @@ final class Fixture
      * the length-pair check). Requires a `localValidationError` block.
      */
     public const MODE_LOCAL_VALIDATION_ERROR = 'local_validation_error';
+    /**
+     * FF2a (`MfV0PDok`) — file-first builder-chain LOWERING fixtures. The
+     * runner builds a {@see \Gisl\Sdk\FileFirst\Recipe} from the `lowering`
+     * block, lowers it against `lowering.resolvedFileId`, and deep-compares
+     * the wire payload to `expected_payload`. No HTTP (zero requests/
+     * responses) — lowering is pure. Requires fixtureSchemaVersion 2.0.0.
+     */
+    public const MODE_LOWERING = 'lowering';
 
     /**
      * Fixture schema version. v1 = legacy (no v2 blocks); v2 = supports
@@ -51,6 +59,10 @@ final class Fixture
      *                                                              GislConfigError the SDK throws (when
      *                                                              `mode === MODE_LOCAL_VALIDATION_ERROR`).
      *                                                              F4-A.
+     * @param array<string, mixed>|null       $lowering        FF2a builder-chain spec (`mode === MODE_LOWERING`):
+     *                                                          `{file, resolvedFileId, operations[]}`.
+     * @param mixed                            $expectedPayload Expected lowered `WorkflowCreatePayload` wire
+     *                                                          shape (deep-equal target for mode=lowering).
      */
     public function __construct(
         public readonly string $name,
@@ -69,6 +81,8 @@ final class Fixture
         public readonly ?array $resolvedOptions = null,
         public readonly ?array $omittedFromWire = null,
         public readonly ?array $localValidationError = null,
+        public readonly ?array $lowering = null,
+        public readonly mixed $expectedPayload = null,
     ) {
     }
 }

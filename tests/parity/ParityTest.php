@@ -107,6 +107,10 @@ final class ParityTest extends TestCase
             $this->runLocalValidationError($fixture);
             return;
         }
+        if ($fixture->mode === Fixture::MODE_LOWERING) {
+            $this->runLowering($fixture);
+            return;
+        }
 
         $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
         $result = Invoke::run($fixture, $stub);
@@ -185,6 +189,23 @@ final class ParityTest extends TestCase
             'category' => 'unknown',
             'message' => $thrown->getMessage(),
         ];
+    }
+
+    /**
+     * FF2a — mode=lowering. Build the file-first Recipe from the fixture's
+     * chain spec, lower it (network-free), and deep-compare the wire payload
+     * to `expected_payload`. Tokens are a no-op here (lowering is fully
+     * deterministic), so the standard value comparator applies.
+     */
+    private function runLowering(Fixture $fixture): void
+    {
+        $lowered = Invoke::lower($fixture);
+        $issues = Comparator::compareReturn($fixture->expectedPayload, $lowered, 'expected_payload');
+        $this->assertSame(
+            [],
+            $issues,
+            "[{$fixture->name}] lowering parity failure:\n  - " . \implode("\n  - ", $issues),
+        );
     }
 
     private function runWebhook(Fixture $fixture): void
