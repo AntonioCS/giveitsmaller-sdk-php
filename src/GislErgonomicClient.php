@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Gisl\Sdk;
 
 use Gisl\Sdk\Ergonomic\Asset;
+use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
@@ -121,6 +122,19 @@ class GislErgonomicClient extends GislClient
         $fileInput = $input instanceof FileInput ? $input : FileInput::path($input);
 
         return new Recipe($fileInput, $key, [], $this->presetDefaults, $this->scopedPresetDefaults, $this);
+    }
+
+    /**
+     * Reattach to a previously-created workflow (FF5a / Ao8RPVxD). Returns a
+     * client-bound {@see Handle} you can `->status()` / `->wait()` /
+     * `->result()`. The handle carries no `webhookSecret` and no recipe key, so
+     * the {@see \Gisl\Sdk\FileFirst\RunResult} from `wait()`/`result()` is
+     * keyless (`succeeded[].key === null`) — address its outputs positionally
+     * or via the sinks rather than `byKey()`.
+     */
+    public function workflow(string $id): Handle
+    {
+        return new Handle($id, null, $this);
     }
 
     /**

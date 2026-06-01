@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\FileFirst;
 
+use Gisl\Generated\OpenApi\Model\JobDownload;
+use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
+use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislSinkError;
 
@@ -56,6 +59,77 @@ final class RunResult
     ) {
         $this->url = \count($artifacts) === 1 ? $artifacts[0]->url : null;
         $this->ok = $failed === [];
+    }
+
+    /**
+     * Flatten a terminal workflow status + its downloads into a RunResult.
+     *
+     * Shared by {@see Recipe::run()} (passes its recipe key) and the file-first
+     * {@see \Gisl\Sdk\Ergonomic\Handle} reattach surface (`Handle::wait()` /
+     * `Handle::result()` — passes `null` because a reattached handle carries no
+     * recipe key).
+     *
+     * **Partition invariant (carries a prior codex-review fix — do NOT let it
+     * drift):** success is ONLY `state === 'completed'`. Every other terminal
+     * state — `failed`, `partially_failed`, `cancelled`, `expired`,
+     * `paused_insufficient_credits` — partitions into `$failed` so a caller's
+     * `ok`/`succeeded` check can never treat a cancelled/expired/paused run as a
+     * clean result.
+     *
+     * @internal Consumed by {@see Recipe::run()} and the file-first Handle; not
+     *           part of the caller-facing surface.
+     *
+     * @param list<JobDownload> $jobDownloads
+     */
+    public static function fromTerminalDownloads(
+        string $workflowId,
+        WorkflowStatusResponse $finalStatus,
+        array $jobDownloads,
+        ?string $key,
+        ?Downloader $downloader = null,
+    ): self {
+        // Flatten to the lean OutputFile[] (the four file-first fields only).
+        $artifacts = [];
+        foreach ($jobDownloads as $job) {
+            foreach ($job->getFiles() ?? [] as $file) {
+                $artifacts[] = new OutputFile(
+                    url: BuilderInternals::coerceString($file->getDownloadUrl()),
+                    filename: BuilderInternals::coerceString($file->getFilename()),
+                    sizeBytes: (int) ($file->getSizeBytes() ?? 0),
+                    operation: BuilderInternals::coerceString($file->getOperation()),
+                );
+            }
+        }
+
+        $state = BuilderInternals::coerceString($finalStatus->getStatus());
+        if ($state === 'completed') {
+            $succeeded = [new ItemResult($key, $artifacts)];
+            $failed = [];
+        } else {
+            $firstError = null;
+            foreach ($finalStatus->getJobs() ?? [] as $job) {
+                foreach ($job->getOperations() ?? [] as $op) {
+                    if ($op->getErrorMessage() !== null) {
+                        $firstError = $op->getErrorMessage();
+                        break 2;
+                    }
+                }
+            }
+            $succeeded = [];
+            $failed = [new ItemFailure(
+                $key,
+                new \RuntimeException($firstError !== null ? $state . ': ' . $firstError : $state),
+            )];
+        }
+
+        return new self(
+            workflowId: $workflowId,
+            state: $state,
+            artifacts: $artifacts,
+            succeeded: $succeeded,
+            failed: $failed,
+            downloader: $downloader,
+        );
     }
 
     /**

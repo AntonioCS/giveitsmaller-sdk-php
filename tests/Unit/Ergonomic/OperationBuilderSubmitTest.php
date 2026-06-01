@@ -71,6 +71,17 @@ final class OperationBuilderSubmitTest extends TestCase
             'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
             $handle->webhookSecret,
         );
+        // FF5a back-compat: the enriched Handle's toArray() shape must stay
+        // byte-identical to {workflowId, webhookSecret} — no `client` leakage,
+        // no extra keys, fixed field order.
+        $this->assertSame(
+            [
+                'workflowId' => '01936fb2-0000-7000-8000-0000000000c1',
+                'webhookSecret' => 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+            ],
+            $handle->toArray(),
+        );
+        $this->assertArrayNotHasKey('client', $handle->toArray());
 
         // Exactly two outbound requests: upload + workflow create.
         $this->assertCount(2, $captured);

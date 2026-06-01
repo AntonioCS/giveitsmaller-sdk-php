@@ -225,57 +225,16 @@ final class Recipe
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
 
-        // Flatten to the lean OutputFile[] (the four file-first fields only).
-        $artifacts = [];
-        foreach ($downloads->getDownloads() ?? [] as $job) {
-            foreach ($job->getFiles() ?? [] as $file) {
-                $artifacts[] = new OutputFile(
-                    url: BuilderInternals::coerceString($file->getDownloadUrl()),
-                    filename: BuilderInternals::coerceString($file->getFilename()),
-                    sizeBytes: (int) ($file->getSizeBytes() ?? 0),
-                    operation: BuilderInternals::coerceString($file->getOperation()),
-                );
-            }
-        }
-
-        // Partition the single input into succeeded / failed by terminal state.
-        // Success is ONLY `completed`: every other terminal state — `failed`,
-        // `partially_failed`, `cancelled`, `expired`,
-        // `paused_insufficient_credits` — is a non-success and partitions into
-        // `failed` so a caller's `ok`/`succeeded` check can never treat a
-        // cancelled/expired/paused run as a clean result (codex review high).
-        $state = BuilderInternals::coerceString($finalStatus->getStatus());
-        if ($state === 'completed') {
-            $succeeded = [new ItemResult($this->key, $artifacts)];
-            $failed = [];
-        } else {
-            $firstError = null;
-            foreach ($finalStatus->getJobs() ?? [] as $job) {
-                foreach ($job->getOperations() ?? [] as $op) {
-                    if ($op->getErrorMessage() !== null) {
-                        $firstError = $op->getErrorMessage();
-                        break 2;
-                    }
-                }
-            }
-            $succeeded = [];
-            $failed = [new ItemFailure(
-                $this->key,
-                new \RuntimeException($firstError !== null ? $state . ': ' . $firstError : $state),
-            )];
-        }
-
         // Download URLs from getWorkflowDownloads are pre-signed and require no
         // SDK auth, so the downloader issues a plain unauthenticated stream.
-        $downloader = new StreamingDownloader();
-
-        return new RunResult(
+        // The flatten + succeeded/failed partition lives in the shared
+        // RunResult::fromTerminalDownloads() helper (also used by Handle).
+        return RunResult::fromTerminalDownloads(
             workflowId: $workflowId,
-            state: $state,
-            artifacts: $artifacts,
-            succeeded: $succeeded,
-            failed: $failed,
-            downloader: $downloader,
+            finalStatus: $finalStatus,
+            jobDownloads: $downloads->getDownloads() ?? [],
+            key: $this->key,
+            downloader: new StreamingDownloader(),
         );
     }
 

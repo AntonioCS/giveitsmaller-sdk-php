@@ -44,6 +44,17 @@ final class MergeBuilderTest extends TestCase
 
         $this->assertInstanceOf(Handle::class, $handle);
         $this->assertSame('01936fb2-0000-7000-8000-00000000aa03', $handle->workflowId);
+        // FF5a back-compat: submit() now returns the enriched Handle CLASS, but
+        // its toArray() shape must stay byte-identical to {workflowId,
+        // webhookSecret} — no `client` leakage, no extra keys.
+        $this->assertSame(
+            [
+                'workflowId' => '01936fb2-0000-7000-8000-00000000aa03',
+                'webhookSecret' => 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+            ],
+            $handle->toArray(),
+        );
+        $this->assertArrayNotHasKey('client', $handle->toArray());
 
         // 2 uploads + 1 workflow create.
         $this->assertCount(3, $captured);
