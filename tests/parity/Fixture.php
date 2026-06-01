@@ -33,6 +33,14 @@ final class Fixture
      * responses) — lowering is pure. Requires fixtureSchemaVersion 2.0.0.
      */
     public const MODE_LOWERING = 'lowering';
+    /**
+     * FF2b (`tywwynmN`) — file-first RUN execution fixtures. The runner
+     * builds a {@see \Gisl\Sdk\FileFirst\Recipe} from the `run` block,
+     * drives `->run()` against the stubbed upload/create/terminal/downloads
+     * responses, and deep-compares the hydrated RunResult DATA shape to
+     * `expected_run_result`. The Downloader is NOT exercised (canned URLs).
+     */
+    public const MODE_RUN = 'run';
 
     /**
      * Fixture schema version. v1 = legacy (no v2 blocks); v2 = supports
@@ -63,6 +71,10 @@ final class Fixture
      *                                                          `{file, resolvedFileId, operations[]}`.
      * @param mixed                            $expectedPayload Expected lowered `WorkflowCreatePayload` wire
      *                                                          shape (deep-equal target for mode=lowering).
+     * @param array<string, mixed>|null        $run             FF2b run-mode spec (`mode === MODE_RUN`):
+     *                                                          `{file, operations[], maxWait?, pollIntervalMs?}`.
+     * @param mixed                            $expectedRunResult Expected hydrated RunResult DATA shape
+     *                                                            (deep-equal target for mode=run).
      */
     public function __construct(
         public readonly string $name,
@@ -83,6 +95,10 @@ final class Fixture
         public readonly ?array $localValidationError = null,
         public readonly ?array $lowering = null,
         public readonly mixed $expectedPayload = null,
+        // FF2b (tywwynmN) — file-first run-mode block + expected RunResult shape.
+        public readonly ?array $run = null,
+        public readonly mixed $expectedRunResult = null,
+        public readonly bool $hasExpectedRunResult = false,
     ) {
     }
 }

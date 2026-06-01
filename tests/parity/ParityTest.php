@@ -111,6 +111,10 @@ final class ParityTest extends TestCase
             $this->runLowering($fixture);
             return;
         }
+        if ($fixture->mode === Fixture::MODE_RUN) {
+            $this->runRunMode($fixture);
+            return;
+        }
 
         $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
         $result = Invoke::run($fixture, $stub);
@@ -205,6 +209,34 @@ final class ParityTest extends TestCase
             [],
             $issues,
             "[{$fixture->name}] lowering parity failure:\n  - " . \implode("\n  - ", $issues),
+        );
+    }
+
+    /**
+     * FF2b (tywwynmN) — mode=run. Drive `client->file(...)->op()...->run()`
+     * against the fixture's mocked upload/create/terminal/downloads responses
+     * and deep-compare the hydrated RunResult DATA shape (RunResult::toArray)
+     * to the top-level `expected_run_result`. The Downloader is NOT exercised —
+     * the download URLs are canned strings.
+     *
+     * HARNESS NOTE: depends on {@see StubPsr18Client} serving the canned
+     * responses in call order; the run-mode assertion lights up with the rest
+     * of the harness build-out (F4-B / cEUWPgKW).
+     */
+    private function runRunMode(Fixture $fixture): void
+    {
+        $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
+        $actual = Invoke::runRecipe($fixture, $stub);
+
+        $issues = Comparator::compareReturn(
+            $fixture->expectedRunResult,
+            $actual,
+            'expected_run_result',
+        );
+        $this->assertSame(
+            [],
+            $issues,
+            "[{$fixture->name}] run parity failure:\n  - " . \implode("\n  - ", $issues),
         );
     }
 

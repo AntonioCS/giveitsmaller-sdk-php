@@ -120,7 +120,7 @@ class GislErgonomicClient extends GislClient
     {
         $fileInput = $input instanceof FileInput ? $input : FileInput::path($input);
 
-        return new Recipe($fileInput, $key, [], $this->presetDefaults, $this->scopedPresetDefaults);
+        return new Recipe($fileInput, $key, [], $this->presetDefaults, $this->scopedPresetDefaults, $this);
     }
 
     /**

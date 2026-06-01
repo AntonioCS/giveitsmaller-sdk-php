@@ -20,6 +20,8 @@ namespace Gisl\Sdk\Errors;
  *  - `duplicate_filename`    — two outputs share a destination filename in one
  *                              `downloadTo($dir)`, which would silently overwrite.
  *  - `invalid_directory`     — `downloadTo('')` — empty target directory.
+ *  - `write_failed`          — a concrete {@see \Gisl\Sdk\FileFirst\Downloader}
+ *                              could not open or stream to the destination path.
  *
  * Mirrors the TS `GislSinkError` in `packages/typescript/src/errors.ts`.
  */

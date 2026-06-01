@@ -202,6 +202,66 @@ final class Invoke
     }
 
     /**
+     * FF2b (`tywwynmN`) — mode=run dispatch. Builds a file-first {@see Recipe}
+     * from the fixture's `run` block via the ergonomic client (so `run()` has a
+     * bound client), applies each op in order, and drives `->run()` against the
+     * stubbed HTTP client. Returns the hydrated RunResult projected via
+     * {@see \Gisl\Sdk\FileFirst\RunResult::toArray()} so the caller can
+     * deep-compare to `expected_run_result`. Mirrors TS `runRecipeFixture`.
+     *
+     * HARNESS NOTE: depends on {@see StubPsr18Client} serving the canned
+     * upload/create/terminal/downloads responses in call order — see the
+     * SCHEMA.md "mode: run" HARNESS NOTE.
+     *
+     * @return array<string, mixed>
+     */
+    public static function runRecipe(Fixture $fixture, StubPsr18Client $stub): array
+    {
+        $spec = $fixture->run;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] mode=run requires a run block");
+        }
+
+        $factory = new HttpFactory();
+        $config = new GislClientConfig(
+            baseUrl: 'https://api.test.example.com',
+            apiKey: 'test-api-key',
+            multipartConcurrency: 1,
+        );
+        // Build through the ergonomic client so the Recipe carries a client
+        // (run() requires one). The fixture's file path is canned — the stub
+        // serves the upload response without reading real bytes.
+        $client = new GislErgonomicClient(
+            config: $config,
+            httpClient: $stub,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+
+        /** @var array<string, mixed> $file */
+        $file = $spec['file'];
+        $key = isset($file['key']) && \is_string($file['key']) ? $file['key'] : null;
+        $input = ($file['kind'] ?? null) === 'upload_id'
+            ? FileInput::uploadId((string) $file['uploadId'])
+            : FileInput::path((string) $file['path']);
+
+        $recipe = $client->file($input, $key);
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyLoweringOp($recipe, $op);
+        }
+
+        $maxWait = $spec['maxWait'] ?? null;
+        $maxWaitArg = (\is_string($maxWait) || \is_int($maxWait)) ? $maxWait : null;
+        $pollIntervalMs = isset($spec['pollIntervalMs']) ? (int) $spec['pollIntervalMs'] : null;
+
+        $result = $recipe->run(maxWait: $maxWaitArg, pollIntervalMs: $pollIntervalMs);
+
+        return $result->toArray();
+    }
+
+    /**
      * @param array<string, mixed> $op
      */
     private static function applyLoweringOp(Recipe $recipe, array $op): Recipe

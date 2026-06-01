@@ -4,13 +4,19 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\FileFirst;
 
+use Gisl\Sdk\Ergonomic\BuilderInternals;
+use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\PresetResolver;
+use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
+use Gisl\Sdk\GislClient;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
 use Gisl\Sdk\PresetDefaults;
 use Gisl\Sdk\Sources;
+use Gisl\Sdk\UploadOptions;
 use Gisl\Sdk\WorkflowCreatePayload;
 
 /**
@@ -48,6 +54,7 @@ final class Recipe
         private readonly array $steps = [],
         private readonly ?PresetDefaults $presetDefaults = null,
         private readonly ?PresetDefaults $scopedPresetDefaults = null,
+        private readonly ?GislClient $client = null,
     ) {
     }
 
@@ -132,6 +139,146 @@ final class Recipe
         return \count($this->steps);
     }
 
+    /**
+     * Execute the recipe end-to-end: upload the input (when required), create
+     * the workflow, await a terminal state (SSE with poll fallback), then
+     * resolve the produced downloads into a flat {@see RunResult}. Throws
+     * {@see GislTimeoutError} if `$maxWait` elapses before terminal status.
+     *
+     * Mirrors {@see \Gisl\Sdk\Ergonomic\OperationBuilder::run()}. Requires a
+     * client bound at construction time — `Gisl::create()->file(...)` wires it;
+     * a directly-constructed Recipe (e.g. a lowering-only test) has no client
+     * and throws {@see GislConfigError}.
+     *
+     * @param string|int|null $maxWait Wall-clock deadline for the whole run
+     *                                 (upload + create + wait + downloads).
+     *                                 String suffix (`'2h'`/`'30m'`/`'120s'`)
+     *                                 or milliseconds; defaults to 300s.
+     * @param (callable(\Gisl\Sdk\Ergonomic\ProgressEvent): void)|null $onProgress
+     * @param int|null $pollIntervalMs Override the poll-fallback interval (ms).
+     */
+    public function run(
+        string|int|null $maxWait = null,
+        ?callable $onProgress = null,
+        ?int $pollIntervalMs = null,
+    ): RunResult {
+        if ($this->client === null) {
+            throw new GislConfigError(
+                'Recipe::run() requires a client; build the recipe via Gisl::create()->file(...) rather than constructing Recipe directly.',
+                reason: 'no_client',
+            );
+        }
+
+        $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($maxWait ?? 300_000);
+        $onProgressClosure = BuilderInternals::callableOrNull($onProgress, 'Recipe::run() $onProgress');
+
+        // 1. Resolve the upload id. A pre-uploaded id skips the upload entirely;
+        // a path is uploaded now, emitting UploadProgressEvent from the byte
+        // counter. Resource-stream inputs are deferred (see GislClient).
+        if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
+            $fileId = BuilderInternals::coerceString($this->input->fileId);
+        } elseif ($this->input->kind === FileInput::KIND_PATH) {
+            $uploadOpts = $onProgressClosure !== null
+                ? new UploadOptions(
+                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
+                        $onProgressClosure(new UploadProgressEvent($u, $t));
+                    },
+                )
+                : null;
+            $uploadResp = $this->client->uploadFile(BuilderInternals::coerceString($this->input->path), $uploadOpts);
+            $fileId = $uploadResp->getFileId() ?? '';
+        } else {
+            throw new GislConfigError(
+                'Recipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
+                reason: 'resource_input_unsupported',
+            );
+        }
+
+        // Codex TS r2 medium 9a117f04eb59 — check the deadline AFTER upload so
+        // a slow upload doesn't proceed to createWorkflow past the deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Upload completed but maxWait elapsed before workflow could be created.');
+        }
+
+        // 2. Create the workflow from the lowered payload.
+        $payload = $this->toWorkflowPayload($fileId);
+        $created = $this->client->createWorkflow($payload);
+        $workflowId = $created->getWorkflowId() ?? '';
+
+        // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
+        $finalStatus = BuilderInternals::awaitTerminal(
+            client: $this->client,
+            workflowId: $workflowId,
+            deadlineMs: $deadlineMs,
+            onProgress: $onProgressClosure,
+            useSSE: true,
+            pollIntervalMs: $pollIntervalMs,
+        );
+
+        // 4. Fetch downloads. Codex TS r1 medium 42a6ea3b6102 — the maxWait
+        // deadline covers upload + create + wait + downloads, so check before
+        // issuing the request rather than letting a slow call exceed it.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Workflow {$workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",
+            );
+        }
+        $downloads = $this->client->getWorkflowDownloads($workflowId);
+
+        // Flatten to the lean OutputFile[] (the four file-first fields only).
+        $artifacts = [];
+        foreach ($downloads->getDownloads() ?? [] as $job) {
+            foreach ($job->getFiles() ?? [] as $file) {
+                $artifacts[] = new OutputFile(
+                    url: BuilderInternals::coerceString($file->getDownloadUrl()),
+                    filename: BuilderInternals::coerceString($file->getFilename()),
+                    sizeBytes: (int) ($file->getSizeBytes() ?? 0),
+                    operation: BuilderInternals::coerceString($file->getOperation()),
+                );
+            }
+        }
+
+        // Partition the single input into succeeded / failed by terminal state.
+        // Success is ONLY `completed`: every other terminal state — `failed`,
+        // `partially_failed`, `cancelled`, `expired`,
+        // `paused_insufficient_credits` — is a non-success and partitions into
+        // `failed` so a caller's `ok`/`succeeded` check can never treat a
+        // cancelled/expired/paused run as a clean result (codex review high).
+        $state = BuilderInternals::coerceString($finalStatus->getStatus());
+        if ($state === 'completed') {
+            $succeeded = [new ItemResult($this->key, $artifacts)];
+            $failed = [];
+        } else {
+            $firstError = null;
+            foreach ($finalStatus->getJobs() ?? [] as $job) {
+                foreach ($job->getOperations() ?? [] as $op) {
+                    if ($op->getErrorMessage() !== null) {
+                        $firstError = $op->getErrorMessage();
+                        break 2;
+                    }
+                }
+            }
+            $succeeded = [];
+            $failed = [new ItemFailure(
+                $this->key,
+                new \RuntimeException($firstError !== null ? $state . ': ' . $firstError : $state),
+            )];
+        }
+
+        // Download URLs from getWorkflowDownloads are pre-signed and require no
+        // SDK auth, so the downloader issues a plain unauthenticated stream.
+        $downloader = new StreamingDownloader();
+
+        return new RunResult(
+            workflowId: $workflowId,
+            state: $state,
+            artifacts: $artifacts,
+            succeeded: $succeeded,
+            failed: $failed,
+            downloader: $downloader,
+        );
+    }
+
     private function withStep(RecipeStep $step): self
     {
         return new self(
@@ -140,6 +287,7 @@ final class Recipe
             [...$this->steps, $step],
             $this->presetDefaults,
             $this->scopedPresetDefaults,
+            $this->client,
         );
     }
 

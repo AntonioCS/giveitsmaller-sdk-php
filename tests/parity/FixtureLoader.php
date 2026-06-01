@@ -92,12 +92,17 @@ final class FixtureLoader
         Fixture::MODE_WEBHOOK,
         Fixture::MODE_LOCAL_VALIDATION_ERROR,
         Fixture::MODE_LOWERING,
+        // FF2b (tywwynmN) — file-first run-mode execution fixtures.
+        Fixture::MODE_RUN,
     ];
 
     private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark'];
     private const LOWERING_KEYS = ['file', 'resolvedFileId', 'operations'];
     private const LOWERING_FILE_KEYS = ['kind', 'path', 'uploadId', 'key'];
     private const LOWERING_OP_KEYS = ['op', 'optimize', 'format', 'width', 'height', 'text'];
+    // FF2b (tywwynmN) — run-mode block keys: lowering's file + operations
+    // plus the run-only maxWait / pollIntervalMs.
+    private const RUN_KEYS = ['file', 'operations', 'maxWait', 'pollIntervalMs'];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -242,6 +247,27 @@ final class FixtureLoader
                 );
             }
         }
+        if ($mode === Fixture::MODE_RUN) {
+            // FF2b (tywwynmN) — run-mode declares the mocked upload/create/
+            // terminal/downloads `responses` but NO `requests` assertions (wire
+            // parity is covered by mode=lowering + the low-level method
+            // fixtures; run-mode pins the hydrated RunResult).
+            if (\count($requests) !== 0) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=run must declare zero `requests` (it asserts the hydrated RunResult, not wire requests)",
+                );
+            }
+            if ($method !== 'file') {
+                throw new \RuntimeException(
+                    "[{$base}] mode=run requires sdk.method=\"file\" (got \"{$method}\")",
+                );
+            }
+            if (!\array_key_exists('run', $raw) || !\array_key_exists('expected_run_result', $raw)) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=run requires both a run block and an expected_run_result block",
+                );
+            }
+        }
 
         $webhook = null;
         if ($mode === Fixture::MODE_WEBHOOK) {
@@ -300,7 +326,10 @@ final class FixtureLoader
             || \array_key_exists('omittedFromWire', $raw)
             || \array_key_exists('localValidationError', $raw)
             || \array_key_exists('lowering', $raw)
-            || \array_key_exists('expected_payload', $raw);
+            || \array_key_exists('expected_payload', $raw)
+            // FF2b (tywwynmN) — run-mode blocks are v2-only.
+            || \array_key_exists('run', $raw)
+            || \array_key_exists('expected_run_result', $raw);
         if ($schemaVersion === Fixture::SCHEMA_VERSION_V1 && $hasV2Block) {
             throw new \RuntimeException(
                 "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload) require fixtureSchemaVersion: '2.0.0'",
@@ -314,6 +343,11 @@ final class FixtureLoader
         if ($mode === Fixture::MODE_LOWERING && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
             throw new \RuntimeException(
                 "[{$base}] mode='lowering' requires fixtureSchemaVersion: '2.0.0'",
+            );
+        }
+        if ($mode === Fixture::MODE_RUN && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
+            throw new \RuntimeException(
+                "[{$base}] mode='run' requires fixtureSchemaVersion: '2.0.0'",
             );
         }
 
@@ -379,6 +413,16 @@ final class FixtureLoader
             $expectedPayload = $raw['expected_payload'] ?? null;
         }
 
+        // FF2b (tywwynmN) — run-mode block. Reuses the lowering file + op-param
+        // validators (the chain grammar is identical), plus run-only maxWait /
+        // pollIntervalMs keys.
+        $run = null;
+        if (\array_key_exists('run', $raw)) {
+            $run = self::validateRun($raw['run'], $base);
+        }
+        $hasExpectedRunResult = \array_key_exists('expected_run_result', $raw);
+        $expectedRunResult = $hasExpectedRunResult ? $raw['expected_run_result'] : null;
+
         return new Fixture(
             name: $name,
             description: $description,
@@ -398,7 +442,66 @@ final class FixtureLoader
             localValidationError: $localValidationError,
             lowering: $lowering,
             expectedPayload: $expectedPayload,
+            run: $run,
+            expectedRunResult: $expectedRunResult,
+            hasExpectedRunResult: $hasExpectedRunResult,
         );
+    }
+
+    /**
+     * Validate the FF2b `run` block: `{file: {kind, path?/uploadId?, key?},
+     * operations: [{op, ...params}], maxWait?, pollIntervalMs?}`. Reuses the
+     * lowering `file` + op-param validators (the chain grammar is identical);
+     * run adds the run-only `maxWait` / `pollIntervalMs` keys.
+     *
+     * @return array<string, mixed>
+     */
+    private static function validateRun(mixed $raw, string $base): array
+    {
+        if (!\is_array($raw) || \array_is_list($raw)) {
+            throw new \RuntimeException("[{$base}] run must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($raw, self::RUN_KEYS, "{$base} run");
+        $file = $raw['file'] ?? null;
+        if (!\is_array($file) || \array_is_list($file)) {
+            throw new \RuntimeException("[{$base}] run.file must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($file, self::LOWERING_FILE_KEYS, "{$base} run.file");
+        $kind = $file['kind'] ?? null;
+        if ($kind !== 'path' && $kind !== 'upload_id') {
+            throw new \RuntimeException("[{$base}] run.file.kind must be 'path' or 'upload_id'");
+        }
+        if ($kind === 'path' && (!isset($file['path']) || !\is_string($file['path']) || $file['path'] === '')) {
+            throw new \RuntimeException("[{$base}] run.file.path must be a non-empty string when kind=path");
+        }
+        if ($kind === 'upload_id' && (!isset($file['uploadId']) || !\is_string($file['uploadId']) || $file['uploadId'] === '')) {
+            throw new \RuntimeException("[{$base}] run.file.uploadId must be a non-empty string when kind=upload_id");
+        }
+        $ops = $raw['operations'] ?? null;
+        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
+            throw new \RuntimeException("[{$base}] run.operations must be a non-empty sequence");
+        }
+        foreach ($ops as $i => $op) {
+            if (!\is_array($op) || \array_is_list($op)) {
+                throw new \RuntimeException("[{$base}] run.operations[{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($op, self::LOWERING_OP_KEYS, "{$base} run.operations[{$i}]");
+            $opName = $op['op'] ?? null;
+            if (!\is_string($opName) || !\in_array($opName, self::LOWERING_OPS, true)) {
+                throw new \RuntimeException(
+                    "[{$base}] run.operations[{$i}].op must be one of " . \implode('|', self::LOWERING_OPS),
+                );
+            }
+            self::validateLoweringOpParams($opName, $op, "{$base} run.operations[{$i}]");
+        }
+        if (\array_key_exists('maxWait', $raw) && !\is_string($raw['maxWait']) && !\is_int($raw['maxWait'])) {
+            throw new \RuntimeException("[{$base}] run.maxWait must be a string or int when present");
+        }
+        if (\array_key_exists('pollIntervalMs', $raw) && !\is_int($raw['pollIntervalMs'])) {
+            throw new \RuntimeException("[{$base}] run.pollIntervalMs must be an int when present");
+        }
+        /** @var array<string, mixed> $raw */
+        return $raw;
     }
 
     /**

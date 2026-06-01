@@ -1,0 +1,625 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Gisl\Sdk\Tests\FileFirst;
+
+use Gisl\Sdk\Ergonomic\ProcessingProgressEvent;
+use Gisl\Sdk\Ergonomic\ProgressEvent;
+use Gisl\Sdk\Ergonomic\UploadProgressEvent;
+use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislNetworkError;
+use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\Recipe;
+use Gisl\Sdk\GislClient;
+use Gisl\Sdk\GislClientConfig;
+use GuzzleHttp\Psr7\HttpFactory;
+use GuzzleHttp\Psr7\Response;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
+
+/**
+ * FF2b — `Recipe::run()` end-to-end execution over a stubbed PSR-18 client:
+ * upload (when required) → createWorkflow → await terminal (SSE-first with a
+ * poll fallback) → flatten downloads into a {@see RunResult}. The stub serves
+ * responses in call order. Mirrors the TS `file-first-run.test.ts`.
+ */
+final class RecipeRunTest extends TestCase
+{
+    private const WORKFLOW_ID = '01936fb2-0000-7000-8000-000000000001';
+
+    private HttpFactory $factory;
+
+    protected function setUp(): void
+    {
+        $this->factory = new HttpFactory();
+    }
+
+    /**
+     * @param list<ResponseInterface|\Throwable> $queue
+     * @param-out list<RequestInterface>          $captured
+     */
+    private function stubClient(array $queue, array &$captured = []): ClientInterface
+    {
+        $captured = [];
+        return new class ($queue, $captured) implements ClientInterface {
+            /** @var list<ResponseInterface|\Throwable> */
+            private array $queue;
+            /** @var list<RequestInterface> */
+            private array $captured;
+
+            /**
+             * @param list<ResponseInterface|\Throwable> $queue
+             * @param list<RequestInterface>             $captured
+             */
+            public function __construct(array $queue, array &$captured)
+            {
+                $this->queue = $queue;
+                $this->captured = &$captured;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->captured[] = $request;
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub PSR-18 client: response queue exhausted');
+                }
+                if ($next instanceof \Throwable) {
+                    throw $next;
+                }
+                return $next;
+            }
+        };
+    }
+
+    private function makeClient(ClientInterface $http): GislClient
+    {
+        return new GislClient(
+            config: new GislClientConfig(baseUrl: 'https://api.example.com', apiKey: 'sk_test'),
+            httpClient: $http,
+            requestFactory: $this->factory,
+            streamFactory: $this->factory,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function jsonResponse(int $status, array $body): ResponseInterface
+    {
+        return new Response($status, ['Content-Type' => 'application/json'], (string) \json_encode($body, JSON_THROW_ON_ERROR));
+    }
+
+    private function uploadResponse(string $fileId = '01936fb1-7bb3-7000-8000-0000000060f1'): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['file_id' => $fileId, 'content_type' => 'image/jpeg', 'size_bytes' => 2048],
+        ]);
+    }
+
+    private function createResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => 'pending'],
+        ]);
+    }
+
+    private function sseResponse(string $sse): ResponseInterface
+    {
+        return new Response(200, ['Content-Type' => 'text/event-stream'], $sse);
+    }
+
+    /**
+     * @param list<array<string, mixed>> $jobs
+     */
+    private function statusResponse(string $status, array $jobs = []): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => $status, 'jobs' => $jobs],
+        ]);
+    }
+
+    private function downloadsResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'downloads' => [
+                    [
+                        'job_id' => '01936fb3-0001-7000-8000-0000000060f3',
+                        'ref' => 'op',
+                        'files' => [
+                            [
+                                'operation' => 'compress',
+                                'operation_id' => '01936fb4-0001-7000-8000-0000000060f4',
+                                'filename' => 'photo_compressed.jpg',
+                                'size_bytes' => 512,
+                                'download_url' => 'https://signed.example.com/photo_compressed.jpg',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
+    private function tempImage(): string
+    {
+        $tmp = \tempnam(\sys_get_temp_dir(), 'gisl_ff_');
+        self::assertIsString($tmp);
+        $path = $tmp . '.jpg';
+        \rename($tmp, $path);
+        \file_put_contents($path, \str_repeat('x', 2048));
+        return $path;
+    }
+
+    private function recipe(GislClient $client, FileInput $input, ?string $key = null): Recipe
+    {
+        return new Recipe($input, $key, [], null, null, $client);
+    }
+
+    private const TERMINAL_SSE = "event: workflow.completed\ndata: {\"status\":\"completed\"}\n\n";
+
+    #[Test]
+    public function happy_path_via_sse_uploads_creates_awaits_and_flattens_downloads(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $path = $this->tempImage();
+        try {
+            $result = $this->recipe($client, FileInput::path($path))->compress()->run();
+        } finally {
+            @\unlink($path);
+        }
+
+        self::assertSame(self::WORKFLOW_ID, $result->workflowId);
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertSame([], $result->failed);
+        self::assertCount(1, $result->artifacts);
+        self::assertSame('https://signed.example.com/photo_compressed.jpg', $result->artifacts[0]->url);
+        self::assertSame('photo_compressed.jpg', $result->artifacts[0]->filename);
+        self::assertSame(512, $result->artifacts[0]->sizeBytes);
+        self::assertSame('compress', $result->artifacts[0]->operation);
+        // Single output → url sugar set.
+        self::assertSame('https://signed.example.com/photo_compressed.jpg', $result->url);
+        // Keyless success → succeeded=[{key:null, outputs}].
+        self::assertCount(1, $result->succeeded);
+        self::assertNull($result->succeeded[0]->key);
+        self::assertSame($result->artifacts, $result->succeeded[0]->outputs);
+        // upload + create + sse + status + downloads = 5 requests.
+        self::assertCount(5, $captured);
+    }
+
+    #[Test]
+    public function upload_id_arm_makes_no_upload_call_and_uses_the_id_verbatim(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            // NO upload response queued — an upload call would exhaust nothing
+            // useful and the create body must carry the verbatim id.
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->convert('webp')->run();
+
+        self::assertSame('completed', $result->state);
+        // No upload happened → first captured request is the workflow create.
+        self::assertCount(4, $captured);
+        self::assertStringContainsString('/api/workflows', (string) $captured[0]->getUri());
+        $body = (string) $captured[0]->getBody();
+        self::assertStringContainsString('file_existing', $body);
+    }
+
+    #[Test]
+    public function poll_fallback_when_sse_ends_without_a_terminal_event(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponse(),
+            // SSE ends with only a progress frame → no terminal → fall to poll.
+            $this->sseResponse("event: operation.progress\ndata: {\"progress\":50}\n\n"),
+            $this->statusResponse('completed'),   // waitForWorkflow first poll
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $path = $this->tempImage();
+        try {
+            $result = $this->recipe($client, FileInput::path($path))->compress()->run(pollIntervalMs: 0);
+        } finally {
+            @\unlink($path);
+        }
+
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertCount(1, $result->artifacts);
+    }
+
+    #[Test]
+    public function timeout_throws_when_deadline_elapses_before_terminal(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponse(),
+            // SSE ends without terminal → poll fallback with a 0ms budget.
+            $this->sseResponse("event: operation.progress\ndata: {\"progress\":1}\n\n"),
+            $this->statusResponse('in_progress'),
+            $this->statusResponse('in_progress'),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        // uploadId arm (no upload) keeps the queue tight; maxWait 1 (1ms) →
+        // the deadline elapses almost immediately and a non-terminal status
+        // trips the poll fallback's timeout. (maxWait 0 is rejected by
+        // MaxWait::parse, which requires a positive budget.)
+        try {
+            $this->recipe($client, FileInput::uploadId('file_existing'))
+                ->compress()
+                ->run(maxWait: 1, pollIntervalMs: 0);
+            self::fail('expected GislTimeoutError');
+        } catch (GislTimeoutError) {
+            // Expected — the deadline elapsed before a terminal status.
+        }
+
+        // A timeout MUST short-circuit before fetching downloads — mirrors the
+        // TS `expect(getWorkflowDownloads).not.toHaveBeenCalled()` assertion.
+        foreach ($captured as $request) {
+            self::assertStringNotContainsString(
+                '/downloads',
+                (string) $request->getUri(),
+                'no /downloads request should be issued when the run times out',
+            );
+        }
+    }
+
+    #[Test]
+    public function no_client_guard_throws_config_error_with_reason_no_client(): void
+    {
+        $bare = new Recipe(FileInput::path('photo.jpg'));
+        try {
+            $bare->compress()->run();
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertSame('no_client', $e->getReason());
+        }
+    }
+
+    #[Test]
+    public function resource_input_arm_throws_resource_input_unsupported(): void
+    {
+        // A resource-stream input is not yet supported by run() — it must fail
+        // fast with a typed config error BEFORE any network call.
+        $stream = \fopen('php://memory', 'rb');
+        self::assertIsResource($stream);
+        $http = $this->stubClient([]);   // empty queue — no request should fire
+        $client = $this->makeClient($http);
+        try {
+            $this->recipe($client, FileInput::resource($stream))->compress()->run();
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertSame('resource_input_unsupported', $e->getReason());
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function on_progress_emits_upload_and_processing_events(): void
+    {
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponse(),
+            $this->sseResponse(
+                "event: operation.progress\ndata: {\"progress\":60}\n\n" . self::TERMINAL_SSE,
+            ),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $path = $this->tempImage();
+        /** @var list<ProgressEvent> $events */
+        $events = [];
+        try {
+            $this->recipe($client, FileInput::path($path))->compress()->run(
+                onProgress: function (ProgressEvent $e) use (&$events): void {
+                    $events[] = $e;
+                },
+            );
+        } finally {
+            @\unlink($path);
+        }
+
+        $uploads = \array_filter($events, static fn (ProgressEvent $e): bool => $e instanceof UploadProgressEvent);
+        $processing = \array_filter($events, static fn (ProgressEvent $e): bool => $e instanceof ProcessingProgressEvent);
+        self::assertNotEmpty($uploads, 'expected an UploadProgressEvent');
+        self::assertNotEmpty($processing, 'expected a ProcessingProgressEvent');
+        // Single-shot upload reports (fileSize, fileSize) byte counters.
+        $upload = \array_values($uploads)[0];
+        self::assertInstanceOf(UploadProgressEvent::class, $upload);
+        self::assertSame(2048, $upload->uploadedBytes);
+        self::assertSame(2048, $upload->totalBytes);
+    }
+
+    #[Test]
+    public function failed_terminal_partitions_into_failed_with_ok_false(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            // getWorkflowStatus after SSE terminal carries the failed status + error.
+            $this->statusResponse('failed', [
+                ['operations' => [['error_message' => 'codec exploded']]],
+            ]),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertSame('failed', $result->state);
+        self::assertFalse($result->ok);
+        self::assertSame([], $result->succeeded);
+        self::assertCount(1, $result->failed);
+        self::assertNull($result->failed[0]->key);
+        self::assertInstanceOf(\Throwable::class, $result->failed[0]->error);
+        // The error message is "{state}: {firstOpErrorMessage}" — pin the
+        // content, not just the type, so a misformatted partition is caught.
+        self::assertSame('failed: codec exploded', $result->failed[0]->error->getMessage());
+    }
+
+    #[Test]
+    public function failed_terminal_picks_first_defined_op_error_message(): void
+    {
+        // First operation carries no error_message; the partition must walk on
+        // to the later op that does — pinning the find/break-2 selection.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            $this->statusResponse('failed', [
+                ['operations' => [
+                    [],
+                    ['error_message' => 'later op blew up'],
+                ]],
+            ]),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertSame('failed', $result->state);
+        self::assertSame('failed: later op blew up', $result->failed[0]->error->getMessage());
+    }
+
+    #[Test]
+    public function partially_failed_terminal_is_treated_as_a_failure(): void
+    {
+        // A partial failure must NOT be misclassified as success. SSE yields the
+        // workflow.partially_failed terminal event, then the status carries the
+        // partially_failed state plus a per-op error message.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.partially_failed\ndata: {\"status\":\"partially_failed\"}\n\n"),
+            $this->statusResponse('partially_failed', [
+                ['operations' => [['error_message' => 'codec exploded']]],
+            ]),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertSame('partially_failed', $result->state);
+        self::assertFalse($result->ok);
+        self::assertSame([], $result->succeeded);
+        self::assertCount(1, $result->failed);
+        self::assertNull($result->failed[0]->key);
+        self::assertInstanceOf(\Throwable::class, $result->failed[0]->error);
+        self::assertSame('partially_failed: codec exploded', $result->failed[0]->error->getMessage());
+    }
+
+    #[Test]
+    public function multi_file_downloads_flatten_in_order_with_null_url_sugar(): void
+    {
+        // One job carrying TWO files flattens to 2 artifacts in order; the
+        // single-output `url` sugar is null because there is more than one.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'downloads' => [
+                        [
+                            'job_id' => '01936fb3-0001-7000-8000-0000000060f3',
+                            'ref' => 'op',
+                            'files' => [
+                                [
+                                    'operation' => 'convert',
+                                    'operation_id' => '01936fb4-0002-7000-8000-0000000060f5',
+                                    'filename' => 'page_1.png',
+                                    'size_bytes' => 100,
+                                    'download_url' => 'https://signed.example.com/page_1.png',
+                                ],
+                                [
+                                    'operation' => 'convert',
+                                    'operation_id' => '01936fb4-0002-7000-8000-0000000060f5',
+                                    'filename' => 'page_2.png',
+                                    'size_bytes' => 110,
+                                    'download_url' => 'https://signed.example.com/page_2.png',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ]),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->convert('png')->run();
+
+        self::assertCount(2, $result->artifacts);
+        self::assertSame('https://signed.example.com/page_1.png', $result->artifacts[0]->url);
+        self::assertSame('page_1.png', $result->artifacts[0]->filename);
+        self::assertSame(100, $result->artifacts[0]->sizeBytes);
+        self::assertSame('convert', $result->artifacts[0]->operation);
+        self::assertSame('https://signed.example.com/page_2.png', $result->artifacts[1]->url);
+        self::assertSame('page_2.png', $result->artifacts[1]->filename);
+        self::assertSame(110, $result->artifacts[1]->sizeBytes);
+        self::assertSame('convert', $result->artifacts[1]->operation);
+        // >1 output → single-output url sugar is null.
+        self::assertNull($result->url);
+    }
+
+    #[Test]
+    public function empty_downloads_yield_zero_artifacts_but_ok_true(): void
+    {
+        // A completed workflow whose downloads carry no files yields zero
+        // artifacts, a null url sugar, and an empty-outputs success entry.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => ['downloads' => []],
+            ]),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertSame([], $result->artifacts);
+        // Zero outputs → single-output url sugar is null.
+        self::assertNull($result->url);
+        // Keyless completed run → succeeded=[{key:null, outputs:[]}].
+        self::assertCount(1, $result->succeeded);
+        self::assertSame([], $result->succeeded[0]->outputs);
+        self::assertSame([], $result->failed);
+    }
+
+    #[Test]
+    public function poll_fallback_when_sse_request_throws_at_transport_level(): void
+    {
+        // The SSE/events request fails at the PSR-18 transport level (a queued
+        // GislNetworkError, which implements ClientExceptionInterface). run()
+        // must recover by polling getWorkflowStatus to a terminal state.
+        $sseError = new GislNetworkError('events transport down');
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $sseError,                              // streamEvents() request throws
+            $this->statusResponse('completed'),     // poll fallback → terminal
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))
+            ->compress()
+            ->run(pollIntervalMs: 0);
+
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertCount(1, $result->artifacts);
+    }
+
+    #[Test]
+    public function downloader_is_bound_so_to_file_does_not_throw_downloader_unavailable(): void
+    {
+        // run() binds a StreamingDownloader. Pointing the single output at a
+        // local file:// URL lets toFile() copy it without a network call — the
+        // copy succeeding proves a downloader was bound (the unbound path
+        // throws GislSinkError reason 'downloader_unavailable').
+        $sourcePath = \tempnam(\sys_get_temp_dir(), 'gisl_src_');
+        self::assertIsString($sourcePath);
+        \file_put_contents($sourcePath, 'OUTPUT-BYTES');
+
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'downloads' => [
+                        [
+                            'job_id' => '01936fb3-0001-7000-8000-0000000060f3',
+                            'ref' => 'op',
+                            'files' => [
+                                [
+                                    'operation' => 'compress',
+                                    'operation_id' => '01936fb4-0001-7000-8000-0000000060f4',
+                                    'filename' => 'out.jpg',
+                                    'size_bytes' => 12,
+                                    'download_url' => 'file://' . $sourcePath,
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ]),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        $dest = \tempnam(\sys_get_temp_dir(), 'gisl_dst_');
+        self::assertIsString($dest);
+        try {
+            // Does NOT throw downloader_unavailable — a downloader was bound.
+            $result->toFile($dest);
+            self::assertSame('OUTPUT-BYTES', \file_get_contents($dest));
+        } finally {
+            @\unlink($sourcePath);
+            @\unlink($dest);
+        }
+    }
+
+    #[Test]
+    public function key_threads_into_the_result_so_by_key_resolves(): void
+    {
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'), 'hero')->compress()->run();
+
+        self::assertSame('hero', $result->succeeded[0]->key);
+        $item = $result->byKey('hero');
+        self::assertSame('hero', $item->key);
+        self::assertSame($result->artifacts, $item->outputs);
+    }
+}
