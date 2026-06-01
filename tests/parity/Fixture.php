@@ -75,6 +75,11 @@ final class Fixture
      *                                                          `{file, operations[], maxWait?, pollIntervalMs?}`.
      * @param mixed                            $expectedRunResult Expected hydrated RunResult DATA shape
      *                                                            (deep-equal target for mode=run).
+     * @param array<string, mixed>|null        $submit          FF5b submit spec (request_response mode,
+     *                                                          method=file): `{file, operations[], webhook?}`.
+     *                                                          The runner drives `->submit()`; compareRequests
+     *                                                          asserts the create callback_url + the returned
+     *                                                          Handle is compared via `expected_return`.
      */
     public function __construct(
         public readonly string $name,
@@ -99,6 +104,8 @@ final class Fixture
         public readonly ?array $run = null,
         public readonly mixed $expectedRunResult = null,
         public readonly bool $hasExpectedRunResult = false,
+        // FF5b (u8M49LU2) — file-first submit block (request_response mode).
+        public readonly ?array $submit = null,
     ) {
     }
 }

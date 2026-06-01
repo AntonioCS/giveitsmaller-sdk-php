@@ -262,6 +262,58 @@ final class Invoke
     }
 
     /**
+     * FF5b (`u8M49LU2`) — submit dispatch. Builds a file-first {@see Recipe}
+     * from the fixture's `submit` block via the ergonomic client (so `submit()`
+     * has a bound client), applies each op in order, and drives `->submit()`
+     * against the stubbed HTTP client. Returns the resulting {@see Handle}
+     * projected via {@see \Gisl\Sdk\Ergonomic\Handle::toArray()} so the caller
+     * can deep-compare to `expected_return`; request parity (the create
+     * `callback_url`) is asserted by the standard request comparator. Mirrors TS
+     * `submitRecipeFixture`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function submitRecipe(Fixture $fixture, StubPsr18Client $stub): array
+    {
+        $spec = $fixture->submit;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] a submit fixture requires a submit block");
+        }
+
+        $factory = new HttpFactory();
+        $config = new GislClientConfig(
+            baseUrl: 'https://api.test.example.com',
+            apiKey: 'test-api-key',
+            multipartConcurrency: 1,
+        );
+        $client = new GislErgonomicClient(
+            config: $config,
+            httpClient: $stub,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+
+        /** @var array<string, mixed> $file */
+        $file = $spec['file'];
+        $key = isset($file['key']) && \is_string($file['key']) ? $file['key'] : null;
+        $input = ($file['kind'] ?? null) === 'upload_id'
+            ? FileInput::uploadId((string) $file['uploadId'])
+            : FileInput::path((string) $file['path']);
+
+        $recipe = $client->file($input, $key);
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyLoweringOp($recipe, $op);
+        }
+
+        $webhook = isset($spec['webhook']) && \is_string($spec['webhook']) ? $spec['webhook'] : null;
+        $handle = $recipe->submit($webhook);
+
+        return $handle->toArray();
+    }
+
+    /**
      * @param array<string, mixed> $op
      */
     private static function applyLoweringOp(Recipe $recipe, array $op): Recipe

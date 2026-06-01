@@ -45,6 +45,16 @@ final class Handle
         public readonly string $workflowId,
         public readonly ?string $webhookSecret = null,
         private readonly ?GislClient $client = null,
+        // The recipe's result-addressing key, threaded from a file-first
+        // `submit()` ({@see \Gisl\Sdk\FileFirst\Recipe::submit()}) so the
+        // {@see RunResult} from `wait()`/`result()` is keyed
+        // (`succeeded[].key === $key`). It is NOT secret (a plain readonly
+        // field, unlike `$client`) but is deliberately kept OUT of
+        // {@see toArray()} so the operation-first/merge `submit()` back-compat
+        // shape (`{workflowId, webhookSecret?}`) stays byte-identical. A
+        // reattached handle (`client->workflow(id)`) passes no key → null →
+        // keyless RunResult.
+        public readonly ?string $key = null,
     ) {
     }
 
@@ -107,7 +117,7 @@ final class Handle
             workflowId: $this->workflowId,
             finalStatus: $finalStatus,
             jobDownloads: $downloads->getDownloads() ?? [],
-            key: null,
+            key: $this->key,
             downloader: new StreamingDownloader(),
         );
     }
@@ -136,7 +146,7 @@ final class Handle
             workflowId: $this->workflowId,
             finalStatus: $status,
             jobDownloads: $downloads->getDownloads() ?? [],
-            key: null,
+            key: $this->key,
             downloader: new StreamingDownloader(),
         );
     }

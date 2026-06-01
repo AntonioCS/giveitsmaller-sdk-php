@@ -103,6 +103,9 @@ final class FixtureLoader
     // FF2b (tywwynmN) — run-mode block keys: lowering's file + operations
     // plus the run-only maxWait / pollIntervalMs.
     private const RUN_KEYS = ['file', 'operations', 'maxWait', 'pollIntervalMs'];
+    // FF5b (u8M49LU2) — submit block keys: lowering's file + operations plus
+    // the submit-only optional webhook.
+    private const SUBMIT_KEYS = ['file', 'operations', 'webhook'];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -268,6 +271,30 @@ final class FixtureLoader
                 );
             }
         }
+        // FF5b (u8M49LU2) — a `submit` block routes a file-first chain through
+        // the STANDARD request_response flow (so compareRequests can assert the
+        // create callback_url). Gated to request_response mode + method:file.
+        // The length-pair check above already enforces matching requests +
+        // responses. A bare method:file in request_response WITHOUT a submit
+        // block has no dispatch, so reject it.
+        if (\array_key_exists('submit', $raw)) {
+            if ($mode !== Fixture::MODE_REQUEST_RESPONSE) {
+                throw new \RuntimeException(
+                    "[{$base}] a submit block requires the default request_response mode (got mode=\"{$mode}\"); "
+                    . 'mode=run forbids a requests block and cannot assert the create callback_url',
+                );
+            }
+            if ($method !== 'file') {
+                throw new \RuntimeException(
+                    "[{$base}] a submit block requires sdk.method=\"file\" (got \"{$method}\")",
+                );
+            }
+        } elseif ($method === 'file' && $mode === Fixture::MODE_REQUEST_RESPONSE) {
+            throw new \RuntimeException(
+                "[{$base}] sdk.method=\"file\" in request_response mode requires a submit block (FF5b). "
+                . 'Use mode=lowering / mode=run for the other file-first dispatches.',
+            );
+        }
 
         $webhook = null;
         if ($mode === Fixture::MODE_WEBHOOK) {
@@ -329,10 +356,12 @@ final class FixtureLoader
             || \array_key_exists('expected_payload', $raw)
             // FF2b (tywwynmN) — run-mode blocks are v2-only.
             || \array_key_exists('run', $raw)
-            || \array_key_exists('expected_run_result', $raw);
+            || \array_key_exists('expected_run_result', $raw)
+            // FF5b (u8M49LU2) — submit blocks are v2-only.
+            || \array_key_exists('submit', $raw);
         if ($schemaVersion === Fixture::SCHEMA_VERSION_V1 && $hasV2Block) {
             throw new \RuntimeException(
-                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload) require fixtureSchemaVersion: '2.0.0'",
+                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload / run / submit) require fixtureSchemaVersion: '2.0.0'",
             );
         }
         if ($mode === Fixture::MODE_LOCAL_VALIDATION_ERROR && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
@@ -423,6 +452,14 @@ final class FixtureLoader
         $hasExpectedRunResult = \array_key_exists('expected_run_result', $raw);
         $expectedRunResult = $hasExpectedRunResult ? $raw['expected_run_result'] : null;
 
+        // FF5b (u8M49LU2) — submit block. Reuses the lowering file + op-param
+        // validators (the chain grammar is identical), plus the submit-only
+        // optional webhook key.
+        $submit = null;
+        if (\array_key_exists('submit', $raw)) {
+            $submit = self::validateSubmit($raw['submit'], $base);
+        }
+
         return new Fixture(
             name: $name,
             description: $description,
@@ -445,6 +482,7 @@ final class FixtureLoader
             run: $run,
             expectedRunResult: $expectedRunResult,
             hasExpectedRunResult: $hasExpectedRunResult,
+            submit: $submit,
         );
     }
 
@@ -499,6 +537,59 @@ final class FixtureLoader
         }
         if (\array_key_exists('pollIntervalMs', $raw) && !\is_int($raw['pollIntervalMs'])) {
             throw new \RuntimeException("[{$base}] run.pollIntervalMs must be an int when present");
+        }
+        /** @var array<string, mixed> $raw */
+        return $raw;
+    }
+
+    /**
+     * Validate the FF5b `submit` block: `{file: {kind, path?/uploadId?, key?},
+     * operations: [{op, ...params}], webhook?}`. Reuses the lowering `file` +
+     * op-param validators (the chain grammar is identical); submit adds the
+     * submit-only optional `webhook` key. Mirrors the TS `validateSubmit`.
+     *
+     * @return array<string, mixed>
+     */
+    private static function validateSubmit(mixed $raw, string $base): array
+    {
+        if (!\is_array($raw) || \array_is_list($raw)) {
+            throw new \RuntimeException("[{$base}] submit must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($raw, self::SUBMIT_KEYS, "{$base} submit");
+        $file = $raw['file'] ?? null;
+        if (!\is_array($file) || \array_is_list($file)) {
+            throw new \RuntimeException("[{$base}] submit.file must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($file, self::LOWERING_FILE_KEYS, "{$base} submit.file");
+        $kind = $file['kind'] ?? null;
+        if ($kind !== 'path' && $kind !== 'upload_id') {
+            throw new \RuntimeException("[{$base}] submit.file.kind must be 'path' or 'upload_id'");
+        }
+        if ($kind === 'path' && (!isset($file['path']) || !\is_string($file['path']) || $file['path'] === '')) {
+            throw new \RuntimeException("[{$base}] submit.file.path must be a non-empty string when kind=path");
+        }
+        if ($kind === 'upload_id' && (!isset($file['uploadId']) || !\is_string($file['uploadId']) || $file['uploadId'] === '')) {
+            throw new \RuntimeException("[{$base}] submit.file.uploadId must be a non-empty string when kind=upload_id");
+        }
+        $ops = $raw['operations'] ?? null;
+        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
+            throw new \RuntimeException("[{$base}] submit.operations must be a non-empty sequence");
+        }
+        foreach ($ops as $i => $op) {
+            if (!\is_array($op) || \array_is_list($op)) {
+                throw new \RuntimeException("[{$base}] submit.operations[{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($op, self::LOWERING_OP_KEYS, "{$base} submit.operations[{$i}]");
+            $opName = $op['op'] ?? null;
+            if (!\is_string($opName) || !\in_array($opName, self::LOWERING_OPS, true)) {
+                throw new \RuntimeException(
+                    "[{$base}] submit.operations[{$i}].op must be one of " . \implode('|', self::LOWERING_OPS),
+                );
+            }
+            self::validateLoweringOpParams($opName, $op, "{$base} submit.operations[{$i}]");
+        }
+        if (\array_key_exists('webhook', $raw) && (!\is_string($raw['webhook']) || $raw['webhook'] === '')) {
+            throw new \RuntimeException("[{$base}] submit.webhook must be a non-empty string when present");
         }
         /** @var array<string, mixed> $raw */
         return $raw;

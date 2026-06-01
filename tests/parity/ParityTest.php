@@ -115,6 +115,10 @@ final class ParityTest extends TestCase
             $this->runRunMode($fixture);
             return;
         }
+        if ($fixture->submit !== null) {
+            $this->runSubmit($fixture);
+            return;
+        }
 
         $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
         $result = Invoke::run($fixture, $stub);
@@ -238,6 +242,41 @@ final class ParityTest extends TestCase
             $issues,
             "[{$fixture->name}] run parity failure:\n  - " . \implode("\n  - ", $issues),
         );
+    }
+
+    /**
+     * FF5b (u8M49LU2) — submit dispatch. Drive
+     * `client->file(...)->op()...->submit(webhook?)` against the fixture's
+     * mocked create response through the STANDARD request_response flow, then
+     * assert BOTH the captured create request (`callback_url`, via
+     * {@see Comparator::compareRequests}) AND the returned Handle DATA shape
+     * (`{workflowId, webhookSecret}` — the recipe key is NOT serialised) against
+     * `expected_return`. Mirrors the TS submit arm in `parity.test.ts`.
+     */
+    private function runSubmit(Fixture $fixture): void
+    {
+        $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
+        $actual = Invoke::submitRecipe($fixture, $stub);
+
+        $requestIssues = Comparator::compareRequests($fixture, $stub);
+        $this->assertSame(
+            [],
+            $requestIssues,
+            "[{$fixture->name}] request parity failure:\n  - " . \implode("\n  - ", $requestIssues),
+        );
+
+        if ($fixture->hasExpectedReturn) {
+            $returnIssues = Comparator::compareReturn(
+                $fixture->expectedReturn,
+                $actual,
+                'expected_return',
+            );
+            $this->assertSame(
+                [],
+                $returnIssues,
+                "[{$fixture->name}] return parity failure:\n  - " . \implode("\n  - ", $returnIssues),
+            );
+        }
     }
 
     private function runWebhook(Fixture $fixture): void

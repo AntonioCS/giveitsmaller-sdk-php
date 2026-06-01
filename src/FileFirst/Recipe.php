@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\FileFirst;
 
+use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
+use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
@@ -108,11 +110,16 @@ final class Recipe
      * `operations[]`; the job `id` is omitted (a single job referenced by
      * nothing — the server auto-assigns `job_N`).
      *
-     * @internal Consumed by FF2b's `run()` (after a real upload) and by the
-     *           cross-language parity harness (with a fixed id). Not part of the
-     *           caller-facing fluent surface.
+     * When `$callbackUrl` is given (the file-first `submit()` path), it is built
+     * INTO the payload at construction (`callback_url`) rather than spread onto
+     * an already-built readonly payload. `run()` passes no `$callbackUrl`.
+     *
+     * @internal Consumed by FF2b's `run()` (after a real upload), FF5b's
+     *           `submit()` (with a webhook), and the cross-language parity
+     *           harness (with a fixed id). Not part of the caller-facing fluent
+     *           surface.
      */
-    public function toWorkflowPayload(string $fileId): WorkflowCreatePayload
+    public function toWorkflowPayload(string $fileId, ?string $callbackUrl = null): WorkflowCreatePayload
     {
         $operations = [];
         foreach ($this->steps as $step) {
@@ -124,7 +131,7 @@ final class Recipe
             source: Sources::upload($fileId),
         );
 
-        return new WorkflowCreatePayload(jobs: [$job]);
+        return new WorkflowCreatePayload(jobs: [$job], callbackUrl: $callbackUrl);
     }
 
     /** The result-addressing key passed to `file()`, or null. */
@@ -172,37 +179,9 @@ final class Recipe
         $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($maxWait ?? 300_000);
         $onProgressClosure = BuilderInternals::callableOrNull($onProgress, 'Recipe::run() $onProgress');
 
-        // 1. Resolve the upload id. A pre-uploaded id skips the upload entirely;
-        // a path is uploaded now, emitting UploadProgressEvent from the byte
-        // counter. Resource-stream inputs are deferred (see GislClient).
-        if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
-            $fileId = BuilderInternals::coerceString($this->input->fileId);
-        } elseif ($this->input->kind === FileInput::KIND_PATH) {
-            $uploadOpts = $onProgressClosure !== null
-                ? new UploadOptions(
-                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                        $onProgressClosure(new UploadProgressEvent($u, $t));
-                    },
-                )
-                : null;
-            $uploadResp = $this->client->uploadFile(BuilderInternals::coerceString($this->input->path), $uploadOpts);
-            $fileId = $uploadResp->getFileId() ?? '';
-        } else {
-            throw new GislConfigError(
-                'Recipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
-                reason: 'resource_input_unsupported',
-            );
-        }
-
-        // Codex TS r2 medium 9a117f04eb59 — check the deadline AFTER upload so
-        // a slow upload doesn't proceed to createWorkflow past the deadline.
-        if (BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Upload completed but maxWait elapsed before workflow could be created.');
-        }
-
-        // 2. Create the workflow from the lowered payload.
-        $payload = $this->toWorkflowPayload($fileId);
-        $created = $this->client->createWorkflow($payload);
+        // 1+2. Upload (when required) + create the workflow. Shared with
+        // submit() (which passes a webhook → callback_url). run() passes none.
+        $created = $this->uploadAndCreate(null, $deadlineMs, $onProgressClosure);
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -236,6 +215,102 @@ final class Recipe
             key: $this->key,
             downloader: new StreamingDownloader(),
         );
+    }
+
+    /**
+     * Fire-and-forget the recipe: upload the input (when required), create the
+     * workflow (wiring `$webhook` into `callback_url` when given), and return a
+     * client-bound {@see Handle} carrying the workflow id + webhook secret + the
+     * recipe key. Does NOT wait for terminal status — call `$handle->wait()` /
+     * `$handle->result()` later to collect the {@see RunResult}.
+     *
+     * Requires a client bound at construction time (same `no_client` guard as
+     * {@see run()}). `$webhook` is OPTIONAL: when null, no `callback_url` is
+     * sent. Mirrors the TS `Recipe.submit()`.
+     *
+     * @param string|null $webhook Absolute callback URL the server POSTs
+     *                             lifecycle events to.
+     */
+    public function submit(?string $webhook = null): Handle
+    {
+        if ($this->client === null) {
+            throw new GislConfigError(
+                'Recipe::submit() requires a client; build the recipe via Gisl::create()->file(...) rather than constructing Recipe directly.',
+                reason: 'no_client',
+            );
+        }
+
+        // submit() is fire-and-forget — NO whole-run deadline. The upload may be
+        // large (a multi-GB master, example 12) and is bounded by the HTTP
+        // client's own request timeout, not an arbitrary submit-side cap. Pass
+        // null so the post-upload deadline check is skipped: a 300s cap here
+        // would throw on a slow-but-successful big upload before createWorkflow
+        // (codex).
+        $created = $this->uploadAndCreate($webhook, null, null);
+
+        return new Handle(
+            workflowId: $created->getWorkflowId() ?? '',
+            webhookSecret: $created->getWebhookSecret(),
+            client: $this->client,
+            key: $this->key,
+        );
+    }
+
+    /**
+     * Resolve the upload id (verbatim for a pre-uploaded id; uploading a path
+     * otherwise via the byte-counter progress closure; resource-stream inputs
+     * throw `resource_input_unsupported`), check the post-upload deadline, lower
+     * to the workflow-create payload (wiring `$webhook` into `callback_url`),
+     * and create the workflow. Shared first half of {@see run()} + {@see submit()}.
+     *
+     * The post-upload deadline check carries a prior codex fix (9a117f04eb59):
+     * a slow upload must not proceed to createWorkflow past the deadline.
+     *
+     * @param \Closure|null $onProgressClosure Already-coerced progress closure.
+     */
+    private function uploadAndCreate(
+        ?string $webhook,
+        ?int $deadlineMs,
+        ?\Closure $onProgressClosure,
+    ): WorkflowCreateResponse {
+        // 1. Resolve the upload id. A pre-uploaded id skips the upload entirely;
+        // a path is uploaded now, emitting UploadProgressEvent from the byte
+        // counter. Resource-stream inputs are deferred (see GislClient).
+        if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
+            $fileId = BuilderInternals::coerceString($this->input->fileId);
+        } elseif ($this->input->kind === FileInput::KIND_PATH) {
+            $uploadOpts = $onProgressClosure !== null
+                ? new UploadOptions(
+                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
+                        $onProgressClosure(new UploadProgressEvent($u, $t));
+                    },
+                )
+                : null;
+            $uploadResp = $this->client?->uploadFile(BuilderInternals::coerceString($this->input->path), $uploadOpts);
+            $fileId = $uploadResp?->getFileId() ?? '';
+        } else {
+            throw new GislConfigError(
+                'Recipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
+                reason: 'resource_input_unsupported',
+            );
+        }
+
+        // Codex TS r2 medium 9a117f04eb59 — run() passes a whole-run deadline so
+        // a slow upload doesn't proceed to createWorkflow past maxWait. submit()
+        // passes null (fire-and-forget, no upload cap), so the check is skipped.
+        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Upload completed but maxWait elapsed before workflow could be created.');
+        }
+
+        // 2. Create the workflow from the lowered payload (callback_url built
+        // into the payload at construction when a webhook is given).
+        $payload = $this->toWorkflowPayload($fileId, $webhook);
+
+        // Guaranteed non-null by the no_client guard in run()/submit() before
+        // this private helper is reached.
+        \assert($this->client !== null);
+
+        return $this->client->createWorkflow($payload);
     }
 
     private function withStep(RecipeStep $step): self

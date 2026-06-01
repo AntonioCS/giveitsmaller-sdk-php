@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Tests\FileFirst;
 
+use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\ProcessingProgressEvent;
 use Gisl\Sdk\Ergonomic\ProgressEvent;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislNetworkError;
+use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\Recipe;
@@ -108,6 +110,30 @@ final class RecipeRunTest extends TestCase
         return $this->jsonResponse(200, [
             'success' => true,
             'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => 'pending'],
+        ]);
+    }
+
+    private function createResponseWithWebhookSecret(): ResponseInterface
+    {
+        return $this->jsonResponse(201, [
+            'success' => true,
+            'data' => [
+                'workflow_id' => self::WORKFLOW_ID,
+                'status' => 'pending',
+                // webhook_secret has a fixed-length 64-char constraint in the
+                // OpenAPI spec; the generated validator rejects other lengths.
+                'webhook_secret' => 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+                'created_at' => '2026-05-27T11:00:00Z',
+                'jobs' => [],
+                'delivery_plan' => [
+                    'mode' => 'individual',
+                    'selection_type' => 'terminal',
+                    'outputs' => [],
+                    'hidden_outputs' => [],
+                ],
+                'processing_plan' => ['jobs' => []],
+                'warnings' => [],
+            ],
         ]);
     }
 
@@ -621,5 +647,196 @@ final class RecipeRunTest extends TestCase
         $item = $result->byKey('hero');
         self::assertSame('hero', $item->key);
         self::assertSame($result->artifacts, $item->outputs);
+    }
+
+    // ----------------------------------------------------------------------
+    // FF5b — Recipe::submit(): fire-and-forget upload + create, returning a
+    // client-bound Handle that carries the recipe key, WITHOUT waiting.
+    // ----------------------------------------------------------------------
+
+    #[Test]
+    public function submit_uploads_and_creates_returns_a_handle_and_does_not_wait(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponseWithWebhookSecret(),
+            // NO sse / status / downloads queued — submit() must NOT consult
+            // any of them. Reaching for one would exhaust the queue and throw.
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $path = $this->tempImage();
+        try {
+            $handle = $this->recipe($client, FileInput::path($path))->compress()->submit();
+        } finally {
+            @\unlink($path);
+        }
+
+        self::assertInstanceOf(Handle::class, $handle);
+        self::assertSame(self::WORKFLOW_ID, $handle->workflowId);
+        self::assertSame(
+            'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+            $handle->webhookSecret,
+        );
+        // Exactly two outbound requests: upload + workflow create. No wait,
+        // no status poll, no downloads fetch.
+        self::assertCount(2, $captured);
+        self::assertStringContainsString('/api/uploads', (string) $captured[0]->getUri());
+        self::assertStringContainsString('/api/workflows', (string) $captured[1]->getUri());
+        foreach ($captured as $request) {
+            self::assertStringNotContainsString('/events', (string) $request->getUri());
+            self::assertStringNotContainsString('/downloads', (string) $request->getUri());
+            self::assertStringNotContainsString('/status', (string) $request->getUri());
+        }
+    }
+
+    #[Test]
+    public function submit_with_webhook_wires_callback_url_onto_the_create_payload(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponseWithWebhookSecret(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $this->recipe($client, FileInput::uploadId('file_existing'))
+            ->compress()
+            ->submit('https://example.com/cb');
+
+        self::assertCount(1, $captured);
+        self::assertStringContainsString('/api/workflows', (string) $captured[0]->getUri());
+        $body = \json_decode((string) $captured[0]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertSame('https://example.com/cb', $body['callback_url']);
+    }
+
+    #[Test]
+    public function submit_without_webhook_omits_callback_url_from_the_create_payload(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponseWithWebhookSecret(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $this->recipe($client, FileInput::uploadId('file_existing'))
+            ->compress()
+            ->submit();
+
+        self::assertCount(1, $captured);
+        $body = \json_decode((string) $captured[0]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertArrayNotHasKey('callback_url', $body);
+    }
+
+    #[Test]
+    public function submit_upload_id_arm_makes_no_upload_call_and_uses_the_id_verbatim(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            // NO upload response queued — submit() with a pre-uploaded id must
+            // skip the upload entirely and reference the id verbatim.
+            $this->createResponseWithWebhookSecret(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $handle = $this->recipe($client, FileInput::uploadId('file_x'))
+            ->convert('webp')
+            ->submit();
+
+        self::assertSame(self::WORKFLOW_ID, $handle->workflowId);
+        // No upload happened → the only request is the workflow create.
+        self::assertCount(1, $captured);
+        self::assertStringContainsString('/api/workflows', (string) $captured[0]->getUri());
+        $body = \json_decode((string) $captured[0]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertSame('upload', $body['jobs'][0]['source']['type']);
+        self::assertSame('file_x', $body['jobs'][0]['source']['file_id']);
+    }
+
+    #[Test]
+    public function submit_no_client_guard_throws_config_error_with_reason_no_client(): void
+    {
+        $bare = new Recipe(FileInput::path('photo.jpg'));
+        try {
+            $bare->compress()->submit();
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertSame('no_client', $e->getReason());
+        }
+    }
+
+    #[Test]
+    public function submitted_handle_is_keyed_so_its_result_is_addressable_by_key(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            // submit(): create (no upload — id arm).
+            $this->createResponseWithWebhookSecret(),
+            // result(): one status fetch (terminal) + downloads.
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $handle = $this->recipe($client, FileInput::uploadId('file_x'), 'hero')
+            ->compress()
+            ->submit();
+
+        $result = $handle->result();
+
+        self::assertSame('hero', $result->succeeded[0]->key);
+        $item = $result->byKey('hero');
+        self::assertSame('hero', $item->key);
+        self::assertSame($result->artifacts, $item->outputs);
+    }
+
+    #[Test]
+    public function reattached_handle_has_no_key_so_its_result_is_keyless_and_by_key_throws(): void
+    {
+        // Contrast to the submit-KEYED case: a Handle built with no recipe key
+        // (the client->workflow(id) reattach surface) projects a keyless
+        // RunResult, and byKey() then throws.
+        $http = $this->stubClient([
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $reattached = new Handle(
+            workflowId: self::WORKFLOW_ID,
+            client: $client,
+        );
+
+        $result = $reattached->result();
+
+        self::assertNull($result->succeeded[0]->key);
+        $this->expectException(GislNoSuchKeyError::class);
+        $result->byKey('hero');
+    }
+
+    #[Test]
+    public function keyed_handle_to_array_stays_byte_identical_and_never_serialises_the_key(): void
+    {
+        // Back-compat pin: a Handle carrying the 4th (key) arg must still
+        // serialise to exactly {workflowId, webhookSecret} — the key is never
+        // emitted, so the operation-first/merge submit() shape can't drift.
+        $keyed = new Handle(
+            workflowId: self::WORKFLOW_ID,
+            webhookSecret: 'whsec_abc',
+            key: 'hero',
+        );
+
+        self::assertSame(
+            ['workflowId' => self::WORKFLOW_ID, 'webhookSecret' => 'whsec_abc'],
+            $keyed->toArray(),
+        );
+        self::assertArrayNotHasKey('key', $keyed->toArray());
+
+        // And with no webhookSecret → exactly {workflowId}.
+        $keyedNoSecret = new Handle(workflowId: self::WORKFLOW_ID, key: 'hero');
+        self::assertSame(['workflowId' => self::WORKFLOW_ID], $keyedNoSecret->toArray());
+        self::assertArrayNotHasKey('key', $keyedNoSecret->toArray());
     }
 }
