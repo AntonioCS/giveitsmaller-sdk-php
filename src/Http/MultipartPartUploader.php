@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Http;
 
-use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
-
 /**
  * Strategy seam for uploading the chunk PUTs of a multipart upload (P6+
  * `z9bDW2iH`). The default {@see GislClient} path is a sequential PSR-18 loop;
@@ -30,16 +28,20 @@ use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
  *
  * Returns a `partNumber => etag` map; the caller assembles the ordered
  * `/multipart/complete` part list (parts may complete out of order under
- * concurrency).
+ * concurrency). Serves both the fresh-upload and resume paths — the descriptor
+ * carries the plain `partNumber` + presigned `url` so the seam does not depend
+ * on the generated `PresignedUrlPart` model (the resume path has only the
+ * array-shaped presign data).
  */
 interface MultipartPartUploader
 {
     /**
      * Upload the given parts (bounded by `$concurrency`) and return their ETags.
      *
-     * @param list<array{presigned: PresignedUrlPart, offset: int, length: int}> $parts
+     * @param list<array{partNumber: int, url: string, offset: int, length: int}> $parts
      *        Lazy descriptors — `offset`/`length` index into `$filePath`; chunk
-     *        bytes are read on demand, never pre-materialised.
+     *        bytes are read on demand, never pre-materialised. `url` is the
+     *        presigned S3 PUT target for `partNumber`.
      * @param callable(int $partNumber, int $bytes): void $onPartComplete
      *
      * @return array<int, string> partNumber => ETag

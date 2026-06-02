@@ -104,8 +104,9 @@ use Psr\Http\Message\StreamFactoryInterface;
  * to S3 concurrently, bounded by `GislClientConfig::$multipartConcurrency`.
  * With no uploader injected (direct construction, or concurrency 1, or
  * ext-curl absent) chunks are PUT one at a time. The resume path
- * (`resumeUploadId`) is still sequential — concurrent resume is a follow-up.
- * SSE and the parity runner arrive in `VOxtu0RZ-B2` (`bf68ju2r`).
+ * (`resumeUploadId`) uses the same uploader, concurrent per batch of missing
+ * parts (`7Vl01jFs`). SSE and the parity runner arrive in `VOxtu0RZ-B2`
+ * (`bf68ju2r`).
  *
  * The HTTP transport is PSR-18 abstract — callers may inject their own
  * client / factories, or let php-http/discovery resolve installed
@@ -377,18 +378,23 @@ class GislClient
 
         // Build lazy part descriptors (offset/length index into the file — no
         // chunk is materialised until its PUT runs).
-        /** @var list<array{presigned: PresignedUrlPart, offset: int, length: int}> $descriptors */
+        /** @var list<array{partNumber: int, url: string, offset: int, length: int}> $descriptors */
         $descriptors = [];
         foreach ($presignedUrls as $index => $part) {
             if (!$part instanceof PresignedUrlPart) {
                 throw new GislError("Multipart initiate response had a malformed presigned URL at index {$index}.");
             }
-            if ($part->getPartNumber() === null) {
+            $partNumber = $part->getPartNumber();
+            if ($partNumber === null) {
                 throw new GislError("Presigned URL at index {$index} missing part_number.");
+            }
+            $url = $part->getUrl();
+            if (!\is_string($url) || $url === '') {
+                throw new GislError("Presigned URL at index {$index} (part {$partNumber}) missing url.");
             }
             $start = $firstChunkSize + $index * $chunkSize;
             $end = \min($start + $chunkSize, $totalSize);
-            $descriptors[] = ['presigned' => $part, 'offset' => $start, 'length' => $end - $start];
+            $descriptors[] = ['partNumber' => $partNumber, 'url' => $url, 'offset' => $start, 'length' => $end - $start];
         }
 
         // Progress fires after EACH successful part (concurrent or sequential).
@@ -415,16 +421,15 @@ class GislClient
             $etagByPart = [];
             foreach ($descriptors as $d) {
                 $etag = $this->putChunkWithRetry(
-                    presigned: $d['presigned'],
+                    partNumber: $d['partNumber'],
+                    url: $d['url'],
                     filePath: $filePath,
                     offset: $d['offset'],
                     length: $d['length'],
                     uploadId: $uploadId,
                 );
-                /** @var int $pn */
-                $pn = $d['presigned']->getPartNumber();
-                $etagByPart[$pn] = $etag;
-                $onPartComplete($pn, $d['length']);
+                $etagByPart[$d['partNumber']] = $etag;
+                $onPartComplete($d['partNumber'], $d['length']);
             }
         }
 
@@ -596,11 +601,33 @@ class GislClient
         }
         $this->fireProgress($options, $uploadedBytes, $totalSize);
 
-        $fireCheckpoint = function (?int $extraPartNumber = null) use (&$uploaded, $status, $options): void {
-            $all = \array_keys($uploaded);
-            if ($extraPartNumber !== null && !\in_array($extraPartNumber, $all, true)) {
-                $all[] = $extraPartNumber;
+        // Parts PUT during THIS resume run but not yet folded into $uploaded.
+        // Under the concurrent uploader, ETags are only known once the batch
+        // returns, so the per-part completion callback records the partNumber
+        // here and the checkpoint unions it — otherwise a checkpoint fired
+        // mid-batch (out-of-order completion) would under-report progress.
+        // Empty on the sequential path (it folds into $uploaded inline), where
+        // the union is a harmless no-op. partNumber => true.
+        /** @var array<int, true> $resumeCompleted */
+        $resumeCompleted = [];
+
+        $fireCheckpoint = function (?int $extraPartNumber = null) use (&$uploaded, &$resumeCompleted, $status, $options): void {
+            // Union the part numbers via a keyed set (O(1) membership) rather
+            // than in_array() over a growing list — a 10k-part resume would
+            // otherwise do quadratic work per per-part callback.
+            /** @var array<int, true> $set */
+            $set = [];
+            foreach (\array_keys($uploaded) as $pn) {
+                $set[$pn] = true;
             }
+            foreach (\array_keys($resumeCompleted) as $pn) {
+                $set[$pn] = true;
+            }
+            if ($extraPartNumber !== null) {
+                $set[$extraPartNumber] = true;
+            }
+            /** @var list<int> $all */
+            $all = \array_keys($set);
             \sort($all);
             $state = new MultipartCheckpointState(
                 uploadId: $status['uploadId'],
@@ -618,52 +645,115 @@ class GislClient
         // even before any new PUT lands.
         $fireCheckpoint();
 
-        // Step 3: Process batches of <=100 missing parts.
-        /** @var list<array{part_number:int,etag:string}> $newParts */
-        $newParts = [];
+        // Step 3: Process batches of <=100 missing parts. Each batch is
+        // presigned, then its chunks are PUT either concurrently (when a
+        // bounded uploader is injected — Gisl::create on ext-curl) or
+        // sequentially. Batches stay sequential so presigned-URL expiry is
+        // bounded to one batch's worth of in-flight work.
         $batchSize = 100;
         for ($i = 0; $i < \count($missingParts); $i += $batchSize) {
             $batch = \array_slice($missingParts, $i, $batchSize);
             $presigned = $this->presignParts($uploadId, $batch, $totalParts);
+
+            // Lazy descriptors for this batch. Offset math mirrors the fresh
+            // upload: part 1 = firstChunkSize, parts 2..N =
+            // firstChunkSize + (partNumber - 2) * chunkSize. Resume never PUTs
+            // part 1 (unrecoverable check earlier).
+            /** @var list<array{partNumber: int, url: string, offset: int, length: int}> $descriptors */
+            $descriptors = [];
+            /** @var array<int, int> $lengthByPart */
+            $lengthByPart = [];
             foreach ($presigned['presignedUrls'] as $presignedPart) {
                 $partNumber = $presignedPart['partNumber'];
-                // Mirrors fresh-upload offset math: part 1 = firstChunkSize,
-                // parts 2..N = firstChunkSize + (partNumber - 2) * chunkSize.
-                // Resume never PUTs part 1 (unrecoverable check earlier).
                 $start = $firstChunkSize + ($partNumber - 2) * $chunkSize;
                 $end = \min($start + $chunkSize, $totalSize);
                 $contentLength = $end - $start;
+                $descriptors[] = [
+                    'partNumber' => $partNumber,
+                    'url' => $presignedPart['url'],
+                    'offset' => $start,
+                    'length' => $contentLength,
+                ];
+                $lengthByPart[$partNumber] = $contentLength;
+            }
 
-                // Surface read failures as the typed GislMultipartPartError
-                // (mirrors fresh-path putChunkWithRetry pattern).
-                try {
-                    $chunkBytes = $this->readChunk($filePath, $start, $contentLength);
-                } catch (GislError $e) {
-                    throw new GislMultipartPartError(
-                        "multipartResume: failed to read bytes for part {$partNumber}: " . $e->getMessage(),
-                        $partNumber,
-                        $uploadId,
-                    );
-                }
+            if ($this->partUploader !== null) {
+                // Concurrent PUTs. ETags arrive only when the batch returns, so
+                // the per-part callback drives progress + checkpoint (recording
+                // the completed partNumber in $resumeCompleted, which the
+                // checkpoint unions), and the ETags are folded into $uploaded
+                // afterwards in ascending order.
+                $onPartComplete = function (int $partNumber, int $bytes) use (
+                    &$uploadedBytes,
+                    &$resumeCompleted,
+                    $totalSize,
+                    $options,
+                    $fireCheckpoint,
+                ): void {
+                    $uploadedBytes = \min($uploadedBytes + $bytes, $totalSize);
+                    $resumeCompleted[$partNumber] = true;
+                    $this->fireProgress($options, $uploadedBytes, $totalSize);
+                    $fireCheckpoint();
+                };
 
-                $etag = $this->resumePutWithRetry(
-                    url: $presignedPart['url'],
-                    chunkBytes: $chunkBytes,
-                    contentLength: $contentLength,
-                    partNumber: $partNumber,
-                    uploadId: $uploadId,
+                $etagByPart = $this->partUploader->uploadParts(
+                    $filePath,
+                    $descriptors,
+                    $uploadId,
+                    $this->config->multipartConcurrency,
+                    $onPartComplete,
                 );
 
-                $newParts[] = ['part_number' => $partNumber, 'etag' => $etag];
-                $uploaded[$partNumber] = [
-                    'partNumber' => $partNumber,
-                    'etag' => $etag,
-                    'sizeBytes' => $contentLength,
-                    'lastModified' => \gmdate('Y-m-d\\TH:i:s\\Z'),
-                ];
-                $uploadedBytes = \min($uploadedBytes + $contentLength, $totalSize);
-                $this->fireProgress($options, $uploadedBytes, $totalSize);
-                $fireCheckpoint();
+                \ksort($etagByPart);
+                foreach ($etagByPart as $partNumber => $etag) {
+                    $uploaded[$partNumber] = [
+                        'partNumber' => $partNumber,
+                        'etag' => $etag,
+                        'sizeBytes' => $lengthByPart[$partNumber],
+                        'lastModified' => \gmdate('Y-m-d\\TH:i:s\\Z'),
+                    ];
+                }
+                // This batch is now in $uploaded; drop it from the pending set
+                // so the checkpoint union stays bounded to one batch's parts
+                // (it is otherwise unbounded across a many-batch resume).
+                $resumeCompleted = [];
+            } else {
+                // Sequential PSR-18 path (direct construction / concurrency 1 /
+                // no ext-curl). Read-once-retry-many per part.
+                foreach ($descriptors as $d) {
+                    $partNumber = $d['partNumber'];
+                    $contentLength = $d['length'];
+
+                    // Surface read failures as the typed GislMultipartPartError
+                    // (mirrors fresh-path putChunkWithRetry pattern).
+                    try {
+                        $chunkBytes = $this->readChunk($filePath, $d['offset'], $contentLength);
+                    } catch (GislError $e) {
+                        throw new GislMultipartPartError(
+                            "multipartResume: failed to read bytes for part {$partNumber}: " . $e->getMessage(),
+                            $partNumber,
+                            $uploadId,
+                        );
+                    }
+
+                    $etag = $this->resumePutWithRetry(
+                        url: $d['url'],
+                        chunkBytes: $chunkBytes,
+                        contentLength: $contentLength,
+                        partNumber: $partNumber,
+                        uploadId: $uploadId,
+                    );
+
+                    $uploaded[$partNumber] = [
+                        'partNumber' => $partNumber,
+                        'etag' => $etag,
+                        'sizeBytes' => $contentLength,
+                        'lastModified' => \gmdate('Y-m-d\\TH:i:s\\Z'),
+                    ];
+                    $uploadedBytes = \min($uploadedBytes + $contentLength, $totalSize);
+                    $this->fireProgress($options, $uploadedBytes, $totalSize);
+                    $fireCheckpoint();
+                }
             }
         }
 
@@ -727,10 +817,11 @@ class GislClient
     }
 
     /**
-     * Resume-path PUT loop. PHP-side is sequential (mirrors the
-     * `lv43MVSl`-deferred concurrent variant of the fresh path). Bounded
-     * retry + full-jitter backoff. Read-once-retry-many — chunk bytes are
-     * captured by the caller and passed in.
+     * Resume-path sequential PUT loop — used when no concurrent uploader is
+     * injected (direct construction / concurrency 1 / ext-curl absent). When an
+     * uploader IS present the resume path PUTs each batch through it instead
+     * (`7Vl01jFs`). Bounded retry + full-jitter backoff. Read-once-retry-many —
+     * chunk bytes are captured by the caller and passed in.
      */
     private function resumePutWithRetry(
         string $url,
@@ -1133,18 +1224,13 @@ class GislClient
      * every transient S3 failure.
      */
     private function putChunkWithRetry(
-        PresignedUrlPart $presigned,
+        int $partNumber,
+        string $url,
         string $filePath,
         int $offset,
         int $length,
         string $uploadId,
     ): string {
-        $url = $presigned->getUrl();
-        if (!\is_string($url) || $url === '') {
-            throw new GislError("Presigned URL part {$presigned->getPartNumber()} has empty url.");
-        }
-
-        $partNumber = $presigned->getPartNumber() ?? 0;
         // Surface a read failure for THIS part as the typed
         // GislMultipartPartError (partNumber + uploadId), consistent with the
         // PUT-failure path below — a bare GislError from readChunk (short

@@ -6,8 +6,10 @@ namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Sdk\Errors\GislError;
 use Gisl\Sdk\Errors\GislMultipartPartCountError;
+use Gisl\Sdk\Errors\GislMultipartPartError;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
+use Gisl\Sdk\Http\MultipartPartUploader;
 use Gisl\Sdk\MultipartCheckpointState;
 use Gisl\Sdk\UploadOptions;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -190,6 +192,486 @@ final class GislClientUploadResumeTest extends TestCase
         // /presign batch carried [3, 5] in order.
         $presignBody = \json_decode((string) $captured[1]->getBody(), true, 16, JSON_THROW_ON_ERROR);
         self::assertSame([3, 5], $presignBody['part_numbers']);
+    }
+
+    public function testConcurrentUploaderDrivesResumeMissingParts(): void
+    {
+        // totalParts=5, parts [1,2,4] recorded -> missing [3,5]. An injected
+        // uploader owns the part PUTs, completing them OUT OF ORDER (5 then 3)
+        // to prove the checkpoint union reflects all completed parts even
+        // before ETags are folded into $uploaded.
+        $totalParts = 5;
+        $fileSize = ($totalParts - 1) * self::CHUNK + 4 * 1024 * 1024; // 68 MiB
+        $filePath = $this->writeBigFile($fileSize);
+
+        // No S3 PUTs queued — uploader handles them. Captured = [/status, /presign, /complete].
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: '01936fb2-0000-7000-8000-00000000c0c0',
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 4,
+                parts: [1, 2, 4],
+            )),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => '01936fb2-0000-7000-8000-00000000c0c0',
+                    'presigned_urls' => [
+                        ['part_number' => 3, 'url' => 'https://s3.example.com/c-p3', 'expires_at' => '2026-05-21T12:00:00Z'],
+                        ['part_number' => 5, 'url' => 'https://s3.example.com/c-p5', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => ['upload_id' => '01936fb2-0000-7000-8000-00000000c0c0', 'status' => 'completed'],
+            ]),
+        ], $captured);
+
+        $fake = new class implements MultipartPartUploader {
+            /** @var list<array{partNumber: int, url: string, offset: int, length: int}> */
+            public array $seen = [];
+            public int $sawConcurrency = -1;
+
+            public function uploadParts(
+                string $filePath,
+                array $parts,
+                string $uploadId,
+                int $concurrency,
+                callable $onPartComplete,
+            ): array {
+                $this->seen = $parts;
+                $this->sawConcurrency = $concurrency;
+                // Complete OUT OF ORDER: highest part first.
+                $byPart = [];
+                foreach ($parts as $d) {
+                    $byPart[$d['partNumber']] = $d;
+                }
+                \krsort($byPart);
+                $etags = [];
+                foreach ($byPart as $pn => $d) {
+                    $onPartComplete($pn, $d['length']);
+                    $etags[$pn] = "\"conc-etag-{$pn}\"";
+                }
+
+                return $etags;
+            }
+        };
+
+        $checkpoints = [];
+        $progress = [];
+        $client = $this->makeClient($http, $fake);
+        $result = $client->uploadFile(
+            $filePath,
+            new UploadOptions(
+                onProgress: static function (int $up, int $tot) use (&$progress): void {
+                    $progress[] = [$up, $tot];
+                },
+                resumeUploadId: '01936fb2-0000-7000-8000-00000000c0c0',
+                onCheckpoint: static function (MultipartCheckpointState $s) use (&$checkpoints): void {
+                    $checkpoints[] = $s->uploadedPartNumbers;
+                },
+            ),
+        );
+
+        self::assertSame('01936fb2-0000-7000-8000-00000000c0c0', $result->getFileId());
+
+        // Uploader handled the PUTs -> only /status, /presign, /complete hit HTTP.
+        self::assertCount(3, $captured);
+        foreach ($captured as $req) {
+            self::assertStringNotContainsString('s3.example.com', (string) $req->getUri());
+        }
+
+        // Uploader received exactly the missing parts [3, 5] with correct
+        // offsets/lengths + the configured concurrency (default 4). Part 5 is
+        // the short tail (68 MiB - 56 MiB = 12 MiB).
+        self::assertSame(4, $fake->sawConcurrency);
+        self::assertSame([
+            ['partNumber' => 3, 'url' => 'https://s3.example.com/c-p3', 'offset' => 8_388_608 + self::CHUNK, 'length' => self::CHUNK],
+            ['partNumber' => 5, 'url' => 'https://s3.example.com/c-p5', 'offset' => 8_388_608 + 3 * self::CHUNK, 'length' => $fileSize - (8_388_608 + 3 * self::CHUNK)],
+        ], $fake->seen);
+
+        // /complete carries ALL parts ascending: recorded 1,2,4 + uploader 3,5.
+        $completeBody = \json_decode((string) $captured[2]->getBody(), true, 16, JSON_THROW_ON_ERROR);
+        self::assertSame([1, 2, 3, 4, 5], \array_map(fn ($p) => $p['part_number'], $completeBody['parts']));
+        $etagByPart = [];
+        foreach ($completeBody['parts'] as $p) {
+            $etagByPart[$p['part_number']] = $p['etag'];
+        }
+        self::assertSame('"conc-etag-3"', $etagByPart[3]);
+        self::assertSame('"conc-etag-5"', $etagByPart[5]);
+        self::assertSame('"etag-1"', $etagByPart[1]);
+
+        // Checkpoints: entry [1,2,4]; after part 5 completes (out of order)
+        // [1,2,4,5]; after part 3 [1,2,3,4,5]. Union reflects completed parts
+        // before their ETags are folded into $uploaded.
+        self::assertSame([1, 2, 4], $checkpoints[0]);
+        self::assertSame([1, 2, 4, 5], $checkpoints[1]);
+        self::assertSame([1, 2, 3, 4, 5], $checkpoints[\count($checkpoints) - 1]);
+
+        // Progress ends at the full file size.
+        self::assertSame($fileSize, $progress[\count($progress) - 1][0]);
+    }
+
+    /**
+     * Criterion 4 — typed-error parity (retry-exhaustion). Sequential resume
+     * path (no uploader injected): every PUT on the single missing part
+     * returns 503. After multipartMaxAttempts (default 3) the throw is the
+     * TYPED GislMultipartPartError carrying the failing part number +
+     * uploadId — mirrors the fresh-path
+     * GislClientMultipartTest::testRetryExhaustionThrowsTypedMultipartPartError.
+     */
+    public function testSequentialResumeRetryExhaustionThrowsTypedMultipartPartError(): void
+    {
+        $totalParts = 3;
+        $fileSize = ($totalParts - 1) * self::CHUNK + 4 * 1024 * 1024;
+        $filePath = $this->writeBigFile($fileSize);
+
+        $captured = [];
+        // /status (parts 1,2; missing [3]) -> /presign -> 3x S3 503 (attempts).
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: '01936fb2-0000-7000-8000-0000000e0e01',
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 2,
+                parts: [1, 2],
+            )),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => '01936fb2-0000-7000-8000-0000000e0e01',
+                    'presigned_urls' => [
+                        ['part_number' => 3, 'url' => 'https://s3.example.com/e1-p3', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+            new Response(503, [], 'service unavailable'),
+            new Response(503, [], 'service unavailable'),
+            new Response(503, [], 'service unavailable'),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->uploadFile($filePath, new UploadOptions(resumeUploadId: '01936fb2-0000-7000-8000-0000000e0e01'));
+            self::fail('Expected GislMultipartPartError');
+        } catch (GislMultipartPartError $e) {
+            self::assertInstanceOf(GislError::class, $e);
+            self::assertSame(3, $e->partNumber);
+            self::assertSame('01936fb2-0000-7000-8000-0000000e0e01', $e->uploadId);
+            // /status + /presign + 3 PUT attempts = 5. No /complete.
+            self::assertCount(5, $captured);
+            foreach ($captured as $req) {
+                self::assertStringNotContainsString('/complete', (string) $req->getUri());
+            }
+        }
+    }
+
+    /**
+     * Criterion 4 — typed-error parity (non-retryable 4xx). Sequential resume:
+     * the missing part PUT returns 403. A non-retryable status is fatal on the
+     * FIRST attempt — surfaces as a bare GislError (NOT the typed
+     * GislMultipartPartError, NOT retried). Mirrors fresh-path
+     * GislClientMultipartTest::testNonRetryable4xxOnS3IsFatal.
+     */
+    public function testSequentialResumeNonRetryable4xxOnS3IsBareGislError(): void
+    {
+        $totalParts = 3;
+        $fileSize = ($totalParts - 1) * self::CHUNK + 4 * 1024 * 1024;
+        $filePath = $this->writeBigFile($fileSize);
+
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: '01936fb2-0000-7000-8000-0000000e0e02',
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 2,
+                parts: [1, 2],
+            )),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => '01936fb2-0000-7000-8000-0000000e0e02',
+                    'presigned_urls' => [
+                        ['part_number' => 3, 'url' => 'https://s3.example.com/e2-p3', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+            new Response(403, [], 'forbidden'),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->uploadFile($filePath, new UploadOptions(resumeUploadId: '01936fb2-0000-7000-8000-0000000e0e02'));
+            self::fail('Expected GislError');
+        } catch (GislMultipartPartError $e) {
+            self::fail('Non-retryable 4xx must NOT surface as the typed part error: ' . $e->getMessage());
+        } catch (GislError $e) {
+            self::assertMatchesRegularExpression('/non-retryable/', $e->getMessage());
+            // /status + /presign + exactly ONE S3 PUT (403 not retried). No /complete.
+            self::assertCount(3, $captured);
+            $s3Puts = \array_filter(
+                $captured,
+                fn ($r) => \str_contains((string) $r->getUri(), 's3.example.com'),
+            );
+            self::assertCount(1, $s3Puts);
+        }
+    }
+
+    /**
+     * Criterion 4 — typed-error parity (missing/empty ETag). Sequential
+     * resume: S3 returns 200 with no ETag header. The SDK refuses to record a
+     * part with no ETag — bare GislError. Mirrors fresh-path
+     * GislClientMultipartTest::testMissingEtagOnS3IsFatal.
+     */
+    public function testSequentialResumeMissingEtagOnS3IsBareGislError(): void
+    {
+        $totalParts = 3;
+        $fileSize = ($totalParts - 1) * self::CHUNK + 4 * 1024 * 1024;
+        $filePath = $this->writeBigFile($fileSize);
+
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: '01936fb2-0000-7000-8000-0000000e0e03',
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 2,
+                parts: [1, 2],
+            )),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => '01936fb2-0000-7000-8000-0000000e0e03',
+                    'presigned_urls' => [
+                        ['part_number' => 3, 'url' => 'https://s3.example.com/e3-p3', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+            new Response(200, [], ''), // 2xx but no ETag header
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->uploadFile($filePath, new UploadOptions(resumeUploadId: '01936fb2-0000-7000-8000-0000000e0e03'));
+            self::fail('Expected GislError');
+        } catch (GislMultipartPartError $e) {
+            self::fail('Missing ETag must NOT surface as the typed part error: ' . $e->getMessage());
+        } catch (GislError $e) {
+            self::assertMatchesRegularExpression('/missing ETag/', $e->getMessage());
+            // /status + /presign + 1 S3 PUT. No /complete.
+            self::assertCount(3, $captured);
+            foreach ($captured as $req) {
+                self::assertStringNotContainsString('/complete', (string) $req->getUri());
+            }
+        }
+    }
+
+    /**
+     * Criterion 4 — typed-error parity (concurrent propagation). When the
+     * injected uploader throws a GislMultipartPartError mid-batch, the resume
+     * path must let it propagate UNTOUCHED (same part number + uploadId) and
+     * must NOT attempt /multipart/complete with a half-finished part set.
+     */
+    public function testConcurrentResumeUploaderThrowPropagatesAndSkipsComplete(): void
+    {
+        $totalParts = 5;
+        $fileSize = ($totalParts - 1) * self::CHUNK + 4 * 1024 * 1024;
+        $filePath = $this->writeBigFile($fileSize);
+
+        // Only /status + /presign should hit HTTP — the uploader throws before
+        // any ETag is folded, so /complete must never be reached.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: '01936fb2-0000-7000-8000-0000000e0e04',
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 4,
+                parts: [1, 2, 4],
+            )),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => '01936fb2-0000-7000-8000-0000000e0e04',
+                    'presigned_urls' => [
+                        ['part_number' => 3, 'url' => 'https://s3.example.com/e4-p3', 'expires_at' => '2026-05-21T12:00:00Z'],
+                        ['part_number' => 5, 'url' => 'https://s3.example.com/e4-p5', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+        ], $captured);
+
+        $fake = new class implements MultipartPartUploader {
+            public function uploadParts(
+                string $filePath,
+                array $parts,
+                string $uploadId,
+                int $concurrency,
+                callable $onPartComplete,
+            ): array {
+                // Fail on the first missing part of the batch (part 3).
+                throw new GislMultipartPartError(
+                    'concurrent uploader: part 3 exhausted retries',
+                    3,
+                    $uploadId,
+                );
+            }
+        };
+
+        $client = $this->makeClient($http, $fake);
+
+        try {
+            $client->uploadFile($filePath, new UploadOptions(resumeUploadId: '01936fb2-0000-7000-8000-0000000e0e04'));
+            self::fail('Expected GislMultipartPartError');
+        } catch (GislMultipartPartError $e) {
+            // Propagated untouched — same part + uploadId the uploader raised.
+            self::assertSame(3, $e->partNumber);
+            self::assertSame('01936fb2-0000-7000-8000-0000000e0e04', $e->uploadId);
+            self::assertSame('concurrent uploader: part 3 exhausted retries', $e->getMessage());
+            // Only /status + /presign happened — NO /complete request.
+            self::assertCount(2, $captured);
+            foreach ($captured as $req) {
+                self::assertStringNotContainsString('/complete', (string) $req->getUri());
+                self::assertStringNotContainsString('s3.example.com', (string) $req->getUri());
+            }
+        }
+    }
+
+    /**
+     * Criterion 1 — batching boundary (>100 missing parts). A 150-part session
+     * with 120 missing parts is presigned + uploaded in batches of <=100. The
+     * resume path must:
+     *   - issue exactly TWO /presign calls (batch sizes 100 + 20),
+     *   - drive the uploader once per batch with the right slices,
+     *   - fold ETags across the batch boundary so /complete carries ALL 150
+     *     parts in ascending order with the correct per-part ETags.
+     */
+    public function testConcurrentResumeBatchesMissingPartsAcrossTheHundredBoundary(): void
+    {
+        $totalParts = 150;
+        // The contract pins recommended_chunk_size to a >=16 MiB floor (the SDK
+        // rejects anything smaller), so a 150-part plan is ~2.4 GB: part 1 =
+        // firstChunkSize (8 MiB), parts 2..149 = CHUNK each, part 150 a short
+        // tail. The wrong-file guard accepts a size in
+        // [firstChunkSize + (parts-2)*CHUNK + 1, firstChunkSize + (parts-1)*CHUNK].
+        // The concurrent uploader is faked (never reads bytes), so we back this
+        // with a SPARSE file — correct filesize(), ~no disk.
+        $firstChunk = 8_388_608; // SDK DEFAULT_MULTIPART_FIRST_CHUNK_SIZE_BYTES
+        $fileSize = $firstChunk + ($totalParts - 2) * self::CHUNK + 4096; // short tail (part 150)
+        $filePath = $this->writeSparseFile($fileSize);
+
+        $uploadId = '01936fb2-0000-7000-8000-0000000b0b01';
+
+        // Recorded parts = 1..30 (30 parts). Missing = 31..150 (120 parts) ->
+        // two batches: [31..130] (100) then [131..150] (20).
+        $recorded = \range(1, 30);
+        $missing = \range(31, 150);
+        $batch1 = \array_slice($missing, 0, 100);   // 31..130
+        $batch2 = \array_slice($missing, 100, 20);  // 131..150
+
+        $presignEnvelope = static function (string $uid, array $partNumbers): array {
+            $urls = [];
+            foreach ($partNumbers as $pn) {
+                $urls[] = [
+                    'part_number' => $pn,
+                    'url' => "https://s3.example.com/b-p{$pn}",
+                    'expires_at' => '2026-05-21T12:00:00Z',
+                ];
+            }
+            return [
+                'success' => true,
+                'data' => ['upload_id' => $uid, 'presigned_urls' => $urls],
+            ];
+        };
+
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->statusEnvelope(
+                uploadId: $uploadId,
+                totalParts: $totalParts,
+                isTruncated: false,
+                nextMarker: 30,
+                parts: $recorded,
+            )),
+            $this->jsonResponse(200, $presignEnvelope($uploadId, $batch1)),
+            $this->jsonResponse(200, $presignEnvelope($uploadId, $batch2)),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => ['upload_id' => $uploadId, 'status' => 'completed'],
+            ]),
+        ], $captured);
+
+        $fake = new class implements MultipartPartUploader {
+            /** @var list<list<int>> */
+            public array $batches = [];
+
+            public function uploadParts(
+                string $filePath,
+                array $parts,
+                string $uploadId,
+                int $concurrency,
+                callable $onPartComplete,
+            ): array {
+                $partNumbers = \array_map(static fn ($d) => $d['partNumber'], $parts);
+                $this->batches[] = $partNumbers;
+                $etags = [];
+                foreach ($parts as $d) {
+                    $pn = $d['partNumber'];
+                    $onPartComplete($pn, $d['length']);
+                    $etags[$pn] = "\"batch-etag-{$pn}\"";
+                }
+
+                return $etags;
+            }
+        };
+
+        $client = $this->makeClient($http, $fake);
+        $result = $client->uploadFile($filePath, new UploadOptions(resumeUploadId: $uploadId));
+        self::assertSame($uploadId, $result->getFileId());
+
+        // Captured = /status + 2x /presign + /complete = 4. Exactly TWO presigns.
+        self::assertCount(4, $captured);
+        $presignCalls = \array_values(\array_filter(
+            $captured,
+            fn ($r) => \str_contains((string) $r->getUri(), '/presign'),
+        ));
+        self::assertCount(2, $presignCalls);
+        // /presign bodies carry the batch part numbers in order.
+        $presign1Body = \json_decode((string) $presignCalls[0]->getBody(), true, 16, JSON_THROW_ON_ERROR);
+        $presign2Body = \json_decode((string) $presignCalls[1]->getBody(), true, 16, JSON_THROW_ON_ERROR);
+        self::assertSame($batch1, $presign1Body['part_numbers']);
+        self::assertSame($batch2, $presign2Body['part_numbers']);
+        self::assertCount(100, $presign1Body['part_numbers']);
+        self::assertCount(20, $presign2Body['part_numbers']);
+
+        // Uploader driven once per batch with the matching slices.
+        self::assertSame([$batch1, $batch2], $fake->batches);
+
+        // /complete carries ALL 150 parts ascending, ETags folded across the
+        // boundary: recorded 1..30 keep "etag-N", uploaded 31..150 get
+        // "batch-etag-N".
+        $completeBody = \json_decode((string) $captured[3]->getBody(), true, 16, JSON_THROW_ON_ERROR);
+        self::assertSame($uploadId, $completeBody['upload_id']);
+        $partNumbers = \array_map(fn ($p) => $p['part_number'], $completeBody['parts']);
+        self::assertSame(\range(1, 150), $partNumbers);
+        $etagByPart = [];
+        foreach ($completeBody['parts'] as $p) {
+            $etagByPart[$p['part_number']] = $p['etag'];
+        }
+        // Recorded boundary part.
+        self::assertSame('"etag-30"', $etagByPart[30]);
+        // Last part of batch 1 + first part of batch 2 — ETags fold correctly
+        // across the 100-part boundary.
+        self::assertSame('"batch-etag-130"', $etagByPart[130]);
+        self::assertSame('"batch-etag-131"', $etagByPart[131]);
+        self::assertSame('"batch-etag-150"', $etagByPart[150]);
     }
 
     public function testShortCircuitsWhenAllPartsAlreadyUploaded(): void
@@ -467,7 +949,7 @@ final class GislClientUploadResumeTest extends TestCase
         };
     }
 
-    private function makeClient(ClientInterface $http): GislClient
+    private function makeClient(ClientInterface $http, ?MultipartPartUploader $partUploader = null): GislClient
     {
         return new GislClient(
             config: new GislClientConfig(
@@ -479,6 +961,7 @@ final class GislClientUploadResumeTest extends TestCase
             httpClient: $http,
             requestFactory: $this->factory,
             streamFactory: $this->factory,
+            partUploader: $partUploader,
         );
     }
 
@@ -559,6 +1042,40 @@ final class GislClientUploadResumeTest extends TestCase
         } finally {
             \fclose($fh);
         }
+        return $path;
+    }
+
+    /**
+     * Create a SPARSE file whose `filesize()` reports `$size` but which consumes
+     * ~no disk. The resume wrong-file guard only reads `filesize()`, and the
+     * concurrent uploader is faked in these tests (it never reads the bytes), so
+     * a sparse fixture lets a many-part resume (whose real plan would be GBs at
+     * the contract-mandated >=16 MiB chunk) run without materialising the bytes.
+     * Do NOT use this for the sequential path — that path actually reads chunks.
+     */
+    private function writeSparseFile(int $size): string
+    {
+        $path = \tempnam(\sys_get_temp_dir(), 'gisl-resume-sparse-');
+        if ($path === false) {
+            self::fail('tempnam failed');
+        }
+        $this->tempFiles[] = $path;
+        $fh = \fopen($path, 'wb');
+        if ($fh === false) {
+            self::fail("Could not open {$path} for writing");
+        }
+        try {
+            if (\fseek($fh, $size - 1) !== 0) {
+                self::fail("Could not seek to {$size} in {$path}");
+            }
+            if (\fwrite($fh, "\0") === false) {
+                self::fail("Could not write sparse terminator to {$path}");
+            }
+        } finally {
+            \fclose($fh);
+        }
+        \clearstatcache(true, $path);
+        self::assertSame($size, \filesize($path));
         return $path;
     }
 }

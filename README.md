@@ -2,7 +2,7 @@
 
 Customer-facing PHP SDK for the GISL (Give It Smaller) file compression service.
 
-> **Status:** v0.2 (sub-cards `VOxtu0RZ-A`, `VOxtu0RZ-B1`, `VOxtu0RZ-B2.3`). Single-shot upload, concurrent multipart upload (>10 MB, chunks PUT in parallel via `curl_multi` — `z9bDW2iH`), workflow create + status, workflow downloads, webhook verification, plus the workflow lifecycle surface: `cancelWorkflow`, `resumeWorkflow`, `retryOperation`, `waitForWorkflow`, and `getMetadata`. SSE and the parity runner land in the remaining `VOxtu0RZ-B2` cards (`bf68ju2r`). Concurrent resume of an interrupted multipart upload is tracked as a follow-up.
+> **Status:** v0.2 (sub-cards `VOxtu0RZ-A`, `VOxtu0RZ-B1`, `VOxtu0RZ-B2.3`). Single-shot upload, concurrent multipart upload (>10 MB, chunks PUT in parallel via `curl_multi` — `z9bDW2iH`), workflow create + status, workflow downloads, webhook verification, plus the workflow lifecycle surface: `cancelWorkflow`, `resumeWorkflow`, `retryOperation`, `waitForWorkflow`, and `getMetadata`. SSE and the parity runner land in the remaining `VOxtu0RZ-B2` cards (`bf68ju2r`). Resuming an interrupted multipart upload (`resumeUploadId`) is also concurrent, per batch of missing parts (`7Vl01jFs`).
 
 ## Install
 
@@ -321,7 +321,7 @@ Aggregation is structural — `ok` / `rejected` carry typed `UploadProbeResponse
 
 `GislClientConfig::$multipartConcurrency` (default 4) bounds how many chunk PUTs are in flight at once. When you construct the client via `Gisl::create(...)` and ext-curl is present, fresh multipart uploads (files over 10 MB) PUT their chunks concurrently through a `curl_multi` uploader — the presigned part URLs are plain S3 PUTs, so this is independent of the injected PSR-18 client. Set `multipartConcurrency: 1` to force the sequential one-chunk-at-a-time path; the SDK also falls back to sequential automatically when ext-curl is unavailable.
 
-The concurrency knob applies to **fresh** uploads. Resuming an interrupted upload (`resumeUploadId`) still PUTs its missing chunks sequentially — concurrent resume is tracked as a follow-up. Directly constructing `GislClient`/`GislErgonomicClient` without injecting an uploader (as the test suites do) also stays sequential.
+The concurrency knob applies to both **fresh** uploads and **resuming** an interrupted one (`resumeUploadId`): resume PUTs the missing chunks concurrently, one batch of up-to-100 parts at a time (`7Vl01jFs`). Directly constructing `GislClient`/`GislErgonomicClient` without injecting an uploader (as the test suites do), setting `multipartConcurrency: 1`, or running without ext-curl all stay on the sequential one-chunk-at-a-time path.
 
 ## Generated DTOs
 
@@ -371,7 +371,7 @@ make project/sdk/php/check
 | `VOxtu0RZ-B2.5` (`pxJ1Gal9`, this) | Planned-tier ops + getSchema |
 | `VOxtu0RZ-B2.6` (`SeM2f5Og`) | PHP parity runner |
 | `z9bDW2iH` | Concurrent multipart upload (curl_multi fresh-upload fan-out) — shipped |
-| _follow-up_ | Concurrent resume of an interrupted multipart upload |
+| `7Vl01jFs` | Concurrent resume of an interrupted multipart upload — shipped |
 | `Wwcrdi73` | Packagist publish (mirror repo + auto-build) |
 
 ## License

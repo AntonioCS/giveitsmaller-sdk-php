@@ -138,7 +138,7 @@ final class GislClientMultipartTest extends TestCase
             ): array {
                 $etags = [];
                 foreach ($parts as $d) {
-                    $pn = $d['presigned']->getPartNumber() ?? 0;
+                    $pn = $d['partNumber'];
                     $this->seen[] = [
                         'part' => $pn,
                         'offset' => $d['offset'],

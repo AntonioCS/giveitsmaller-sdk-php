@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Http;
 
-use Gisl\Generated\OpenApi\Model\PresignedUrlPart;
 use Gisl\Sdk\Errors\GislError;
 use Gisl\Sdk\Errors\GislMultipartPartError;
 
@@ -137,7 +136,7 @@ final class CurlMultiPartUploader implements MultipartPartUploader
     }
 
     /**
-     * @param list<array{presigned: PresignedUrlPart, offset: int, length: int}> $parts
+     * @param list<array{partNumber: int, url: string, offset: int, length: int}> $parts
      * @param array<int, array{idx: int, partNumber: int, length: int, attempt: int, handle: \CurlHandle, headers: string, fh: resource}> $active
      */
     private function startPart(
@@ -150,10 +149,9 @@ final class CurlMultiPartUploader implements MultipartPartUploader
         int $attempt,
     ): void {
         $descriptor = $parts[$idx];
-        $presigned = $descriptor['presigned'];
-        $partNumber = $presigned->getPartNumber() ?? 0;
-        $url = $presigned->getUrl();
-        if (!\is_string($url) || $url === '') {
+        $partNumber = $descriptor['partNumber'];
+        $url = $descriptor['url'];
+        if ($url === '') {
             throw new GislError("Presigned URL part {$partNumber} has empty url.");
         }
 
