@@ -15,6 +15,7 @@ use Gisl\Sdk\Ergonomic\RunOptions;
 use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\NotYetImplementedDispatch;
 use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\FilesRecipe;
 use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
@@ -311,6 +312,129 @@ final class Invoke
         $handle = $recipe->submit($webhook);
 
         return $handle->toArray();
+    }
+
+    /**
+     * FF3a (`u0hBt6fl`) — mode=files dispatch, LOWERING variant. Builds a
+     * {@see FilesRecipe} from the fixture's `files` block (ORDERED inputs),
+     * applies each shared op in order, and lowers against `resolvedFileIds` to
+     * the multi-job wire payload. Pure + network-free. The caller deep-compares
+     * the returned array to `expected_payload`. Mirrors TS `lowerFilesFixture`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function lowerFiles(Fixture $fixture): array
+    {
+        $spec = $fixture->files;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] mode=files requires a files block");
+        }
+        if (!\array_key_exists('resolvedFileIds', $spec)) {
+            throw new \RuntimeException(
+                "[{$fixture->name}] mode=files lowering variant requires files.resolvedFileIds",
+            );
+        }
+
+        $recipe = new FilesRecipe(self::buildFileInputs($spec));
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyFilesOp($recipe, $op);
+        }
+
+        /** @var list<string> $resolvedFileIds */
+        $resolvedFileIds = [];
+        /** @var list<mixed> $rawIds */
+        $rawIds = $spec['resolvedFileIds'];
+        foreach ($rawIds as $id) {
+            $resolvedFileIds[] = (string) $id;
+        }
+
+        return $recipe->toWorkflowPayload($resolvedFileIds)->toWire();
+    }
+
+    /**
+     * FF3a (`u0hBt6fl`) — mode=files dispatch, RUN variant. Builds a
+     * {@see FilesRecipe} bound to an ergonomic client from the fixture's `files`
+     * block, applies each shared op in order, and drives `->run()` against the
+     * stubbed HTTP client. Returns the hydrated partitioned RunResult projected
+     * via {@see \Gisl\Sdk\FileFirst\RunResult::toArray()} so the caller can
+     * deep-compare to `expected_run_result`. Mirrors TS `runFilesFixture`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function runFiles(Fixture $fixture, StubPsr18Client $stub): array
+    {
+        $spec = $fixture->files;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] mode=files requires a files block");
+        }
+
+        $factory = new HttpFactory();
+        $config = new GislClientConfig(
+            baseUrl: 'https://api.test.example.com',
+            apiKey: 'test-api-key',
+            multipartConcurrency: 1,
+        );
+        $client = new GislErgonomicClient(
+            config: $config,
+            httpClient: $stub,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+
+        $recipe = $client->files(self::buildFileInputs($spec));
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyFilesOp($recipe, $op);
+        }
+
+        $maxWait = $spec['maxWait'] ?? null;
+        $maxWaitArg = (\is_string($maxWait) || \is_int($maxWait)) ? $maxWait : null;
+        $pollIntervalMs = isset($spec['pollIntervalMs']) ? (int) $spec['pollIntervalMs'] : null;
+
+        $result = $recipe->run(maxWait: $maxWaitArg, pollIntervalMs: $pollIntervalMs);
+
+        return $result->toArray();
+    }
+
+    /**
+     * Build the ORDERED {@see FileInput} list from a `files` block's `files[]`.
+     *
+     * @param array<string, mixed> $spec
+     * @return list<FileInput>
+     */
+    private static function buildFileInputs(array $spec): array
+    {
+        /** @var list<array<string, mixed>> $rawInputs */
+        $rawInputs = $spec['files'];
+        $inputs = [];
+        foreach ($rawInputs as $file) {
+            $inputs[] = ($file['kind'] ?? null) === 'upload_id'
+                ? FileInput::uploadId((string) $file['uploadId'])
+                : FileInput::path((string) $file['path']);
+        }
+        return $inputs;
+    }
+
+    /**
+     * @param array<string, mixed> $op
+     */
+    private static function applyFilesOp(FilesRecipe $recipe, array $op): FilesRecipe
+    {
+        return match ($op['op']) {
+            'compress' => $recipe->compress(
+                isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
+            ),
+            'convert' => $recipe->convert((string) $op['format']),
+            'thumbnail' => $recipe->thumbnail(
+                isset($op['width']) ? (int) $op['width'] : null,
+                isset($op['height']) ? (int) $op['height'] : null,
+            ),
+            'text_watermark' => $recipe->textWatermark((string) $op['text']),
+            default => throw new \RuntimeException("Unknown files op '" . \var_export($op['op'] ?? null, true) . "'"),
+        };
     }
 
     /**

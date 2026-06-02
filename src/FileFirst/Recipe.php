@@ -147,6 +147,19 @@ final class Recipe
     }
 
     /**
+     * The captured op chain. Read by {@see FilesRecipe} to compose a shared
+     * chain across many inputs without duplicating the chain-method validation.
+     *
+     * @internal
+     *
+     * @return list<RecipeStep>
+     */
+    public function recipeSteps(): array
+    {
+        return $this->steps;
+    }
+
+    /**
      * Execute the recipe end-to-end: upload the input (when required), create
      * the workflow, await a terminal state (SSE with poll fallback), then
      * resolve the produced downloads into a flat {@see RunResult}. Throws

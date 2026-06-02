@@ -41,6 +41,16 @@ final class Fixture
      * `expected_run_result`. The Downloader is NOT exercised (canned URLs).
      */
     public const MODE_RUN = 'run';
+    /**
+     * FF3a (`u0hBt6fl`) — file-first HOMOGENEOUS FAN-OUT fixtures. The runner
+     * builds a {@see \Gisl\Sdk\FileFirst\FilesRecipe} from the `files` block
+     * (ORDERED input list + shared op chain), then EITHER lowers it against
+     * `files.resolvedFileIds` and deep-compares the multi-job payload to
+     * `expected_payload` (lowering variant, zero responses) OR drives `->run()`
+     * against the stubbed responses and deep-compares the partitioned RunResult
+     * to `expected_run_result` (run variant). Requires fixtureSchemaVersion 2.0.0.
+     */
+    public const MODE_FILES = 'files';
 
     /**
      * Fixture schema version. v1 = legacy (no v2 blocks); v2 = supports
@@ -80,6 +90,11 @@ final class Fixture
      *                                                          The runner drives `->submit()`; compareRequests
      *                                                          asserts the create callback_url + the returned
      *                                                          Handle is compared via `expected_return`.
+     * @param array<string, mixed>|null        $files           FF3a homogeneous-fan-out spec (mode=files):
+     *                                                          `{files[], operations[], resolvedFileIds?,
+     *                                                          maxWait?, pollIntervalMs?}`. Lowering variant
+     *                                                          asserts `expected_payload`; run variant asserts
+     *                                                          `expected_run_result`.
      */
     public function __construct(
         public readonly string $name,
@@ -106,6 +121,9 @@ final class Fixture
         public readonly bool $hasExpectedRunResult = false,
         // FF5b (u8M49LU2) — file-first submit block (request_response mode).
         public readonly ?array $submit = null,
+        // FF3a (u0hBt6fl) — file-first homogeneous fan-out block (mode=files):
+        // `{files[], operations[], resolvedFileIds?, maxWait?, pollIntervalMs?}`.
+        public readonly ?array $files = null,
     ) {
     }
 }

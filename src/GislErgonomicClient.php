@@ -10,7 +10,9 @@ use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\FilesRecipe;
 use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\Http\MultipartPartUploader;
 use Psr\Http\Client\ClientInterface;
@@ -122,6 +124,40 @@ class GislErgonomicClient extends GislClient
         $fileInput = $input instanceof FileInput ? $input : FileInput::path($input);
 
         return new Recipe($fileInput, $key, [], $this->presetDefaults, $this->scopedPresetDefaults, $this);
+    }
+
+    /**
+     * Homogeneous fan-out entry point (FF3a / u0hBt6fl). Apply ONE recipe (op
+     * chain) to MANY input files in ONE workflow. Each element is a filesystem
+     * path (string, auto-wrapped via {@see FileInput::path()}) or a
+     * {@see FileInput} (e.g. {@see FileInput::uploadId()}) passed through.
+     * Returns an immutable {@see FilesRecipe} you call the same ops on
+     * (`->compress()` / `->convert()` / `->thumbnail()` / `->textWatermark()`);
+     * the chain applies to every input. `run()` returns a partitioned
+     * {@see \Gisl\Sdk\FileFirst\RunResult} keyed by each input's 0-based index —
+     * one bad input does not sink the rest. `submit()` is out of scope (a
+     * separate card).
+     *
+     * @param list<string|FileInput> $inputs Ordered input files.
+     */
+    public function files(array $inputs): FilesRecipe
+    {
+        if ($inputs === []) {
+            // A zero-input fan-out is a caller error — "one bad input does not
+            // sink the rest" is meaningless with no inputs, and it would
+            // otherwise create an empty-jobs workflow the API 422s.
+            throw new GislConfigError(
+                'files() requires at least one input file.',
+                reason: 'no_inputs',
+            );
+        }
+
+        $resolved = [];
+        foreach ($inputs as $input) {
+            $resolved[] = $input instanceof FileInput ? $input : FileInput::path($input);
+        }
+
+        return new FilesRecipe($resolved, [], $this->presetDefaults, $this->scopedPresetDefaults, $this);
     }
 
     /**

@@ -133,6 +133,102 @@ final class RunResult
     }
 
     /**
+     * Flatten a terminal MULTI-JOB workflow (the `$client->files([...])`
+     * fan-out) into a partitioned RunResult — one job per input file, keyed by
+     * the `file-{i}` job ref the {@see FilesRecipe} lowering assigns. The
+     * `succeeded` / `failed` partition is PER JOB, so one bad input does not
+     * sink the rest.
+     *
+     * Join model: `$finalStatus->getJobs()` carries each job's status +
+     * `operations[]` (for the error message); `$jobDownloads` carries each
+     * job's output files. Both are joined on the job `ref` ("file-{i}"); the
+     * partition key is the index `"{i}"` parsed out of that ref (or the
+     * caller-supplied key in `$keyByRef`). The flat `artifacts[]` is every
+     * job's outputs in job order.
+     *
+     * **Partition invariant (mirrors {@see fromTerminalDownloads()} PER JOB —
+     * do NOT let it drift):** a job is a SUCCESS only when its status
+     * `=== 'completed'`. Any other per-job status partitions that job into
+     * `$failed` (with that job's first operation error message, scoped to THAT
+     * job only).
+     *
+     * @internal Consumed by {@see FilesRecipe::run()}; not part of the
+     *           caller-facing surface.
+     *
+     * @param list<JobDownload>          $jobDownloads
+     * @param array<string, string|null> $keyByRef Map of job ref => partition key.
+     */
+    public static function fromTerminalMultiJob(
+        string $workflowId,
+        WorkflowStatusResponse $finalStatus,
+        array $jobDownloads,
+        array $keyByRef,
+        ?Downloader $downloader = null,
+    ): self {
+        // Group downloads by job ref so a job's outputs are flattened AFTER the
+        // per-job partition is decided (grouping is unrecoverable post-flatten).
+        $filesByRef = [];
+        foreach ($jobDownloads as $job) {
+            $filesByRef[BuilderInternals::coerceString($job->getRef())] = $job->getFiles() ?? [];
+        }
+
+        $artifacts = [];
+        $succeeded = [];
+        $failed = [];
+
+        foreach ($finalStatus->getJobs() ?? [] as $job) {
+            $ref = BuilderInternals::coerceString($job->getRef());
+            $key = $keyByRef[$ref] ?? self::jobIndexFromRef($ref);
+
+            $outputs = [];
+            foreach ($filesByRef[$ref] ?? [] as $file) {
+                $outputs[] = new OutputFile(
+                    url: BuilderInternals::coerceString($file->getDownloadUrl()),
+                    filename: BuilderInternals::coerceString($file->getFilename()),
+                    sizeBytes: (int) ($file->getSizeBytes() ?? 0),
+                    operation: BuilderInternals::coerceString($file->getOperation()),
+                );
+            }
+            // The flat artifacts[] keeps every job's outputs in job order.
+            foreach ($outputs as $output) {
+                $artifacts[] = $output;
+            }
+
+            $status = BuilderInternals::coerceString($job->getStatus());
+            if ($status === 'completed') {
+                $succeeded[] = new ItemResult($key, $outputs);
+            } else {
+                $firstError = null;
+                foreach ($job->getOperations() ?? [] as $op) {
+                    if ($op->getErrorMessage() !== null) {
+                        $firstError = $op->getErrorMessage();
+                        break;
+                    }
+                }
+                $failed[] = new ItemFailure(
+                    $key,
+                    new \RuntimeException($firstError !== null ? $status . ': ' . $firstError : $status),
+                );
+            }
+        }
+
+        return new self(
+            workflowId: $workflowId,
+            state: BuilderInternals::coerceString($finalStatus->getStatus()),
+            artifacts: $artifacts,
+            succeeded: $succeeded,
+            failed: $failed,
+            downloader: $downloader,
+        );
+    }
+
+    /** Derive the partition key `"{i}"` from a `file-{i}` job ref; the ref verbatim otherwise. */
+    private static function jobIndexFromRef(string $ref): string
+    {
+        return \str_starts_with($ref, 'file-') ? \substr($ref, \strlen('file-')) : $ref;
+    }
+
+    /**
      * Address a succeeded input by the `key:` given to `file()`. Duplicate
      * keys are not valid input — the producer enforces key uniqueness (a
      * later ticket); the first match is returned.

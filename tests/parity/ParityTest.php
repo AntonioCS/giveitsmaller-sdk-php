@@ -115,6 +115,10 @@ final class ParityTest extends TestCase
             $this->runRunMode($fixture);
             return;
         }
+        if ($fixture->mode === Fixture::MODE_FILES) {
+            $this->runFilesMode($fixture);
+            return;
+        }
         if ($fixture->submit !== null) {
             $this->runSubmit($fixture);
             return;
@@ -241,6 +245,52 @@ final class ParityTest extends TestCase
             [],
             $issues,
             "[{$fixture->name}] run parity failure:\n  - " . \implode("\n  - ", $issues),
+        );
+    }
+
+    /**
+     * FF3a (u0hBt6fl) — mode=files homogeneous fan-out. Two variants share the
+     * one `files` block, discriminated by which assertion key the fixture
+     * declares:
+     *
+     *  - lowering variant (`expected_payload`, zero responses): build the
+     *    FilesRecipe, lower it against `files.resolvedFileIds`, and deep-compare
+     *    the multi-job wire payload (network-free).
+     *  - run variant (`expected_run_result`): drive `->run()` against the canned
+     *    upload/create/terminal/downloads responses and deep-compare the
+     *    PARTITIONED RunResult (succeeded/failed keyed by input index).
+     *
+     * HARNESS NOTE: the run variant depends on {@see StubPsr18Client} serving
+     * the canned responses in call order (F4-B / cEUWPgKW), same as mode=run.
+     */
+    private function runFilesMode(Fixture $fixture): void
+    {
+        // Discriminate by which assertion the fixture pinned. The loader sets
+        // hasExpectedRunResult when expected_run_result is present; otherwise
+        // the lowering variant's expected_payload drives the assertion.
+        if ($fixture->hasExpectedRunResult) {
+            $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
+            $actual = Invoke::runFiles($fixture, $stub);
+
+            $issues = Comparator::compareReturn(
+                $fixture->expectedRunResult,
+                $actual,
+                'expected_run_result',
+            );
+            $this->assertSame(
+                [],
+                $issues,
+                "[{$fixture->name}] files run parity failure:\n  - " . \implode("\n  - ", $issues),
+            );
+            return;
+        }
+
+        $lowered = Invoke::lowerFiles($fixture);
+        $issues = Comparator::compareReturn($fixture->expectedPayload, $lowered, 'expected_payload');
+        $this->assertSame(
+            [],
+            $issues,
+            "[{$fixture->name}] files lowering parity failure:\n  - " . \implode("\n  - ", $issues),
         );
     }
 

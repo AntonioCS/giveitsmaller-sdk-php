@@ -78,6 +78,10 @@ final class FixtureLoader
         // GislClient method — `mode=lowering` dispatches off the `lowering`
         // block, not the method; `file` is the entry point it exercises.
         'file',
+        // File-first HOMOGENEOUS FAN-OUT marker (FF3a / u0hBt6fl). Not a
+        // GislClient method — `mode=files` dispatches off the `files` block;
+        // `files` is the ergonomic-client entry point it exercises.
+        'files',
     ];
 
     private const ALLOWED_REQUEST_METHODS = [
@@ -94,6 +98,8 @@ final class FixtureLoader
         Fixture::MODE_LOWERING,
         // FF2b (tywwynmN) — file-first run-mode execution fixtures.
         Fixture::MODE_RUN,
+        // FF3a (u0hBt6fl) — file-first homogeneous fan-out fixtures.
+        Fixture::MODE_FILES,
     ];
 
     private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark'];
@@ -106,6 +112,10 @@ final class FixtureLoader
     // FF5b (u8M49LU2) — submit block keys: lowering's file + operations plus
     // the submit-only optional webhook.
     private const SUBMIT_KEYS = ['file', 'operations', 'webhook'];
+    // FF3a (u0hBt6fl) — files block keys: an ordered files[] input list +
+    // operations + (lowering variant) resolvedFileIds + (run variant) maxWait /
+    // pollIntervalMs.
+    private const FILES_KEYS = ['files', 'resolvedFileIds', 'operations', 'maxWait', 'pollIntervalMs'];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -271,6 +281,38 @@ final class FixtureLoader
                 );
             }
         }
+        if ($mode === Fixture::MODE_FILES) {
+            // FF3a (u0hBt6fl) — homogeneous fan-out. Declares the mocked
+            // responses (run variant) but NO `requests`. Asserts EXACTLY ONE of
+            // expected_payload (lowering variant — zero responses) or
+            // expected_run_result (run variant), discriminated by which key is
+            // present.
+            if (\count($requests) !== 0) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=files must declare zero `requests` (it asserts the lowered payload or the partitioned RunResult, not wire requests)",
+                );
+            }
+            if ($method !== 'files') {
+                throw new \RuntimeException(
+                    "[{$base}] mode=files requires sdk.method=\"files\" (got \"{$method}\")",
+                );
+            }
+            if (!\array_key_exists('files', $raw)) {
+                throw new \RuntimeException("[{$base}] mode=files requires a files block");
+            }
+            $hasPayload = \array_key_exists('expected_payload', $raw);
+            $hasRunResult = \array_key_exists('expected_run_result', $raw);
+            if ($hasPayload === $hasRunResult) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=files requires EXACTLY ONE of expected_payload (lowering variant) or expected_run_result (run variant)",
+                );
+            }
+            if ($hasPayload && \count($responses) !== 0) {
+                throw new \RuntimeException(
+                    "[{$base}] mode=files lowering variant (expected_payload) must declare zero responses (lowering is network-free)",
+                );
+            }
+        }
         // FF5b (u8M49LU2) — a `submit` block routes a file-first chain through
         // the STANDARD request_response flow (so compareRequests can assert the
         // create callback_url). Gated to request_response mode + method:file.
@@ -358,10 +400,12 @@ final class FixtureLoader
             || \array_key_exists('run', $raw)
             || \array_key_exists('expected_run_result', $raw)
             // FF5b (u8M49LU2) — submit blocks are v2-only.
-            || \array_key_exists('submit', $raw);
+            || \array_key_exists('submit', $raw)
+            // FF3a (u0hBt6fl) — files blocks are v2-only.
+            || \array_key_exists('files', $raw);
         if ($schemaVersion === Fixture::SCHEMA_VERSION_V1 && $hasV2Block) {
             throw new \RuntimeException(
-                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload / run / submit) require fixtureSchemaVersion: '2.0.0'",
+                "[{$base}] v2 assertion blocks (resolvedOptions / omittedFromWire / localValidationError / lowering / expected_payload / run / submit / files) require fixtureSchemaVersion: '2.0.0'",
             );
         }
         if ($mode === Fixture::MODE_LOCAL_VALIDATION_ERROR && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
@@ -377,6 +421,11 @@ final class FixtureLoader
         if ($mode === Fixture::MODE_RUN && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
             throw new \RuntimeException(
                 "[{$base}] mode='run' requires fixtureSchemaVersion: '2.0.0'",
+            );
+        }
+        if ($mode === Fixture::MODE_FILES && $schemaVersion !== Fixture::SCHEMA_VERSION_V2) {
+            throw new \RuntimeException(
+                "[{$base}] mode='files' requires fixtureSchemaVersion: '2.0.0'",
             );
         }
 
@@ -436,11 +485,14 @@ final class FixtureLoader
         }
 
         $lowering = null;
-        $expectedPayload = null;
         if (\array_key_exists('lowering', $raw)) {
             $lowering = self::validateLowering($raw['lowering'], $base);
-            $expectedPayload = $raw['expected_payload'] ?? null;
         }
+        // expected_payload is the lowering ASSERTION target for BOTH the FF2a
+        // `lowering` mode and the FF3a `files` lowering variant (which carries
+        // no `lowering` block), so set it from the top-level key independently
+        // of the block above.
+        $expectedPayload = $raw['expected_payload'] ?? null;
 
         // FF2b (tywwynmN) — run-mode block. Reuses the lowering file + op-param
         // validators (the chain grammar is identical), plus run-only maxWait /
@@ -458,6 +510,14 @@ final class FixtureLoader
         $submit = null;
         if (\array_key_exists('submit', $raw)) {
             $submit = self::validateSubmit($raw['submit'], $base);
+        }
+
+        // FF3a (u0hBt6fl) — files block. Reuses the lowering file + op-param
+        // validators PER ENTRY (the per-input + chain grammar is identical),
+        // plus the fan-out-only resolvedFileIds + run-only maxWait/pollIntervalMs.
+        $files = null;
+        if (\array_key_exists('files', $raw)) {
+            $files = self::validateFiles($raw['files'], $base);
         }
 
         return new Fixture(
@@ -483,7 +543,90 @@ final class FixtureLoader
             expectedRunResult: $expectedRunResult,
             hasExpectedRunResult: $hasExpectedRunResult,
             submit: $submit,
+            files: $files,
         );
+    }
+
+    /**
+     * Validate the FF3a `files` block: `{files: [{kind, path?/uploadId?, key?},
+     * ...], operations: [{op, ...params}], resolvedFileIds?: [string],
+     * maxWait?, pollIntervalMs?}`. Reuses the lowering file + op-param
+     * validators PER ENTRY (the per-input + chain grammar is identical).
+     * Mirrors the TS `validateFiles`.
+     *
+     * @return array<string, mixed>
+     */
+    private static function validateFiles(mixed $raw, string $base): array
+    {
+        if (!\is_array($raw) || \array_is_list($raw)) {
+            throw new \RuntimeException("[{$base}] files must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($raw, self::FILES_KEYS, "{$base} files");
+
+        $inputs = $raw['files'] ?? null;
+        if (!\is_array($inputs) || !\array_is_list($inputs) || \count($inputs) === 0) {
+            throw new \RuntimeException("[{$base}] files.files must be a non-empty sequence of file inputs");
+        }
+        foreach ($inputs as $i => $file) {
+            if (!\is_array($file) || \array_is_list($file)) {
+                throw new \RuntimeException("[{$base}] files.files[{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($file, self::LOWERING_FILE_KEYS, "{$base} files.files[{$i}]");
+            $kind = $file['kind'] ?? null;
+            if ($kind !== 'path' && $kind !== 'upload_id') {
+                throw new \RuntimeException("[{$base}] files.files[{$i}].kind must be 'path' or 'upload_id'");
+            }
+            if ($kind === 'path' && (!isset($file['path']) || !\is_string($file['path']) || $file['path'] === '')) {
+                throw new \RuntimeException("[{$base}] files.files[{$i}].path must be a non-empty string when kind=path");
+            }
+            if ($kind === 'upload_id' && (!isset($file['uploadId']) || !\is_string($file['uploadId']) || $file['uploadId'] === '')) {
+                throw new \RuntimeException("[{$base}] files.files[{$i}].uploadId must be a non-empty string when kind=upload_id");
+            }
+        }
+
+        if (\array_key_exists('resolvedFileIds', $raw)) {
+            $ids = $raw['resolvedFileIds'];
+            if (!\is_array($ids) || !\array_is_list($ids)) {
+                throw new \RuntimeException("[{$base}] files.resolvedFileIds must be a sequence of strings");
+            }
+            foreach ($ids as $idx => $id) {
+                if (!\is_string($id) || $id === '') {
+                    throw new \RuntimeException("[{$base}] files.resolvedFileIds[{$idx}] must be a non-empty string");
+                }
+            }
+            if (\count($ids) !== \count($inputs)) {
+                throw new \RuntimeException(
+                    "[{$base}] files.resolvedFileIds length (" . \count($ids) . ') must equal files.files length ('
+                    . \count($inputs) . ') — one resolved id per input',
+                );
+            }
+        }
+
+        $ops = $raw['operations'] ?? null;
+        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
+            throw new \RuntimeException("[{$base}] files.operations must be a non-empty sequence");
+        }
+        foreach ($ops as $i => $op) {
+            if (!\is_array($op) || \array_is_list($op)) {
+                throw new \RuntimeException("[{$base}] files.operations[{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($op, self::LOWERING_OP_KEYS, "{$base} files.operations[{$i}]");
+            $opName = $op['op'] ?? null;
+            if (!\is_string($opName) || !\in_array($opName, self::LOWERING_OPS, true)) {
+                throw new \RuntimeException(
+                    "[{$base}] files.operations[{$i}].op must be one of " . \implode('|', self::LOWERING_OPS),
+                );
+            }
+            self::validateLoweringOpParams($opName, $op, "{$base} files.operations[{$i}]");
+        }
+        if (\array_key_exists('maxWait', $raw) && !\is_string($raw['maxWait']) && !\is_int($raw['maxWait'])) {
+            throw new \RuntimeException("[{$base}] files.maxWait must be a string or int when present");
+        }
+        if (\array_key_exists('pollIntervalMs', $raw) && !\is_int($raw['pollIntervalMs'])) {
+            throw new \RuntimeException("[{$base}] files.pollIntervalMs must be an int when present");
+        }
+        /** @var array<string, mixed> $raw */
+        return $raw;
     }
 
     /**
