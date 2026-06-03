@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Ergonomic;
 
+use Gisl\Generated\OpenApi\Model\JobDownload;
+use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislResultNotReadyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
@@ -113,13 +115,7 @@ final class Handle
         }
         $downloads = $client->getWorkflowDownloads($this->workflowId);
 
-        return RunResult::fromTerminalDownloads(
-            workflowId: $this->workflowId,
-            finalStatus: $finalStatus,
-            jobDownloads: $downloads->getDownloads() ?? [],
-            key: $this->key,
-            downloader: new StreamingDownloader(),
-        );
+        return $this->project($finalStatus, $downloads->getDownloads() ?? []);
     }
 
     /**
@@ -142,12 +138,44 @@ final class Handle
         }
         $downloads = $client->getWorkflowDownloads($this->workflowId);
 
+        return $this->project($status, $downloads->getDownloads() ?? []);
+    }
+
+    /**
+     * Project a terminal status + its per-job downloads into a {@see RunResult},
+     * choosing the producer DATA-DRIVEN off the wire (not a construction-time
+     * marker, so a fan-out reattached via `client->workflow(id)` — which
+     * carries no marker — still partitions per job):
+     *
+     *  - A `files([...])` fan-out (every job ref is `file-{i}`, see
+     *    {@see RunResult::isFanoutStatus()}) → {@see RunResult::fromTerminalMultiJob()}
+     *    with an empty `keyByRef`, so each input's key is recovered from its
+     *    `file-{i}` ref (`"0"`, `"1"`, …).
+     *  - Anything else (the single-file {@see \Gisl\Sdk\FileFirst\Recipe} path)
+     *    → {@see RunResult::fromTerminalDownloads()} keyed by this handle's
+     *    `$key` (the recipe key from a file-first `submit()`, or null on reattach).
+     *
+     * @param list<JobDownload> $jobDownloads
+     */
+    private function project(WorkflowStatusResponse $finalStatus, array $jobDownloads): RunResult
+    {
+        $downloader = new StreamingDownloader();
+        if (RunResult::isFanoutStatus($finalStatus)) {
+            return RunResult::fromTerminalMultiJob(
+                workflowId: $this->workflowId,
+                finalStatus: $finalStatus,
+                jobDownloads: $jobDownloads,
+                keyByRef: [],
+                downloader: $downloader,
+            );
+        }
+
         return RunResult::fromTerminalDownloads(
             workflowId: $this->workflowId,
-            finalStatus: $status,
-            jobDownloads: $downloads->getDownloads() ?? [],
+            finalStatus: $finalStatus,
+            jobDownloads: $jobDownloads,
             key: $this->key,
-            downloader: new StreamingDownloader(),
+            downloader: $downloader,
         );
     }
 

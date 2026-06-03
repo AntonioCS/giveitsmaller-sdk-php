@@ -145,6 +145,43 @@ final class HandleTest extends TestCase
         ]);
     }
 
+    /**
+     * A two-job fan-out downloads response (refs file-0 / file-1), one output
+     * per job, for the uUnCtVAr data-driven per-job partition tests.
+     */
+    private function downloadsResponseFanout(): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'downloads' => [
+                    [
+                        'job_id' => '01936fb3-0001-7000-8000-0000000060f3',
+                        'ref' => 'file-0',
+                        'files' => [[
+                            'operation' => 'compress',
+                            'operation_id' => '01936fb4-0001-7000-8000-0000000060f4',
+                            'filename' => 'a_compressed.jpg',
+                            'size_bytes' => 100,
+                            'download_url' => 'https://signed.example.com/a.jpg',
+                        ]],
+                    ],
+                    [
+                        'job_id' => '01936fb3-0002-7000-8000-0000000060f5',
+                        'ref' => 'file-1',
+                        'files' => [[
+                            'operation' => 'compress',
+                            'operation_id' => '01936fb4-0002-7000-8000-0000000060f6',
+                            'filename' => 'b_compressed.jpg',
+                            'size_bytes' => 200,
+                            'download_url' => 'https://signed.example.com/b.jpg',
+                        ]],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
     private const TERMINAL_SSE = "event: workflow.completed\ndata: {\"status\":\"completed\"}\n\n";
 
     // -----------------------------------------------------------------------
@@ -285,6 +322,134 @@ final class HandleTest extends TestCase
         }
         // Keyless.
         self::assertNull($result->succeeded[0]->key);
+    }
+
+    // -----------------------------------------------------------------------
+    // uUnCtVAr (FF3a-submit) — data-driven per-job partitioning for a fan-out.
+    // The producer is chosen off the wire (file-{i} job refs), NOT a marker, so
+    // a REATTACHED keyless handle still partitions per job (karen Gap A).
+    // -----------------------------------------------------------------------
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private static function fanoutJobs(string $job1Status = 'completed'): array
+    {
+        return [
+            ['job_id' => '01936fb3-0001-7000-8000-0000000060f3', 'ref' => 'file-0', 'status' => 'completed'],
+            ['job_id' => '01936fb3-0002-7000-8000-0000000060f5', 'ref' => 'file-1', 'status' => $job1Status],
+        ];
+    }
+
+    #[Test]
+    public function result_partitions_a_fanout_per_job_with_index_keys_even_keyless(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->statusResponse('completed', self::fanoutJobs()),
+            $this->downloadsResponseFanout(),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        // No key (reattach) — keys MUST still come from the file-{i} refs.
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->result();
+
+        self::assertTrue($result->ok);
+        self::assertCount(2, $result->succeeded);
+        self::assertSame([], $result->failed);
+        self::assertSame(['0', '1'], \array_map(static fn ($s) => $s->key, $result->succeeded));
+        self::assertSame('https://signed.example.com/a.jpg', $result->byKey('0')->outputs[0]->url);
+        self::assertSame('https://signed.example.com/b.jpg', $result->byKey('1')->outputs[0]->url);
+    }
+
+    #[Test]
+    public function wait_partitions_a_fanout_per_job_even_keyless(): void
+    {
+        // The SSE wait() path feeds project() a $finalStatus fetched AFTER the
+        // terminal SSE frame (getWorkflowStatus, which carries jobs) — verify
+        // the fan-out branch is reached via wait(), not only result().
+        $captured = [];
+        $http = $this->stubClient([
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed', self::fanoutJobs()),
+            $this->downloadsResponseFanout(),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->wait();
+
+        self::assertTrue($result->ok);
+        self::assertSame(['0', '1'], \array_map(static fn ($s) => $s->key, $result->succeeded));
+    }
+
+    #[Test]
+    public function single_input_fanout_still_partitions_with_index_key(): void
+    {
+        // Boundary: ONE job whose ref is `file-0` IS a fan-out (files([x])) —
+        // it must partition with key "0", NOT collapse to the single-output
+        // path. Guards against a `count === 1 -> single-output` regression.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->statusResponse('completed', [
+                ['job_id' => '01936fb3-0001-7000-8000-0000000060f3', 'ref' => 'file-0', 'status' => 'completed'],
+            ]),
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => ['downloads' => [[
+                    'job_id' => '01936fb3-0001-7000-8000-0000000060f3',
+                    'ref' => 'file-0',
+                    'files' => [[
+                        'operation' => 'compress',
+                        'operation_id' => '01936fb4-0001-7000-8000-0000000060f4',
+                        'filename' => 'a_compressed.jpg',
+                        'size_bytes' => 100,
+                        'download_url' => 'https://signed.example.com/a.jpg',
+                    ]],
+                ]]],
+            ]),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->result();
+
+        self::assertCount(1, $result->succeeded);
+        self::assertSame('0', $result->succeeded[0]->key);
+        self::assertSame('https://signed.example.com/a.jpg', $result->byKey('0')->outputs[0]->url);
+    }
+
+    #[Test]
+    public function result_partitions_a_partially_failed_fanout_per_job(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->statusResponse('partially_failed', self::fanoutJobs('failed')),
+            $this->downloadsResponseFanout(),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->result();
+
+        self::assertFalse($result->ok);
+        self::assertSame(['0'], \array_map(static fn ($s) => $s->key, $result->succeeded));
+        self::assertSame(['1'], \array_map(static fn ($f) => $f->key, $result->failed));
+    }
+
+    #[Test]
+    public function single_file_handle_stays_single_output_and_keeps_its_key(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->statusResponse('completed', [['job_id' => '01936fb3-0001-7000-8000-0000000060f3', 'ref' => 'op', 'status' => 'completed']]),
+            $this->downloadsResponse(),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        // ref 'op' is NOT a fan-out → single-output producer, keyed by #key.
+        $result = (new Handle(self::WORKFLOW_ID, null, $client, 'hero'))->result();
+
+        self::assertCount(1, $result->succeeded);
+        self::assertSame('hero', $result->succeeded[0]->key);
+        self::assertSame('https://signed.example.com/photo_compressed.jpg', $result->byKey('hero')->outputs[0]->url);
     }
 
     /**

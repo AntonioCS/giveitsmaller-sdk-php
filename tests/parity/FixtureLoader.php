@@ -115,7 +115,7 @@ final class FixtureLoader
     // FF3a (u0hBt6fl) — files block keys: an ordered files[] input list +
     // operations + (lowering variant) resolvedFileIds + (run variant) maxWait /
     // pollIntervalMs.
-    private const FILES_KEYS = ['files', 'resolvedFileIds', 'operations', 'maxWait', 'pollIntervalMs'];
+    private const FILES_KEYS = ['files', 'resolvedFileIds', 'operations', 'maxWait', 'pollIntervalMs', 'webhook'];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -282,16 +282,12 @@ final class FixtureLoader
             }
         }
         if ($mode === Fixture::MODE_FILES) {
-            // FF3a (u0hBt6fl) — homogeneous fan-out. Declares the mocked
-            // responses (run variant) but NO `requests`. Asserts EXACTLY ONE of
-            // expected_payload (lowering variant — zero responses) or
-            // expected_run_result (run variant), discriminated by which key is
-            // present.
-            if (\count($requests) !== 0) {
-                throw new \RuntimeException(
-                    "[{$base}] mode=files must declare zero `requests` (it asserts the lowered payload or the partitioned RunResult, not wire requests)",
-                );
-            }
+            // FF3a (u0hBt6fl) — homogeneous fan-out. The lowering/run variants
+            // declare the mocked responses but NO `requests`; the uUnCtVAr
+            // SUBMIT variant (files.webhook) DOES declare requests (the create
+            // callback_url assertion). Asserts EXACTLY ONE of expected_payload
+            // (lowering — zero responses) / expected_run_result (run) /
+            // expected_return+requests (submit), discriminated below.
             if ($method !== 'files') {
                 throw new \RuntimeException(
                     "[{$base}] mode=files requires sdk.method=\"files\" (got \"{$method}\")",
@@ -300,17 +296,53 @@ final class FixtureLoader
             if (!\array_key_exists('files', $raw)) {
                 throw new \RuntimeException("[{$base}] mode=files requires a files block");
             }
-            $hasPayload = \array_key_exists('expected_payload', $raw);
-            $hasRunResult = \array_key_exists('expected_run_result', $raw);
-            if ($hasPayload === $hasRunResult) {
+            $filesBlock = \is_array($raw['files']) ? $raw['files'] : [];
+            $isFilesSubmit = \array_key_exists('webhook', $filesBlock);
+            if (!$isFilesSubmit && \count($requests) !== 0) {
                 throw new \RuntimeException(
-                    "[{$base}] mode=files requires EXACTLY ONE of expected_payload (lowering variant) or expected_run_result (run variant)",
+                    "[{$base}] mode=files (lowering/run variant) must declare zero `requests` (it asserts the lowered payload or the partitioned RunResult, not wire requests)",
                 );
             }
-            if ($hasPayload && \count($responses) !== 0) {
-                throw new \RuntimeException(
-                    "[{$base}] mode=files lowering variant (expected_payload) must declare zero responses (lowering is network-free)",
-                );
+            if ($isFilesSubmit) {
+                // uUnCtVAr (FF3a-submit) — SUBMIT variant: drives
+                // FilesRecipe->submit() through the standard request_response
+                // flow, so it DOES declare requests (the create callback_url
+                // assertion) + expected_return, and must NOT carry the
+                // lowering/run assertion keys. The zero-requests guard above is
+                // therefore skipped for this variant — re-check it here.
+                if (!\is_string($filesBlock['webhook']) || $filesBlock['webhook'] === '') {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files files.webhook must be a non-empty string (the submit-variant callback_url)",
+                    );
+                }
+                if (\array_key_exists('expected_payload', $raw) || \array_key_exists('expected_run_result', $raw)) {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files submit variant (files.webhook) must NOT declare expected_payload/expected_run_result — assert the create request + expected_return instead",
+                    );
+                }
+                if (\count($requests) === 0) {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files submit variant requires at least one request (the create callback_url assertion)",
+                    );
+                }
+                if (!\array_key_exists('expected_return', $raw)) {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files submit variant requires expected_return (the returned Handle assertion)",
+                    );
+                }
+            } else {
+                $hasPayload = \array_key_exists('expected_payload', $raw);
+                $hasRunResult = \array_key_exists('expected_run_result', $raw);
+                if ($hasPayload === $hasRunResult) {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files requires EXACTLY ONE of expected_payload (lowering variant) or expected_run_result (run variant)",
+                    );
+                }
+                if ($hasPayload && \count($responses) !== 0) {
+                    throw new \RuntimeException(
+                        "[{$base}] mode=files lowering variant (expected_payload) must declare zero responses (lowering is network-free)",
+                    );
+                }
             }
         }
         // FF5b (u8M49LU2) — a `submit` block routes a file-first chain through
@@ -624,6 +656,9 @@ final class FixtureLoader
         }
         if (\array_key_exists('pollIntervalMs', $raw) && !\is_int($raw['pollIntervalMs'])) {
             throw new \RuntimeException("[{$base}] files.pollIntervalMs must be an int when present");
+        }
+        if (\array_key_exists('webhook', $raw) && !\is_string($raw['webhook'])) {
+            throw new \RuntimeException("[{$base}] files.webhook must be a string when present (submit variant)");
         }
         /** @var array<string, mixed> $raw */
         return $raw;

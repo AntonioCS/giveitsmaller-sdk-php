@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\FileFirst;
 
+use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
+use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
@@ -36,9 +38,9 @@ use Gisl\Sdk\WorkflowCreatePayload;
  * each file's media-hint (different extensions per input resolve compress
  * presets independently).
  *
- * Single-file `submit()` is OUT of scope here — `$client->files([...])` exposes
- * `run()` only. Mirrors the TS `FilesRecipe` in
- * `packages/typescript/src/file-first.ts`.
+ * Exposes both `run()` (blocking, returns a partitioned {@see RunResult}) and
+ * `submit(?string $webhook)` (fire-and-forget, returns a {@see Handle}).
+ * Mirrors the TS `FilesRecipe` in `packages/typescript/src/file-first.ts`.
  */
 final class FilesRecipe
 {
@@ -109,9 +111,13 @@ final class FilesRecipe
      * @internal Consumed by {@see run()} (after uploading all inputs) and the
      *           cross-language parity harness (with fixed ids). Not caller-facing.
      *
+     * When `$callbackUrl` is given (the file-first `submit()` path) it is built
+     * INTO the payload (`callback_url`) — mirrors {@see Recipe::toWorkflowPayload()}.
+     * `run()` passes no `$callbackUrl`.
+     *
      * @param list<string> $fileIds
      */
-    public function toWorkflowPayload(array $fileIds): WorkflowCreatePayload
+    public function toWorkflowPayload(array $fileIds, ?string $callbackUrl = null): WorkflowCreatePayload
     {
         $jobs = [];
         foreach ($this->inputs as $i => $input) {
@@ -126,7 +132,7 @@ final class FilesRecipe
             );
         }
 
-        return new WorkflowCreatePayload(jobs: $jobs);
+        return new WorkflowCreatePayload(jobs: $jobs, callbackUrl: $callbackUrl);
     }
 
     /**
@@ -138,7 +144,8 @@ final class FilesRecipe
      *
      * Requires a client bound at construction time — `Gisl::create()->files(...)`
      * wires it; a directly-constructed `FilesRecipe` throws {@see GislConfigError}.
-     * Mirrors the single-file {@see Recipe::run()}; submit() is out of scope.
+     * Mirrors the single-file {@see Recipe::run()}; see {@see submit()} for the
+     * fire-and-forget arm.
      *
      * @param string|int|null $maxWait Wall-clock deadline for the whole run.
      * @param (callable(\Gisl\Sdk\Ergonomic\ProgressEvent): void)|null $onProgress
@@ -159,53 +166,9 @@ final class FilesRecipe
         $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($maxWait ?? 300_000);
         $onProgressClosure = BuilderInternals::callableOrNull($onProgress, 'FilesRecipe::run() $onProgress');
 
-        // Pre-validate ALL input kinds before uploading anything — a resource
-        // arm anywhere in the list must fail fast, not after earlier path
-        // inputs have already been uploaded.
-        foreach ($this->inputs as $input) {
-            if ($input->kind !== FileInput::KIND_UPLOAD_ID && $input->kind !== FileInput::KIND_PATH) {
-                throw new GislConfigError(
-                    'FilesRecipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
-                    reason: 'resource_input_unsupported',
-                );
-            }
-        }
-
-        // 1. Upload EVERY input (verbatim for a pre-uploaded id; uploading a
-        // path otherwise via the byte-counter progress closure).
-        $fileIds = [];
-        foreach ($this->inputs as $input) {
-            // Fail fast between uploads — a deadline that elapses mid-batch
-            // should not force every remaining input to upload before throwing.
-            if (BuilderInternals::nowMs() >= $deadlineMs) {
-                throw new GislTimeoutError('maxWait elapsed during fan-out uploads before all inputs were uploaded.');
-            }
-            if ($input->kind === FileInput::KIND_UPLOAD_ID) {
-                $fileIds[] = BuilderInternals::coerceString($input->fileId);
-            } elseif ($input->kind === FileInput::KIND_PATH) {
-                $uploadOpts = $onProgressClosure !== null
-                    ? new UploadOptions(
-                        onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                            $onProgressClosure(new UploadProgressEvent($u, $t));
-                        },
-                    )
-                    : null;
-                $uploadResp = $this->client->uploadFile(BuilderInternals::coerceString($input->path), $uploadOpts);
-                $fileIds[] = $uploadResp->getFileId() ?? '';
-            } else {
-                throw new GislConfigError(
-                    'FilesRecipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
-                    reason: 'resource_input_unsupported',
-                );
-            }
-        }
-
-        if (BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Uploads completed but maxWait elapsed before workflow could be created.');
-        }
-
-        // 2. Create ONE multi-job workflow (one job per input).
-        $created = $this->client->createWorkflow($this->toWorkflowPayload($fileIds));
+        // 1+2. Upload EVERY input + create ONE multi-job workflow. Shared with
+        // submit() (which passes a webhook → callback_url and a null deadline).
+        $created = $this->uploadAllAndCreate(null, $deadlineMs, $onProgressClosure);
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -243,6 +206,108 @@ final class FilesRecipe
             keyByRef: $keyByRef,
             downloader: new StreamingDownloader(),
         );
+    }
+
+    /**
+     * Fire-and-forget the fan-out: upload every input, create ONE multi-job
+     * workflow (wiring `$webhook` into `callback_url` when given), and return a
+     * client-bound {@see Handle}. Does NOT wait for terminal status — call
+     * `$handle->wait()` / `$handle->result()` later to collect the partitioned
+     * {@see RunResult}. The Handle detects the fan-out from the wire `file-{i}`
+     * job refs, so per-file `byKey()` works even after a `client->workflow(id)`
+     * reattach (the keys are the input indices `"0"`, `"1"`, …).
+     *
+     * Requires a client bound at construction time (same `no_client` guard as
+     * {@see run()}). `$webhook` is OPTIONAL. Fire-and-forget, so NO whole-run
+     * deadline (a multi-GB upload is bounded by the HTTP client's own timeout).
+     * Mirrors the single-file {@see Recipe::submit()}.
+     *
+     * @param string|null $webhook Absolute callback URL the server POSTs
+     *                             lifecycle events to.
+     */
+    public function submit(?string $webhook = null): Handle
+    {
+        if ($this->client === null) {
+            throw new GislConfigError(
+                'FilesRecipe::submit() requires a client; build the fan-out via Gisl::create()->files(...) rather than constructing FilesRecipe directly.',
+                reason: 'no_client',
+            );
+        }
+
+        // Fire-and-forget — null deadline so a slow-but-successful big upload is
+        // not capped before createWorkflow (mirrors Recipe::submit()).
+        $created = $this->uploadAllAndCreate($webhook, null, null);
+
+        return new Handle(
+            workflowId: $created->getWorkflowId() ?? '',
+            webhookSecret: $created->getWebhookSecret(),
+            client: $this->client,
+            key: null,
+        );
+    }
+
+    /**
+     * Upload every input (verbatim for a pre-uploaded id; uploading a path via
+     * the byte-counter progress closure) then create ONE multi-job workflow
+     * (one job per input, `callback_url` built in when `$webhook` is given).
+     * Shared first half of {@see run()} + {@see submit()}.
+     *
+     * `run()` passes a whole-run deadline (a slow upload must not proceed to
+     * createWorkflow past maxWait); `submit()` passes null, so the deadline
+     * checks are skipped. Pre-validates ALL input kinds before uploading
+     * anything so a resource arm anywhere in the list fails fast.
+     *
+     * @param (callable(\Gisl\Sdk\Ergonomic\UploadProgressEvent): void)|null $onProgressClosure
+     */
+    private function uploadAllAndCreate(
+        ?string $webhook,
+        ?int $deadlineMs,
+        ?\Closure $onProgressClosure,
+    ): WorkflowCreateResponse {
+        \assert($this->client !== null);
+
+        // Pre-validate ALL input kinds before uploading anything — a resource
+        // arm anywhere in the list must fail fast, not after earlier path
+        // inputs have already been uploaded.
+        foreach ($this->inputs as $input) {
+            if ($input->kind !== FileInput::KIND_UPLOAD_ID && $input->kind !== FileInput::KIND_PATH) {
+                throw new GislConfigError(
+                    'FilesRecipe does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
+                    reason: 'resource_input_unsupported',
+                );
+            }
+        }
+
+        // 1. Upload EVERY input (verbatim for a pre-uploaded id; uploading a
+        // path otherwise via the byte-counter progress closure).
+        $fileIds = [];
+        foreach ($this->inputs as $input) {
+            // Fail fast between uploads — a deadline that elapses mid-batch
+            // should not force every remaining input to upload before throwing.
+            if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+                throw new GislTimeoutError('maxWait elapsed during fan-out uploads before all inputs were uploaded.');
+            }
+            if ($input->kind === FileInput::KIND_UPLOAD_ID) {
+                $fileIds[] = BuilderInternals::coerceString($input->fileId);
+            } else {
+                $uploadOpts = $onProgressClosure !== null
+                    ? new UploadOptions(
+                        onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
+                            $onProgressClosure(new UploadProgressEvent($u, $t));
+                        },
+                    )
+                    : null;
+                $uploadResp = $this->client->uploadFile(BuilderInternals::coerceString($input->path), $uploadOpts);
+                $fileIds[] = $uploadResp->getFileId() ?? '';
+            }
+        }
+
+        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Uploads completed but maxWait elapsed before workflow could be created.');
+        }
+
+        // 2. Create ONE multi-job workflow (callback_url built in when webhook given).
+        return $this->client->createWorkflow($this->toWorkflowPayload($fileIds, $webhook));
     }
 
     /**

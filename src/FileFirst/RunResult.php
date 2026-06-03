@@ -229,6 +229,34 @@ final class RunResult
     }
 
     /**
+     * True when a terminal status describes a homogeneous `files([...])`
+     * fan-out — at least one job and EVERY job ref is `file-{i}` (the ids the
+     * {@see \Gisl\Sdk\FileFirst\FilesRecipe} lowering assigns). A single-file
+     * {@see Recipe} omits the job id, so its job carries a non-`file-N` ref and
+     * this is false.
+     *
+     * The data-driven seam that lets {@see \Gisl\Sdk\Ergonomic\Handle::wait()}/
+     * `result()` pick the per-job producer ({@see fromTerminalMultiJob}) over
+     * the single-output one for a fan-out WITHOUT a construction-time marker —
+     * so a fan-out reattached via `client->workflow(id)` still partitions per
+     * job. Mirrors the TS `isFanoutStatus` in `file-first.ts`.
+     */
+    public static function isFanoutStatus(WorkflowStatusResponse $finalStatus): bool
+    {
+        $jobs = $finalStatus->getJobs() ?? [];
+        if ($jobs === []) {
+            return false;
+        }
+        foreach ($jobs as $job) {
+            if (\preg_match('/^file-\d+$/', BuilderInternals::coerceString($job->getRef())) !== 1) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Address a succeeded input by the `key:` given to `file()`. Duplicate
      * keys are not valid input — the producer enforces key uniqueness (a
      * later ticket); the first match is returned.

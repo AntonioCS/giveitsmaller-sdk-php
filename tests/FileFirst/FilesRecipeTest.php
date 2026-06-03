@@ -169,6 +169,37 @@ final class FilesRecipeTest extends TestCase
         );
     }
 
+    // --- submit() (uUnCtVAr) -------------------------------------------------
+
+    #[Test]
+    public function submit_requires_a_client(): void
+    {
+        // A directly-constructed FilesRecipe (no bound client) must throw the
+        // same no_client guard as run().
+        try {
+            $this->filesRecipe(['a.jpg'])->compress()->submit('https://webhook.test/x');
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertSame('no_client', $e->reason);
+        }
+    }
+
+    #[Test]
+    public function to_workflow_payload_wires_callback_url_for_submit(): void
+    {
+        // submit() threads the webhook into the multi-job payload's callback_url.
+        $json = \json_encode(
+            $this->filesRecipe(['a.jpg', 'b.jpg'])
+                ->compress()
+                ->toWorkflowPayload(['file_0', 'file_1'], 'https://webhook.test/x')
+                ->toWire(),
+        );
+        self::assertIsString($json);
+        self::assertStringContainsString('"callback_url":"https:\/\/webhook.test\/x"', $json);
+        self::assertStringContainsString('"id":"file-0"', $json);
+        self::assertStringContainsString('"id":"file-1"', $json);
+    }
+
     // --- run() partition (string-index keys, one-failure-doesn't-sink) ------
 
     #[Test]

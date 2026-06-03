@@ -265,6 +265,37 @@ final class ParityTest extends TestCase
      */
     private function runFilesMode(Fixture $fixture): void
     {
+        // uUnCtVAr (FF3a-submit) — a `files.webhook` selects the SUBMIT variant:
+        // drive FilesRecipe->submit() against the canned create response, assert
+        // the captured create request (multi-job callback_url) AND the returned
+        // Handle (expected_return). Mirrors the TS files-submit arm.
+        $filesSpec = $fixture->files;
+        if ($filesSpec !== null && isset($filesSpec['webhook'])) {
+            $stub = new StubPsr18Client($fixture->responses, $fixture->absolutePath);
+            $actual = Invoke::submitFiles($fixture, $stub);
+
+            $requestIssues = Comparator::compareRequests($fixture, $stub);
+            $this->assertSame(
+                [],
+                $requestIssues,
+                "[{$fixture->name}] files submit request parity failure:\n  - " . \implode("\n  - ", $requestIssues),
+            );
+
+            if ($fixture->hasExpectedReturn) {
+                $returnIssues = Comparator::compareReturn(
+                    $fixture->expectedReturn,
+                    $actual,
+                    'expected_return',
+                );
+                $this->assertSame(
+                    [],
+                    $returnIssues,
+                    "[{$fixture->name}] files submit return parity failure:\n  - " . \implode("\n  - ", $returnIssues),
+                );
+            }
+            return;
+        }
+
         // Discriminate by which assertion the fixture pinned. The loader sets
         // hasExpectedRunResult when expected_run_result is present; otherwise
         // the lowering variant's expected_payload drives the assertion.

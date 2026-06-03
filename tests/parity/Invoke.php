@@ -400,6 +400,50 @@ final class Invoke
     }
 
     /**
+     * uUnCtVAr (FF3a-submit) — mode=files submit variant. Build a
+     * {@see FilesRecipe} bound to an ergonomic client from the fixture's `files`
+     * block, apply each shared op, and drive `->submit($webhook)` against the
+     * canned create response. Returns the resulting Handle projected via
+     * {@see \Gisl\Sdk\Ergonomic\Handle::toArray()} so the caller can deep-compare
+     * to `expected_return`; the create `callback_url` request is asserted by
+     * {@see Comparator::compareRequests}. Mirrors the TS `submitFilesFixture`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function submitFiles(Fixture $fixture, StubPsr18Client $stub): array
+    {
+        $spec = $fixture->files;
+        if ($spec === null) {
+            throw new \RuntimeException("[{$fixture->name}] mode=files requires a files block");
+        }
+
+        $factory = new HttpFactory();
+        $config = new GislClientConfig(
+            baseUrl: 'https://api.test.example.com',
+            apiKey: 'test-api-key',
+            multipartConcurrency: 1,
+        );
+        $client = new GislErgonomicClient(
+            config: $config,
+            httpClient: $stub,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+
+        $recipe = $client->files(self::buildFileInputs($spec));
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+        foreach ($operations as $op) {
+            $recipe = self::applyFilesOp($recipe, $op);
+        }
+
+        $webhook = isset($spec['webhook']) && \is_string($spec['webhook']) ? $spec['webhook'] : null;
+        $handle = $recipe->submit($webhook);
+
+        return $handle->toArray();
+    }
+
+    /**
      * Build the ORDERED {@see FileInput} list from a `files` block's `files[]`.
      *
      * @param array<string, mixed> $spec
