@@ -64,12 +64,17 @@ final class MergeBuilderTest extends TestCase
 
         $body = self::decodeJson($captured[2]);
         $this->assertSame('https://example.com/cb', $body['callback_url']);
-        $this->assertSame('merge', $body['jobs'][0]['operations'][0]['type']);
-        $this->assertCount(2, $body['jobs'][0]['inputs']);
-        $this->assertSame('01936fb1-7bb3-7000-8000-00000000aa01', $body['jobs'][0]['inputs'][0]['source']['file_id']);
-        $this->assertSame('01936fb1-7bb3-7000-8000-00000000aa02', $body['jobs'][0]['inputs'][1]['source']['file_id']);
-        $this->assertArrayNotHasKey('per_input_options', $body['jobs'][0]['inputs'][0]);
-        $this->assertArrayNotHasKey('per_input_options', $body['jobs'][0]['inputs'][1]);
+        // p0SuJEeK — 2 unique assets → 2 passthrough src jobs + merge job last.
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $this->assertCount(2, $mergeJob['inputs']);
+        // Each merge input references its source job; the uploaded file_ids
+        // now live on the src jobs, not the merge inputs.
+        $this->assertSame('src_0', $mergeJob['inputs'][0]['source']['from']);
+        $this->assertSame('src_1', $mergeJob['inputs'][1]['source']['from']);
+        $this->assertSame('01936fb1-7bb3-7000-8000-00000000aa01', $body['jobs'][0]['source']['file_id']);
+        $this->assertSame('01936fb1-7bb3-7000-8000-00000000aa02', $body['jobs'][1]['source']['file_id']);
+        $this->assertArrayNotHasKey('per_input_options', $mergeJob['inputs'][0]);
+        $this->assertArrayNotHasKey('per_input_options', $mergeJob['inputs'][1]);
     }
 
     public function test_sequence_with_clip_emits_per_input_options_on_video(): void
@@ -93,7 +98,8 @@ final class MergeBuilderTest extends TestCase
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
         $body = self::decodeJson($captured[2]);
-        $inputs = $body['jobs'][0]['inputs'];
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $inputs = $mergeJob['inputs'];
         $this->assertCount(2, $inputs);
         $this->assertArrayNotHasKey('per_input_options', $inputs[0]);
         $this->assertSame(
@@ -122,8 +128,13 @@ final class MergeBuilderTest extends TestCase
         // Only 2 outbound requests (1 upload + 1 workflow create).
         $this->assertCount(2, $captured);
         $body = self::decodeJson($captured[1]);
-        $this->assertSame('01936fb1-7bb3-7000-8000-0000000000a1', $body['jobs'][0]['inputs'][0]['source']['file_id']);
-        $this->assertSame('01936fb1-7bb3-7000-8000-0000000000d4', $body['jobs'][0]['inputs'][1]['source']['file_id']);
+        // p0SuJEeK — a handle asset still gets its own passthrough src job;
+        // the file_ids (uploaded + handle) live on the src jobs now.
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $this->assertSame('src_0', $mergeJob['inputs'][0]['source']['from']);
+        $this->assertSame('src_1', $mergeJob['inputs'][1]['source']['from']);
+        $this->assertSame('01936fb1-7bb3-7000-8000-0000000000a1', $body['jobs'][0]['source']['file_id']);
+        $this->assertSame('01936fb1-7bb3-7000-8000-0000000000d4', $body['jobs'][1]['source']['file_id']);
     }
 
     public function test_repeated_path_dedupes_to_one_upload(): void
@@ -143,11 +154,17 @@ final class MergeBuilderTest extends TestCase
         $client->merge([$pathA, $pathB, $pathA], new MergeOptions(mediaKind: 'video'))
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        // Three positions, two uploads. Wire emits three `inputs[]` entries.
+        // Three positions, two uploads. Wire emits three merge `inputs[]`
+        // entries but only TWO src jobs (the repeated pathA re-uses its src).
         $this->assertCount(3, $captured);
         $body = self::decodeJson($captured[2]);
-        $this->assertCount(3, $body['jobs'][0]['inputs']);
-        $this->assertSame($body['jobs'][0]['inputs'][0]['source']['file_id'], $body['jobs'][0]['inputs'][2]['source']['file_id']);
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $this->assertCount(3, $mergeJob['inputs']);
+        // Positions 0 and 2 are the same asset → SAME src job (not a second one).
+        $this->assertSame(
+            $mergeJob['inputs'][0]['source']['from'],
+            $mergeJob['inputs'][2]['source']['from'],
+        );
     }
 
     public function test_two_distinct_path_asset_objects_with_same_path_dedupe_to_one_upload(): void
@@ -173,11 +190,13 @@ final class MergeBuilderTest extends TestCase
 
         $this->assertCount(2, $captured, 'two distinct PathAsset objects with identical path string upload once');
         $body = self::decodeJson($captured[1]);
-        $this->assertCount(2, $body['jobs'][0]['inputs']);
+        // 1 unique asset → 1 src job; both merge positions reference it.
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 1);
+        $this->assertCount(2, $mergeJob['inputs']);
         $this->assertSame(
-            $body['jobs'][0]['inputs'][0]['source']['file_id'],
-            $body['jobs'][0]['inputs'][1]['source']['file_id'],
-            'both positions point at the same uploaded file_id',
+            $mergeJob['inputs'][0]['source']['from'],
+            $mergeJob['inputs'][1]['source']['from'],
+            'both positions point at the same src job (same uploaded file_id)',
         );
     }
 
@@ -281,7 +300,8 @@ final class MergeBuilderTest extends TestCase
         )->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
         $body = self::decodeJson($captured[2]);
-        $options = $body['jobs'][0]['operations'][0]['options'];
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $options = $mergeJob['operations'][0]['options'];
         $this->assertSame('fade', $options['transition']);
         $this->assertArrayNotHasKey('gap_duration', $options);
     }
@@ -305,7 +325,8 @@ final class MergeBuilderTest extends TestCase
         )->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
         $body = self::decodeJson($captured[2]);
-        $this->assertSame(2.5, $body['jobs'][0]['operations'][0]['options']['gap_duration']);
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $this->assertSame(2.5, $mergeJob['operations'][0]['options']['gap_duration']);
     }
 
     public function test_video_per_input_clip_drops_gap_duration(): void
@@ -330,7 +351,8 @@ final class MergeBuilderTest extends TestCase
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
         $body = self::decodeJson($captured[2]);
-        $perInput = $body['jobs'][0]['inputs'][1]['per_input_options'];
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 2);
+        $perInput = $mergeJob['inputs'][1]['per_input_options'];
         $this->assertSame('crossfade', $perInput['transition']);
         $this->assertArrayNotHasKey('gap_duration', $perInput);
     }
@@ -408,7 +430,8 @@ final class MergeBuilderTest extends TestCase
         $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'video', targetSize: '10MB'))
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        $opts = self::decodeJson($captured[2])['jobs'][0]['operations'][0]['options'];
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
         $this->assertSame(10_000_000, $opts['target_size_bytes']);
         $this->assertSame('target_size', $opts['encoding_mode']);
     }
@@ -453,7 +476,8 @@ final class MergeBuilderTest extends TestCase
         $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'video', targetSize: 5_000_000))
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        $opts = self::decodeJson($captured[2])['jobs'][0]['operations'][0]['options'];
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
         $this->assertSame(5_000_000, $opts['target_size_bytes']);
         $this->assertSame('target_size', $opts['encoding_mode']);
     }
@@ -496,7 +520,8 @@ final class MergeBuilderTest extends TestCase
             ),
         )->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        $opts = self::decodeJson($captured[2])['jobs'][0]['operations'][0]['options'];
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
         $this->assertArrayHasKey('output_type', $opts);
         $this->assertSame('video', $opts['output_type']);
         $this->assertArrayHasKey('transition_duration', $opts);
@@ -540,7 +565,8 @@ final class MergeBuilderTest extends TestCase
             ),
         )->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        $opts = self::decodeJson($captured[2])['jobs'][0]['operations'][0]['options'];
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
         $this->assertSame('h264', $opts['codec']);
         $this->assertArrayNotHasKey('transition_duration', $opts);
         $this->assertArrayNotHasKey('fps', $opts);
@@ -617,18 +643,21 @@ final class MergeBuilderTest extends TestCase
         // Only ONE outbound request (workflow create) — no uploads.
         $this->assertCount(1, $captured);
         $body = self::decodeJson($captured[0]);
+        // Two duplicate handles → ONE unique asset → ONE src job carrying the
+        // shared file_id; both merge positions reference src_0.
+        $mergeJob = $this->assertMergeShapeAndReturnMergeJob($body, 1);
         $this->assertCount(
             2,
-            $body['jobs'][0]['inputs'],
+            $mergeJob['inputs'],
             'sequence positions are preserved even when handles dedupe',
         );
         $this->assertSame(
             '01936fb1-7bb3-7000-8000-0000000000e5',
-            $body['jobs'][0]['inputs'][0]['source']['file_id'],
+            $body['jobs'][0]['source']['file_id'],
         );
         $this->assertSame(
-            $body['jobs'][0]['inputs'][0]['source']['file_id'],
-            $body['jobs'][0]['inputs'][1]['source']['file_id'],
+            $mergeJob['inputs'][0]['source']['from'],
+            $mergeJob['inputs'][1]['source']['from'],
         );
     }
 
@@ -684,13 +713,61 @@ final class MergeBuilderTest extends TestCase
         $client->merge([$audioA, $audioB], new MergeOptions(gapDuration: 1.5))
             ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
 
-        $opts = self::decodeJson($captured[2])['jobs'][0]['operations'][0]['options'];
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
         $this->assertSame(1.5, $opts['gap_duration'], 'audio inference keeps gap_duration on the wire');
     }
 
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
+
+    /**
+     * p0SuJEeK — the merge payload now emits one single-input `passthrough`
+     * source job per UNIQUE asset (first-seen position order) FOLLOWED BY the
+     * merge job LAST. So `$body['jobs'][0]` is no longer the merge job. This
+     * helper returns the merge job (the last element, id 'merge') and asserts
+     * the leading source jobs carry `operations: [{type: passthrough}]`,
+     * `source.type === upload`, and that every merge input references a
+     * source job via `{type: job_output, from: src_<i>}`.
+     *
+     * @param array<string, mixed> $body
+     * @param int $expectedSourceJobs number of unique assets = source job count
+     * @return array<string, mixed> the merge job
+     */
+    private function assertMergeShapeAndReturnMergeJob(array $body, int $expectedSourceJobs): array
+    {
+        /** @var list<array<string, mixed>> $jobs */
+        $jobs = $body['jobs'];
+        $this->assertCount($expectedSourceJobs + 1, $jobs, 'one src job per unique asset + the merge job');
+
+        $srcIds = [];
+        for ($i = 0; $i < $expectedSourceJobs; $i++) {
+            /** @var array<string, mixed> $job */
+            $job = $jobs[$i];
+            $this->assertSame("src_{$i}", $job['id']);
+            $this->assertSame('upload', $job['source']['type']);
+            $this->assertIsString($job['source']['file_id']);
+            $this->assertArrayNotHasKey('inputs', $job);
+            $this->assertSame([['type' => 'passthrough']], $job['operations']);
+            $srcIds[$job['id']] = true;
+        }
+
+        /** @var array<string, mixed> $mergeJob */
+        $mergeJob = $jobs[$expectedSourceJobs];
+        $this->assertSame('merge', $mergeJob['id']);
+        $this->assertSame('merge', $mergeJob['operations'][0]['type']);
+
+        /** @var list<array<string, mixed>> $inputs */
+        $inputs = $mergeJob['inputs'];
+        foreach ($inputs as $input) {
+            $this->assertSame('job_output', $input['source']['type']);
+            $this->assertArrayHasKey($input['source']['from'], $srcIds, 'merge input references a known src job');
+            $this->assertArrayNotHasKey('file_id', $input['source'], 'merge inputs no longer carry upload file_id');
+        }
+
+        return $mergeJob;
+    }
 
     private static function writeTempFile(string $bytes): string
     {

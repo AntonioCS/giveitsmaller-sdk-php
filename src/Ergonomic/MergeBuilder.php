@@ -127,9 +127,20 @@ final class MergeBuilder
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
 
+        // p0SuJEeK — project ONLY the merge job's output. getWorkflowDownloads
+        // returns a download group per terminal job, which now INCLUDES the
+        // `passthrough` source jobs (their output is the unchanged upload).
+        // Those are plumbing, not the merge deliverable — surfacing them as
+        // artifacts would pollute the Result with the raw inputs. The merge
+        // job's ref is 'merge' (see buildPayload); source jobs are 'src_N'.
+        $mergeDownloads = \array_values(\array_filter(
+            $downloads->getDownloads() ?? [],
+            static fn ($d): bool => BuilderInternals::coerceString($d->getRef()) === 'merge',
+        ));
+
         return OperationBuilder::projectResult(
             $finalStatus,
-            $downloads->getDownloads() ?? [],
+            $mergeDownloads,
             $this->opOptionsForResolved($plan->mediaKind),
         );
     }
@@ -339,15 +350,44 @@ final class MergeBuilder
         array $uploadedByAssetId,
         ?string $callbackUrl,
     ): WorkflowCreatePayload {
-        $inputs = [];
+        // p0SuJEeK — the API rejects upload-direct multi-input
+        // (`MultiInputSource` excludes the `upload` leaf: "use type=job_output").
+        // So each uploaded asset is wrapped in its OWN single-input `passthrough`
+        // source job, and the merge job references those via `job_output` — the
+        // shape the v2.35.0 `v2_merge_two_uploads` example prescribes. One source
+        // job per UNIQUE asset (in first-seen position order); a repeated asset
+        // re-uses its src job. `passthrough` is a lossless inert op (it does NOT
+        // get the implicit compress an empty `operations: []` job would).
+        $srcIdByAsset = [];
+        $sourceJobs = [];
         foreach ($plan->positions as $pos) {
+            if (isset($srcIdByAsset[$pos->assetId])) {
+                continue;
+            }
             if (!isset($uploadedByAssetId[$pos->assetId])) {
                 // Defensive — planSequence should have rejected this.
                 throw new \LogicException(
                     "Asset '{$pos->assetId}' was never uploaded — internal MergeBuilder bug.",
                 );
             }
-            $input = ['source' => Sources::upload($uploadedByAssetId[$pos->assetId])];
+            $srcId = 'src_' . \count($sourceJobs);
+            $srcIdByAsset[$pos->assetId] = $srcId;
+            $sourceJobs[] = new JobDefinitionPayload(
+                operations: [new OperationDef(type: 'passthrough')],
+                id: $srcId,
+                source: Sources::upload($uploadedByAssetId[$pos->assetId]),
+            );
+        }
+
+        $inputs = [];
+        foreach ($plan->positions as $pos) {
+            // Defensive — srcIdByAsset was populated for every position's asset above.
+            if (!isset($srcIdByAsset[$pos->assetId])) {
+                throw new \LogicException(
+                    "Asset '{$pos->assetId}' has no source job — internal MergeBuilder bug.",
+                );
+            }
+            $input = ['source' => Sources::jobOutput($srcIdByAsset[$pos->assetId])];
             // Image merges never emit per_input_options (planSequence already
             // rejects opts on image-merge clips). Video/audio emit a
             // narrowed projection by media kind.
@@ -362,14 +402,14 @@ final class MergeBuilder
 
         $mergeOpts = self::wireMergeOptions($this->opOptions, $plan->mediaKind);
 
-        $job = new JobDefinitionPayload(
+        $mergeJob = new JobDefinitionPayload(
             operations: [new OperationDef(type: 'merge', options: $mergeOpts)],
             id: 'merge',
             inputs: $inputs,
         );
 
         return new WorkflowCreatePayload(
-            jobs: [$job],
+            jobs: [...$sourceJobs, $mergeJob],
             callbackUrl: $callbackUrl,
         );
     }
