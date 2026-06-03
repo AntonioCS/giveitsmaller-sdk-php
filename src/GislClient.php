@@ -8,6 +8,7 @@ use Gisl\Generated\OpenApi\Model\AudioWatermarkDecodeRequest;
 use Gisl\Generated\OpenApi\Model\AudioWatermarkDecodeResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorType;
+use Gisl\Generated\OpenApi\Model\AuthRejectionEnvelope;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
 use Gisl\Generated\OpenApi\Model\ContactRequest;
 use Gisl\Generated\OpenApi\Model\CreditsBalanceResponse;
@@ -39,6 +40,7 @@ use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\ObjectSerializer;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
+use Gisl\Sdk\Errors\GislAuthRejectionError;
 use Gisl\Sdk\Errors\GislBalanceExhaustedError;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislError;
@@ -2705,6 +2707,40 @@ class GislClient
                     $statusCode,
                     $errorCode,
                     GislUploadCapExceededError::KIND_DURATION_TIER,
+                    $typed,
+                    $decoded,
+                    $messageKey,
+                    $locale,
+                    $messageParams,
+                );
+            }
+        }
+
+        // 422 auth-side-effect domain rejection (per contracts ADR-0019).
+        // Flat AuthRejectionEnvelope — NO `details[]` — on register /
+        // verify-email / api-keys (`error_type: unprocessable_entity`) and
+        // profile PATCH email-unchanged (`error_type: email_same`). The
+        // `validation_error` branch of the same auth-422 `oneOf` carries
+        // `details[]` and is already routed to GislValidationError by the
+        // shape-based branch above. Mirrors
+        // `packages/typescript/src/client.ts` GislAuthRejectionError branch.
+        if (
+            $statusCode === 422
+            && \in_array($errorType, [
+                AuthRejectionEnvelope::ERROR_TYPE_UNPROCESSABLE_ENTITY,
+                AuthRejectionEnvelope::ERROR_TYPE_EMAIL_SAME,
+            ], true)
+        ) {
+            $typed = $this->tryDeserialize(AuthRejectionEnvelope::class, $decoded);
+            if (
+                $typed instanceof AuthRejectionEnvelope
+                && \is_string($typed->getErrorType())
+                && $typed->getErrorType() !== ''
+            ) {
+                throw new GislAuthRejectionError(
+                    $message,
+                    $statusCode,
+                    $errorCode,
                     $typed,
                     $decoded,
                     $messageKey,

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
+use Gisl\Generated\OpenApi\Model\AuthRejectionEnvelope;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
 use Gisl\Generated\OpenApi\Model\FeatureNotAvailableResponse;
 use Gisl\Generated\OpenApi\Model\FeatureTierRestrictedResponse;
@@ -18,6 +19,7 @@ use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelopeDetailsInner;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
+use Gisl\Sdk\Errors\GislAuthRejectionError;
 use Gisl\Sdk\Errors\GislBalanceExhaustedError;
 use Gisl\Sdk\Errors\GislFeatureNotAvailableError;
 use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
@@ -540,6 +542,164 @@ final class GislClientTypedErrorsTest extends TestCase
             self::assertSame('compress', $details[0]->getOperation());
             self::assertSame('quality', $details[0]->getOption());
             self::assertSame('output_format is required', $details[1]->getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 422 auth-side-effect domain rejection (v2.37.0 / ADR-0019)
+    //
+    // Flat AuthRejectionEnvelope — NO `details[]` — on register / verify-email
+    // / api-keys POST (`error_type: unprocessable_entity`) and profile PATCH
+    // email-unchanged (`error_type: email_same`). The `validation_error`
+    // branch of the same auth-422 `oneOf` carries `details[]` and stays on
+    // GislValidationError via the shape-based branch — pinned by the
+    // regression test below.
+    // ---------------------------------------------------------------------
+
+    public function testAuthRejectionUnprocessableEntityDispatch(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'UNPROCESSABLE_ENTITY',
+                'error_type' => 'unprocessable_entity',
+                'message' => 'This email address is already registered.',
+                'message_key' => 'errors.auth.email_taken',
+                'locale' => 'en-GB',
+                'message_params' => ['email' => 'taken@example.com'],
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislAuthRejectionError');
+        } catch (GislAuthRejectionError $e) {
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame('UNPROCESSABLE_ENTITY', $e->errorCode);
+            self::assertSame('unprocessable_entity', $e->getErrorType());
+            $typed = $e->getAuthRejection();
+            self::assertInstanceOf(AuthRejectionEnvelope::class, $typed);
+            self::assertSame(
+                AuthRejectionEnvelope::ERROR_TYPE_UNPROCESSABLE_ENTITY,
+                $typed->getErrorType(),
+            );
+            self::assertSame($typed, $e->typedPayload);
+            self::assertSame('errors.auth.email_taken', $e->messageKey);
+            self::assertSame('en-GB', $e->locale);
+            self::assertSame(['email' => 'taken@example.com'], $e->messageParams);
+        }
+    }
+
+    public function testAuthRejectionEmailSameDispatch(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'EMAIL_SAME',
+                'error_type' => 'email_same',
+                'message' => 'The new email is the same as your current email.',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislAuthRejectionError');
+        } catch (GislAuthRejectionError $e) {
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame('email_same', $e->getErrorType());
+            $typed = $e->getAuthRejection();
+            self::assertInstanceOf(AuthRejectionEnvelope::class, $typed);
+            self::assertSame(
+                AuthRejectionEnvelope::ERROR_TYPE_EMAIL_SAME,
+                $typed->getErrorType(),
+            );
+        }
+    }
+
+    /**
+     * Regression: a 422 carrying a NON-EMPTY `details[]` with a string
+     * `message` per entry is the `validation_error` branch of the same
+     * auth-422 `oneOf`. It MUST stay on GislValidationError — the shape-based
+     * details[] branch runs before (and wins over) the auth-rejection
+     * error_type branch. A regression that lets the auth-rejection branch
+     * swallow validation envelopes surfaces here.
+     */
+    public function testValidationDetailsStillWinsOverAuthRejection(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'VALIDATION_FAILED',
+                'error_type' => 'validation_error',
+                'message' => 'Validation failed for one or more fields.',
+                'details' => [
+                    [
+                        'message' => 'email must be a valid address',
+                        'field' => 'email',
+                    ],
+                ],
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislValidationError');
+        } catch (GislValidationError $e) {
+            self::assertNotInstanceOf(GislAuthRejectionError::class, $e);
+            self::assertInstanceOf(GislApiError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame('VALIDATION_FAILED', $e->errorCode);
+            self::assertInstanceOf(ValidationErrorEnvelope::class, $e->typedPayload);
+            $details = $e->typedPayload->getDetails();
+            self::assertIsArray($details);
+            self::assertCount(1, $details);
+            self::assertInstanceOf(ValidationErrorEnvelopeDetailsInner::class, $details[0]);
+            self::assertSame('email must be a valid address', $details[0]->getMessage());
+            self::assertSame('email', $details[0]->getField());
+        }
+    }
+
+    /**
+     * Gate guard: a 422 with an `error_type` that is NOT in the
+     * AuthRejectionEnvelope enum (`unprocessable_entity` / `email_same`) AND
+     * no `details[]` must fall THROUGH to the base GislApiError — neither the
+     * auth-rejection branch nor the shape-based validation branch may claim
+     * it. Mirrors `test401WithUnknownErrorTypeFallsToGenericGislAuthError` for
+     * the new auth-422 gate.
+     */
+    public function testUnknown422ErrorTypeFallsToGenericApiError(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(422, [
+                'success' => false,
+                'error' => 'SOMETHING',
+                'error_type' => 'unknown_auth_type',
+                'message' => 'An unrecognised 422 rejection.',
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislApiError');
+        } catch (GislApiError $e) {
+            self::assertNotInstanceOf(GislAuthRejectionError::class, $e);
+            self::assertNotInstanceOf(GislValidationError::class, $e);
+            self::assertSame(422, $e->statusCode);
+            self::assertSame('SOMETHING', $e->errorCode);
         }
     }
 
