@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Sdk\Errors\GislError;
 use Gisl\Sdk\Errors\GislMultipartPartCountError;
+use Gisl\Sdk\Errors\GislMultipartPartError;
 use Gisl\Sdk\Errors\GislUploadCapExceededError;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
@@ -172,6 +173,41 @@ final class GislClientPresignPartsTest extends TestCase
         $exactly100 = \range(2, 101); // 100 entries
         $client->presignParts('u1', $exactly100, 200);
         self::assertCount(1, $captured);
+    }
+
+    public function testRejectsEmptyPresignedUrlWithPartNumberAndDoesNotRetry(): void
+    {
+        // Fwu0MdaI: a /presign response carrying an empty `url` for a missing
+        // part must fail fast with a GislError naming the part number — NOT be
+        // PUT to an empty target, retried, and surfaced as retry-exhaustion
+        // (GislMultipartPartError). Parity with the concurrent startPart guard.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'upload_id' => 'u1',
+                    'presigned_urls' => [
+                        ['part_number' => 2, 'url' => '', 'expires_at' => '2026-05-21T12:00:00Z'],
+                    ],
+                ],
+            ]),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        try {
+            $client->presignParts('u1', [2], 100);
+            self::fail('Expected GislError for empty presigned URL');
+        } catch (GislMultipartPartError $e) {
+            self::fail('Empty URL must not surface as retry-exhaustion: ' . $e->getMessage());
+        } catch (GislError $e) {
+            self::assertMatchesRegularExpression('/part 2/', $e->getMessage());
+        }
+
+        // Only the single /presign POST happened — no retried PUTs.
+        self::assertCount(1, $captured);
+        self::assertSame('POST', $captured[0]->getMethod());
+        self::assertSame('/api/uploads/multipart/u1/presign', $captured[0]->getUri()->getPath());
     }
 
     /**

@@ -1001,6 +1001,16 @@ class GislClient
             if (!\is_int($partNumber) || !\is_string($url) || !\is_string($expiresAt)) {
                 throw new GislError('presignParts: malformed presigned_urls entry fields.');
             }
+            // Reject an empty presigned URL at the source so it fails fast on
+            // BOTH the sequential resume PUT (resumePutWithRetry) and the
+            // concurrent paths — an empty URL would otherwise PUT to an empty
+            // target, get retried as transient, and surface as
+            // retry-exhaustion (GislMultipartPartError), masking the real
+            // server-contract violation. Parity with the concurrent guard in
+            // CurlMultiPartUploader::startPart.
+            if ($url === '') {
+                throw new GislError("presignParts: presigned URL for part {$partNumber} is empty.");
+            }
             $presigned[] = [
                 'partNumber' => $partNumber,
                 'url' => $url,
