@@ -15,46 +15,32 @@ array). Keep the two in sync — see "How to remove a skip" below.
 ## Status snapshot (v1 launch gate — P8 `ftI4Myby`)
 
 - **Shared fixtures**: 74
-- **Skipped (PHP)**: 4 (all with rationale + follow-up card)
+- **Skipped (PHP)**: 3 (all with rationale + follow-up card)
 - **Failing**: 0
 
 The full PHP suite (unit + parity) is green via `make project/sdk/php/check`.
-The four skips below are the only PHP conformance divergences; none is a
+The three skips below are the only PHP conformance divergences; none is a
 functional defect in the hand-written SDK logic, and all are tracked for
 reduction. The launch gate passes with these documented exceptions.
 
-The four split into two buckets:
+All three fall in one bucket:
 
-- **Bucket A — PHP-specific divergence from the TS canonical reference**
-  (§1 octet-stream). TS does NOT skip this; a consumer comparing PHP↔TS wire
-  output could observe the difference.
 - **Bucket B — shared TS+PHP skip of an out-of-contract fixture**
-  (§2 recommendedChunkSize). The TS reference runner skips the same three
+  (§1 recommendedChunkSize). The TS reference runner skips the same three
   fixtures for the same reason (`packages/typescript/tests/parity/parity.test.ts`);
   the fixture pins a value below the contract chunk-range floor, so neither SDK
   accepts it.
 
+Bucket A (the §1 multipart `file` part Content-Type PHP-specific divergence,
+Trello `RWWBYklu`) is **RESOLVED** — the PHP SDK now forwards the caller-supplied
+content-type from `UploadOptions` on both the single-shot and multipart-initiate
+`file` parts (`packages/php/src/GislClient.php:3027`, `:3068`), defaulting to
+`application/octet-stream` when absent. The `upload_small` fixture is no longer
+skipped.
+
 ## Divergences
 
-### 1. Multipart `file` part Content-Type (1 fixture, Bucket A) — Trello `RWWBYklu`
-
-The PHP SDK hardcodes `Content-Type: application/octet-stream` on the multipart
-`file` part in `singleShotUpload` / `multipartUpload`
-(`packages/php/src/GislClient.php:2864`, `:2904`). The TS reference forwards the
-caller's `Blob.type`. The fixture pins a specific type, so PHP and TS emit
-different part content-types. Low-risk at the wire level — the upload part
-content-type is advisory and the server re-sniffs the MIME from the bytes
-(the `upload_small` fixture itself shows the server returning its own
-`mime_type`).
-
-| Fixture | Reason |
-|---|---|
-| `upload_small` | PHP hardcodes `application/octet-stream`; TS forwards the caller's type. |
-
-**Resolution:** forward the caller-supplied content-type from the SDK upload
-path (Trello `RWWBYklu`).
-
-### 2. Sub-floor chunk size — both SDKs enforce the contract chunk-range (3 fixtures, Bucket B)
+### 1. Sub-floor chunk size — both SDKs enforce the contract chunk-range (3 fixtures, Bucket B)
 
 Both SDKs enforce the contract chunk-range floor of **16 MiB (16777216 bytes)**
 on `recommendedChunkSize` (raised 5 MiB → 16 MiB by CON-1 / contracts

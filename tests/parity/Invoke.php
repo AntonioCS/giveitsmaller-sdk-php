@@ -561,11 +561,22 @@ final class Invoke
                 $tempPath = self::writeTemp($bytes, $filename);
                 $tempFiles[] = $tempPath;
 
-                $options = null;
+                // RWWBYklu: the upload content-type rides on the BYTES arg
+                // (`$first['content-type']`), NOT args[1]. Forward it via
+                // UploadOptions even when there is no 2nd arg so the multipart
+                // `file` part carries the fixture's declared type (`text/plain`
+                // for upload_small; `application/octet-stream` for
+                // upload_boundary_single). When the bytes arg omits a
+                // content-type the SDK falls back to application/octet-stream.
+                $contentType = isset($first['content-type']) && \is_string($first['content-type'])
+                    ? $first['content-type']
+                    : null;
+
+                $hint = null;
+                $resumeUploadId = null;
                 if (isset($args[1]) && \is_array($args[1])) {
                     /** @var array<string, mixed> $opts */
                     $opts = $args[1];
-                    $hint = null;
                     if (isset($opts['metadataHint']) && \is_array($opts['metadataHint'])) {
                         /** @var array<string, mixed> $hintMap */
                         $hintMap = $opts['metadataHint'];
@@ -580,11 +591,12 @@ final class Invoke
                     $resumeUploadId = isset($opts['resumeUploadId']) && \is_string($opts['resumeUploadId'])
                         ? $opts['resumeUploadId']
                         : null;
-                    $options = new UploadOptions(
-                        metadataHint: $hint,
-                        resumeUploadId: $resumeUploadId,
-                    );
                 }
+                $options = new UploadOptions(
+                    metadataHint: $hint,
+                    resumeUploadId: $resumeUploadId,
+                    contentType: $contentType,
+                );
                 return $client->uploadFile($tempPath, $options);
 
             case 'createWorkflow':

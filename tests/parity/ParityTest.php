@@ -51,14 +51,13 @@ final class ParityTest extends TestCase
      * @var array<string, string>
      */
     private const KNOWN_DIVERGENCES = [
-        // The PHP SDK hardcodes `Content-Type: application/octet-stream` for
-        // the multipart `file` part in `singleShotUpload` / `multipartUpload`
-        // (`packages/php/src/GislClient.php:2864`, :2904). The TS reference
-        // forwards the caller's Blob.type. Fixture pins `text/plain`.
-        // See packages/php/tests/parity/KNOWN_DIVERGENCES.md (Trello RWWBYklu).
-        'upload_small' =>
-            'PHP SDK hardcodes Content-Type=application/octet-stream on the multipart file part; '
-            . 'TS forwards Blob.type. Real divergence — file follow-up card to forward caller type.',
+        // RWWBYklu (RESOLVED): the PHP SDK now forwards the caller-supplied
+        // Content-Type on the multipart `file` part in `buildSingleShotMultipartBody`
+        // (`packages/php/src/GislClient.php:3027`) and
+        // `buildMultipartInitiateBody` (`:3068`), defaulting to
+        // `application/octet-stream` when absent. The `upload_small` fixture
+        // (pins `text/plain`) is no longer skipped — the parity harness
+        // forwards the fixture's bytes-arg content-type via UploadOptions.
 
         // BOTH SDKs enforce the contract chunk-range floor (16 MiB /
         // 16777216 bytes — raised 5 MiB -> 16 MiB by CON-1 / contracts

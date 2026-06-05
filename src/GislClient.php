@@ -242,6 +242,7 @@ class GislClient
             boundary: $boundary,
             filePath: $filePath,
             fileName: $fileName,
+            contentType: $options?->contentType,
         );
 
         $request = $this->buildRequest(
@@ -301,6 +302,7 @@ class GislClient
             totalSize: $totalSize,
             firstChunkSize: $firstChunkSize,
             metadataHint: $options?->metadataHint,
+            contentType: $options?->contentType,
         );
 
         // Fail fast on a malformed initiate envelope — synthesising an
@@ -1197,6 +1199,7 @@ class GislClient
         int $totalSize,
         int $firstChunkSize,
         ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
+        ?string $contentType = null,
     ): MultipartInitiateResponse {
         $boundary = $this->generateMultipartBoundary();
         $body = $this->buildMultipartInitiateBody(
@@ -1206,6 +1209,7 @@ class GislClient
             firstChunkSize: $firstChunkSize,
             totalSize: $totalSize,
             metadataHint: $metadataHint,
+            contentType: $contentType,
         );
 
         $request = $this->buildRequest(
@@ -2992,10 +2996,29 @@ class GislClient
         return '----GislSdkBoundary' . \bin2hex(\random_bytes(16));
     }
 
+    /**
+     * Reject a multipart-part Content-Type that would inject CR/LF/NUL into the
+     * raw header bytes. Authoritative wire-assembly guard: `UploadOptions`
+     * validates `$contentType` at construction, but the property is public and
+     * mutable, so this re-checks the actual value the moment it is written into
+     * the form-data header — bypass-proof regardless of post-construction
+     * mutation. Mirrors the filename guard in the body builders.
+     */
+    private function assertContentTypeHeaderSafe(?string $contentType): void
+    {
+        if ($contentType !== null && \preg_match('/[\r\n\x00]/', $contentType) === 1) {
+            throw new GislConfigError(
+                'contentType contains illegal characters for a multipart Content-Type '
+                . 'header (no CR, LF, or NUL allowed): ' . \var_export($contentType, true),
+            );
+        }
+    }
+
     private function buildSingleShotMultipartBody(
         string $boundary,
         string $filePath,
         string $fileName,
+        ?string $contentType = null,
     ): \Psr\Http\Message\StreamInterface {
         // RFC 7578 §4.2 requires Content-Disposition `filename` values to be
         // quoted-string per RFC 2616. A filename containing `"`, CR, or LF
@@ -3008,6 +3031,7 @@ class GislClient
                 . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
             );
         }
+        $this->assertContentTypeHeaderSafe($contentType);
 
         $contents = \file_get_contents($filePath);
         if ($contents === false) {
@@ -3019,7 +3043,7 @@ class GislClient
         $crlf = "\r\n";
         $body = "--{$boundary}{$crlf}"
             . "Content-Disposition: form-data; name=\"file\"; filename=\"{$fileName}\"{$crlf}"
-            . "Content-Type: application/octet-stream{$crlf}"
+            . "Content-Type: " . ($contentType ?? 'application/octet-stream') . $crlf
             . $crlf
             . $contents . $crlf
             . "--{$boundary}--{$crlf}";
@@ -3046,6 +3070,7 @@ class GislClient
         int $firstChunkSize,
         int $totalSize,
         ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
+        ?string $contentType = null,
     ): \Psr\Http\Message\StreamInterface {
         if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
             throw new GislConfigError(
@@ -3053,13 +3078,14 @@ class GislClient
                 . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
             );
         }
+        $this->assertContentTypeHeaderSafe($contentType);
 
         $firstChunkBytes = $this->readChunk($filePath, 0, $firstChunkSize);
 
         $crlf = "\r\n";
         $body = "--{$boundary}{$crlf}"
             . "Content-Disposition: form-data; name=\"file\"; filename=\"{$fileName}\"{$crlf}"
-            . "Content-Type: application/octet-stream{$crlf}"
+            . "Content-Type: " . ($contentType ?? 'application/octet-stream') . $crlf
             . $crlf
             . $firstChunkBytes . $crlf
             . "--{$boundary}{$crlf}"
