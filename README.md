@@ -12,7 +12,7 @@ The SDK code-targets PSR-18 / PSR-17 and resolves a concrete HTTP client at runt
 composer require giveitsmaller/sdk guzzlehttp/guzzle http-interop/http-factory-guzzle
 ```
 
-> **Known transitive dep:** the `giveitsmaller/contracts` package this SDK depends on currently hard-requires `guzzlehttp/guzzle` ^7.3 in its own `composer.json`. That means even if you only want Symfony HttpClient, Composer still installs Guzzle through contracts. The SDK's *own* runtime code never imports Guzzle (only PSR-18 interfaces) — but the transitive footprint is real until the contracts generator template is fixed. Tracked: [7X0t2Cjr](https://trello.com/c/7X0t2Cjr).
+> **Bring your own PSR-18 client:** the `giveitsmaller/contracts` package this SDK depends on no longer hard-requires the Guzzle **HTTP client** (`guzzlehttp/guzzle`) — it now lives in `contracts`' `require-dev`, so it is not dragged into your production install. You can bring any PSR-18 implementation (e.g. Symfony HttpClient) without Composer pulling the Guzzle client through contracts. (`contracts` still requires the lightweight `guzzlehttp/psr7` PSR-7 message library, which its generated serialization code uses directly — that is a PSR-7 implementation, not an HTTP client, so it does not constrain your choice of PSR-18 transport.) The SDK's *own* runtime code imports only PSR-18 interfaces.
 
 ## Quickstart
 
