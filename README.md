@@ -81,6 +81,14 @@ $client->retryOperation($operationId);
 $metadata = $client->getMetadata($upload->getFileId());
 ```
 
+> **Reusing an upload id across clients?** An upload created by an authenticated
+> caller is owned by that caller. If you persist a `fileId` and later reference
+> it (via `FileInput::uploadId($id)`) from a client configured with a *different*
+> api key/session, workflow-create returns `404 upload_not_found` — the server
+> enforces ownership. Reference an upload id only under the same auth that
+> created it; the upload-then-create flow above is consistent by construction.
+> Anonymous-intake uploads are unaffected.
+
 ## Streaming workflow events
 
 `streamEvents($workflowId)` opens an SSE stream against `/api/workflows/{id}/events` and yields one `GislSseEvent` per parsed frame. The generator holds the connection open until the server closes the stream OR the caller `break`s out of the foreach.

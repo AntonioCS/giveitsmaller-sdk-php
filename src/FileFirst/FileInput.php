@@ -56,6 +56,19 @@ final class FileInput
         return new self(self::KIND_RESOURCE, resource: $resource);
     }
 
+    /**
+     * Reference an already-uploaded file by its upload id, instead of
+     * re-uploading bytes.
+     *
+     * Auth-ownership: an upload created by an *authenticated* caller is owned
+     * by that caller. If you reuse the id from a client configured with a
+     * DIFFERENT auth context (a different api key / session), workflow-create
+     * returns `404 upload_not_found` — the server enforces ownership (api
+     * PqpD9ySv). Reference an upload id only under the SAME auth that created
+     * it. The normal upload-then-create-in-one-client flow is consistent by
+     * construction (the same Authorization rides every request). Ownerless
+     * (anonymous-intake) uploads are unaffected.
+     */
     public static function uploadId(string $fileId): self
     {
         return new self(self::KIND_UPLOAD_ID, fileId: $fileId);

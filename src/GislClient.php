@@ -2289,6 +2289,12 @@ class GislClient
      * {@see GislFeatureNotAvailableError} (422) until the external-import
      * infrastructure ships.
      *
+     * Auth-ownership: the import id this returns is owned by the
+     * authenticated caller that created it. Referencing it from a client
+     * with a different auth context 404s `upload_not_found` at
+     * workflow-create — same ownership rule as {@see FileInput::uploadId()}
+     * (api PqpD9ySv).
+     *
      * Mirrors `packages/typescript/src/client.ts::createExternalImport`.
      */
     public function createExternalImport(
