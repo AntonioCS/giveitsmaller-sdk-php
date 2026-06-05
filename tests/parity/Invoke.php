@@ -717,11 +717,12 @@ final class Invoke
                 /** @var array<string, mixed> $first */
                 $awData = ['file_id' => $first['fileId'] ?? null];
                 // Only include method_hint when the fixture explicitly sets
-                // it — the model's constructor defaults `methodHint` to
-                // `'auto'` via setIfExists, so passing `null` would force
-                // an unwanted wire emit. Mirrors the TS reference where the
-                // typed argument leaves `methodHint` undefined when the
-                // caller omits it.
+                // it. Post-`09eNib6R` Issue 3 the generated
+                // `AudioWatermarkDecodeRequest` constructor defaults
+                // `method_hint` to `null` (was `'auto'`), so an omitted hint is
+                // simply dropped from the wire body — no forced default emit.
+                // Mirrors the TS reference where the typed argument leaves
+                // `methodHint` undefined when the caller omits it.
                 if (\array_key_exists('methodHint', $first)) {
                     $awData['method_hint'] = $first['methodHint'];
                 }

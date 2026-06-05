@@ -2944,24 +2944,6 @@ class GislClient
      */
     private function tryDeserialize(string $modelClass, array $data): ?object
     {
-        // The generated typed-error DTOs (`BalanceExhaustedResponse`, etc.)
-        // emit `getSuccessAllowableValues() === ['false']` — the openapi-
-        // generator's representation of the contract's `const: false` literal
-        // is a string-enum, NOT a bool. Real server envelopes carry the bool
-        // `success: false`; ObjectSerializer::deserialize coerces it to PHP
-        // bool, then the setter rejects it via `in_array(false, ['false'], true) === false`
-        // and throws `InvalidArgumentException`. That bubbles up here and
-        // causes EVERY typed-error branch to silently fall through to base
-        // `GislApiError` — defeating the entire purpose of typed dispatch.
-        //
-        // Strip `success` before deserializing. The field is only a contract
-        // marker; nothing downstream reads it from the typed DTO. Tracked as
-        // contracts-generator card `09eNib6R` (string-enum should be a bool
-        // literal const). Removal-trigger test in
-        // `tests/Unit/GislClientTypedErrorsTest.php::testTypedDtoStillRejectsBoolSuccessWithoutWorkaround`
-        // — when that test flips, this `unset` line can be removed.
-        unset($data['success']);
-
         try {
             /** @var T $instance */
             $instance = ObjectSerializer::deserialize($data, $modelClass, []);

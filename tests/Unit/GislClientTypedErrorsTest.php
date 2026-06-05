@@ -17,6 +17,8 @@ use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelope;
 use Gisl\Generated\OpenApi\Model\ValidationErrorEnvelopeDetailsInner;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowStatusSuccessEnvelope;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
 use Gisl\Sdk\Errors\GislAuthRejectionError;
@@ -131,21 +133,20 @@ final class GislClientTypedErrorsTest extends TestCase
     // ---------------------------------------------------------------------
     // Wire-shape note:
     //
-    // Real server envelopes carry `success: false` (bool). The generated
-    // typed-error DTOs (`BalanceExhaustedResponse`, `AuthErrorResponse`, …)
-    // emit `getSuccessAllowableValues() === ['false']` (the openapi-generator
-    // representation of `const: false` — string-enum, not bool). Without
-    // intervention, `ObjectSerializer::deserialize` would coerce the wire
-    // bool to PHP `bool`, then reject it via the strict enum check, and the
-    // entire typed-dispatch tree would silently fall through to base
-    // `GislApiError` against real production envelopes.
+    // Real server envelopes carry `success: false` (bool). Before the
+    // `09eNib6R` Issue 1 fix the generated typed-error DTOs
+    // (`BalanceExhaustedResponse`, `AuthErrorResponse`, …) emitted
+    // `getSuccessAllowableValues() === ['false']` (the openapi-generator
+    // representation of `const: false` — string-enum, not bool), so
+    // `ObjectSerializer::deserialize` coerced the wire bool to PHP `bool`,
+    // then rejected it via the strict enum check, dropping every typed-error
+    // branch to base `GislApiError`.
     //
-    // `GislClient::tryDeserialize` strips `success` from the array before
-    // deserializing to defuse this. Tests below carry `success: false` —
-    // proving the fix works against realistic wire shapes.
-    //
-    // Tracked as a follow-up contracts-generator ticket (the generator
-    // template should emit a bool literal const, not a string-enum).
+    // The PHP generator-compat patcher now strips that string-enum machinery,
+    // so `success` is a plain bool and the envelopes below hydrate natively —
+    // no in-SDK `unset($data['success'])` shim. Tests below carry
+    // `success: false` to prove typed dispatch works against realistic wire
+    // shapes.
     // ---------------------------------------------------------------------
 
     // ---------------------------------------------------------------------
@@ -1165,23 +1166,18 @@ final class GislClientTypedErrorsTest extends TestCase
     }
 
     /**
-     * Removal-trigger pin for the `unset($data['success'])` workaround in
-     * `GislClient::tryDeserialize` (linked to contracts-generator card
-     * `09eNib6R`).
+     * Positive guard for the `09eNib6R` Issue 1 fix. The generated typed-error
+     * DTOs now carry a plain bool `success` (the string-enum const, the
+     * `getSuccessAllowableValues()` machinery and the `setSuccess()`
+     * allowable-values throw were stripped by the PHP generator-compat
+     * patcher). `ObjectSerializer::deserialize` on an envelope carrying the
+     * realistic wire shape `success: false` (bool) must now hydrate the DTO
+     * natively WITHOUT throwing — no `unset($data['success'])` shim required.
      *
-     * The generated typed-error DTOs currently emit
-     * `getSuccessAllowableValues() === ['false']` (string-enum) instead of a
-     * bool literal. `ObjectSerializer::deserialize` on an envelope carrying
-     * `success: false` (the realistic wire shape) throws
-     * `\InvalidArgumentException` because `in_array(false, ['false'], true)`
-     * is false.
-     *
-     * When the contracts-generator fix lands and this test starts FAILING
-     * (because deserialize stops throwing), the `unset($data['success'])`
-     * line in `GislClient::tryDeserialize` is no longer needed and should be
-     * removed in the same change. The test failure is the forcing function.
+     * Replaces the old `testTypedDtoStillRejectsBoolSuccessWithoutWorkaround`
+     * pin, which asserted the now-fixed broken throw.
      */
-    public function testTypedDtoStillRejectsBoolSuccessWithoutWorkaround(): void
+    public function testTypedDtoHydratesBoolSuccessWithoutWorkaround(): void
     {
         $envelope = [
             'success' => false,
@@ -1192,16 +1188,97 @@ final class GislClientTypedErrorsTest extends TestCase
             'links' => ['top_up_url' => 'https://example.com/billing/top-up'],
         ];
 
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessageMatches('/success/i');
-
-        // Direct deserialize, bypassing GislClient::tryDeserialize. Pins the
-        // generator-side bug; once the bug is fixed this throw goes away and
-        // the test must be updated alongside removing the unset workaround.
-        \Gisl\Generated\OpenApi\ObjectSerializer::deserialize(
+        // Direct deserialize, bypassing GislClient::tryDeserialize. With the
+        // Issue 1 fix in place the bool `success` hydrates natively.
+        $typed = \Gisl\Generated\OpenApi\ObjectSerializer::deserialize(
             $envelope,
             BalanceExhaustedResponse::class,
             [],
         );
+
+        self::assertInstanceOf(BalanceExhaustedResponse::class, $typed);
+        self::assertFalse($typed->getSuccess());
+        self::assertSame('add_credits', $typed->getRequiredAction());
+        // The DTO validates cleanly — the success branch no longer rejects bool.
+        self::assertSame([], $typed->listInvalidProperties());
+        self::assertTrue($typed->valid());
+    }
+
+    /**
+     * `09eNib6R` Issue 1 — `success: true` variant. The patcher reconciled
+     * 22 `SUCCESS_TRUE='true'` DTOs the same way it did the `success: false`
+     * ones; the false guard above only exercises one literal. Pin that a
+     * `{"success": true, "data": {...}}` success envelope hydrates natively:
+     * bool `getSuccess() === true`, clean validation, no string-enum throw.
+     */
+    public function testSuccessEnvelopeHydratesBoolTrueWithoutWorkaround(): void
+    {
+        $envelope = [
+            'success' => true,
+            'data' => [
+                'workflow_id' => self::HARNESS_WORKFLOW_ID,
+                'status' => 'completed',
+                'created_at' => '2026-04-20T12:34:56Z',
+                'updated_at' => '2026-04-20T12:35:10Z',
+                'jobs' => [],
+            ],
+        ];
+
+        $typed = \Gisl\Generated\OpenApi\ObjectSerializer::deserialize(
+            $envelope,
+            WorkflowStatusSuccessEnvelope::class,
+            [],
+        );
+
+        self::assertInstanceOf(WorkflowStatusSuccessEnvelope::class, $typed);
+        self::assertTrue($typed->getSuccess());
+        // The success branch no longer rejects bool true.
+        self::assertSame([], $typed->listInvalidProperties());
+        self::assertTrue($typed->valid());
+        // Nested data still hydrates as its typed model.
+        self::assertInstanceOf(WorkflowStatusResponse::class, $typed->getData());
+    }
+
+    /**
+     * End-to-end positive guard for the `09eNib6R` Issue 1 fix on the
+     * GislClient error path. A `{"success": false, ...}` 402 balance envelope
+     * must reach the TYPED dispatch branch (`GislBalanceExhaustedError` with a
+     * hydrated `BalanceExhaustedResponse` payload), NOT fall through to base
+     * `GislApiError`. Before the fix the string-enum `success` const made
+     * `ObjectSerializer::deserialize` throw, so `tryDeserialize` returned null
+     * and every typed branch collapsed to the base error.
+     */
+    public function testSuccessFalseEnvelopeReachesTypedBranchNotBaseFallThrough(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(402, [
+                'success' => false,
+                'error' => 'balance_exhausted',
+                'message' => 'You have run out of credits.',
+                'error_type' => 'balance_exhausted',
+                'required_action' => 'add_credits',
+                'links' => ['top_up_url' => 'https://example.com/billing/top-up'],
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        try {
+            $client->getWorkflowStatus(self::HARNESS_WORKFLOW_ID);
+            self::fail('Expected GislBalanceExhaustedError');
+        } catch (GislBalanceExhaustedError $e) {
+            // The typed branch was reached — a hydrated typed payload proves
+            // deserialize did NOT throw on the bool `success`.
+            self::assertInstanceOf(BalanceExhaustedResponse::class, $e->typedPayload);
+            self::assertFalse($e->typedPayload->getSuccess());
+            self::assertSame('add_credits', $e->typedPayload->getRequiredAction());
+        } catch (GislApiError $e) {
+            self::fail(
+                'success:false envelope fell through to base GislApiError ('
+                . $e::class . ') instead of the typed branch — the Issue 1 '
+                . 'generator-compat fix regressed.',
+            );
+        }
     }
 }

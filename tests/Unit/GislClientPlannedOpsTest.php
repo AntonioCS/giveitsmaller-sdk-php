@@ -167,6 +167,46 @@ final class GislClientPlannedOpsTest extends TestCase
         self::assertArrayNotHasKey('methodHint', $decoded);
     }
 
+    /**
+     * `09eNib6R` Issue 3: the generated `AudioWatermarkDecodeRequest` ctor now
+     * defaults `method_hint` to `null` (was `'auto'`), so an omitted
+     * `method_hint` is dropped from the serialized wire body — matching the TS
+     * reference, which leaves the field `undefined` and `JSON.stringify` drops
+     * the key. Before the fix the body always carried `method_hint: "auto"`.
+     */
+    public function testDecodeAudioWatermarkOmitsMethodHintWhenNotProvided(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'decoded' => true,
+                    'payload_hex' => 'deadbeef',
+                ],
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+
+        // method_hint deliberately omitted.
+        $payload = new AudioWatermarkDecodeRequest([
+            'file_id' => '01936fb2-0000-7000-8000-000000000002',
+        ]);
+        $result = $client->decodeAudioWatermark($payload);
+
+        self::assertInstanceOf(AudioWatermarkDecodeResponse::class, $result);
+
+        self::assertCount(1, $captured);
+        $body = (string) $captured[0]->getBody();
+        $decoded = \json_decode($body, true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('01936fb2-0000-7000-8000-000000000002', $decoded['file_id'] ?? null);
+        // The crux: no spurious default on the wire.
+        self::assertArrayNotHasKey('method_hint', $decoded);
+        self::assertArrayNotHasKey('methodHint', $decoded);
+    }
+
     public function testCreateExternalImportPath(): void
     {
         $captured = [];

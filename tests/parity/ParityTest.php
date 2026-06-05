@@ -60,34 +60,23 @@ final class ParityTest extends TestCase
             'PHP SDK hardcodes Content-Type=application/octet-stream on the multipart file part; '
             . 'TS forwards Blob.type. Real divergence — file follow-up card to forward caller type.',
 
-        // Generated `MultipartInitiateResponse::setRecommendedChunkSize`
-        // rejects values below the 16 MiB minimum (raised 5 MiB -> 16 MiB by
-        // CON-1 / contracts z4GDTUMx, ADR-0011). The fixtures pin small chunk
-        // sizes (~2 MB) so the binary payload stays compact — a sub-contract
-        // value BOTH SDKs reject (the TS runner now enforces the same
-        // contract-range guard and skips the same 3 fixtures).
-        // See packages/php/tests/parity/KNOWN_DIVERGENCES.md (Trello 09eNib6R).
+        // BOTH SDKs enforce the contract chunk-range floor (16 MiB /
+        // 16777216 bytes — raised 5 MiB -> 16 MiB by CON-1 / contracts
+        // z4GDTUMx, ADR-0011). These fixtures pin a ~2 MB recommended_chunk_size
+        // to keep the binary payload compact, below that floor, so BOTH SDKs
+        // reject it: PHP via the generated `MultipartInitiateResponse`
+        // hydrate-time validator, TS via the same contract chunk-range guard
+        // (`packages/typescript/src/client.ts:~1097`). This is a deliberate
+        // shared divergence on an out-of-contract fixture, NOT a generator bug.
+        // See packages/php/tests/parity/KNOWN_DIVERGENCES.md.
         'upload_multipart' =>
-            'Generated MultipartInitiateResponse setter rejects recommendedChunkSize<16MiB '
-            . '(CON-1/ADR-0011 raised the floor 5MiB->16MiB); '
-            . 'fixture pins 2MB to keep payload compact. TS does not validate. '
-            . 'Follow-up: relax/remove generator-level wire-response constraints.',
+            'Both SDKs enforce the contract chunk-range floor (16 MiB / 16777216); '
+            . 'the fixture pins ~2 MB recommendedChunkSize to keep the payload compact, '
+            . 'so both reject it. Deliberate shared divergence, not a generator bug.',
         'upload_metadata_hint' =>
-            'Same recommendedChunkSize<16MiB validation as upload_multipart.',
+            'Same sub-floor recommendedChunkSize as upload_multipart; both SDKs reject the ~2 MB value.',
         'upload_boundary_multipart' =>
-            'Same recommendedChunkSize<16MiB validation as upload_multipart.',
-
-        // `AudioWatermarkDecodeRequest::__construct` defaults `method_hint`
-        // to `'auto'` via setIfExists when the caller omits it, so the wire
-        // body always carries `method_hint`. TS leaves the field undefined
-        // and json-stringify drops it. Real divergence visible only on the
-        // omit-methodHint fixtures (the happy path passes both).
-        'error_403_audio_watermark_decode_tier' =>
-            'PHP `AudioWatermarkDecodeRequest` defaults method_hint=auto when omitted; '
-            . 'TS leaves it undefined and JSON drops the key. Follow-up: drop the default '
-            . 'in the generated PHP model OR strip null/default fields in the SDK before send.',
-        'error_422_audio_watermark_decode_planned' =>
-            'Same method_hint default as error_403_audio_watermark_decode_tier.',
+            'Same sub-floor recommendedChunkSize as upload_multipart; both SDKs reject the ~2 MB value.',
     ];
 
     #[DataProvider('fixtureProvider')]
