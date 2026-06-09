@@ -81,18 +81,22 @@ final class Recipe
 
     /**
      * Generate a preview. Width and/or height in pixels; an omitted dimension
-     * is dropped from the wire options (not sent as null).
+     * is dropped from the wire options (not sent as null). Takes an options
+     * shape to mirror the TS `thumbnail({ width?, height? })` and the
+     * operation-first `GislErgonomicClient::thumbnail($input, $options)`.
+     *
+     * @param array{width?: int, height?: int} $options
      */
-    public function thumbnail(?int $width = null, ?int $height = null): self
+    public function thumbnail(array $options = []): self
     {
-        $options = [];
-        if ($width !== null) {
-            $options['width'] = $width;
+        $wire = [];
+        if (isset($options['width'])) {
+            $wire['width'] = $options['width'];
         }
-        if ($height !== null) {
-            $options['height'] = $height;
+        if (isset($options['height'])) {
+            $wire['height'] = $options['height'];
         }
-        return $this->withStep(new RecipeStep('thumbnail', $options));
+        return $this->withStep(new RecipeStep('thumbnail', $wire));
     }
 
     /**

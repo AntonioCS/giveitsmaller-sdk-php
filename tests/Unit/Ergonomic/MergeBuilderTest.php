@@ -15,6 +15,9 @@ use Gisl\Sdk\Ergonomic\Result;
 use Gisl\Sdk\Ergonomic\RunOptions;
 use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislPerInputOptionsNotSupportedError;
+use Gisl\Sdk\Errors\GislUndeclaredAssetError;
+use Gisl\Sdk\Errors\GislUnusedAssetError;
 use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\GislErgonomicClient;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -26,6 +29,9 @@ use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 
 #[CoversClass(MergeBuilder::class)]
+#[CoversClass(GislUndeclaredAssetError::class)]
+#[CoversClass(GislUnusedAssetError::class)]
+#[CoversClass(GislPerInputOptionsNotSupportedError::class)]
 final class MergeBuilderTest extends TestCase
 {
     public function test_submit_uploads_each_unique_asset_once_then_creates_workflow(): void
@@ -212,12 +218,28 @@ final class MergeBuilderTest extends TestCase
         $captured = [];
         $client = self::makeClient(self::stubClient([], $captured));
 
-        $this->expectException(GislConfigError::class);
-        $this->expectExceptionMessageMatches('/not declared/');
+        $thrown = null;
+        try {
+            $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'video'))
+                ->sequence([Merge::asset($pathA), Merge::asset($pathC)])
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } catch (GislUndeclaredAssetError $e) {
+            $thrown = $e;
+        }
 
-        $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'video'))
-            ->sequence([Merge::asset($pathA), Merge::asset($pathC)])
-            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        // Tighten from the base GislConfigError to the SPECIFIC subclass — it
+        // still satisfies `instanceof GislConfigError` for catch-all callers.
+        $this->assertInstanceOf(GislUndeclaredAssetError::class, $thrown);
+        $this->assertInstanceOf(GislConfigError::class, $thrown);
+        $this->assertMatchesRegularExpression(
+            "/Sequence references asset '.+' but it wasn't declared/",
+            $thrown->getMessage(),
+        );
+        // Identities are namespaced (`path:<path>`); the undeclared reference is
+        // $pathC and the declared set is {$pathA, $pathB}.
+        $this->assertSame("path:{$pathC}", $thrown->assetId);
+        $this->assertSame(["path:{$pathA}", "path:{$pathB}"], $thrown->declaredAssets);
+        $this->assertSame([], $captured, 'undeclared-ref check fires before any upload');
     }
 
     public function test_unused_declared_asset_raises_config_error(): void
@@ -229,13 +251,25 @@ final class MergeBuilderTest extends TestCase
         $captured = [];
         $client = self::makeClient(self::stubClient([], $captured));
 
-        $this->expectException(GislConfigError::class);
-        $this->expectExceptionMessageMatches('/never referenced in sequence/');
+        $thrown = null;
+        try {
+            $client->merge([$pathA, $pathB, $pathC], new MergeOptions(mediaKind: 'video'))
+                // Sequence omits $pathC — caught by unused-asset check.
+                ->sequence([Merge::asset($pathA), Merge::asset($pathB)])
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } catch (GislUnusedAssetError $e) {
+            $thrown = $e;
+        }
 
-        $client->merge([$pathA, $pathB, $pathC], new MergeOptions(mediaKind: 'video'))
-            // Sequence omits $pathC — caught by unused-asset check.
-            ->sequence([Merge::asset($pathA), Merge::asset($pathB)])
-            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        $this->assertInstanceOf(GislUnusedAssetError::class, $thrown);
+        $this->assertInstanceOf(GislConfigError::class, $thrown);
+        $this->assertMatchesRegularExpression(
+            '/were declared in merge\(\.\.\.\) but never sequenced/',
+            $thrown->getMessage(),
+        );
+        // Only $pathC was declared-but-unsequenced.
+        $this->assertSame(["path:{$pathC}"], $thrown->unusedAssets);
+        $this->assertSame([], $captured, 'unused-asset check fires before any upload');
     }
 
     public function test_allow_unused_assets_bypasses_unused_check_and_skips_upload(): void
@@ -271,15 +305,26 @@ final class MergeBuilderTest extends TestCase
         $captured = [];
         $client = self::makeClient(self::stubClient([], $captured));
 
-        $this->expectException(GislConfigError::class);
-        $this->expectExceptionMessageMatches('/image merges do not support per-input/');
+        $thrown = null;
+        try {
+            $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'image'))
+                ->sequence([
+                    Merge::asset($pathA),
+                    Merge::clip($pathB, new ClipOptions(transition: 'fade')),
+                ])
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } catch (GislPerInputOptionsNotSupportedError $e) {
+            $thrown = $e;
+        }
 
-        $client->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'image'))
-            ->sequence([
-                Merge::asset($pathA),
-                Merge::clip($pathB, new ClipOptions(transition: 'fade')),
-            ])
-            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        $this->assertInstanceOf(GislPerInputOptionsNotSupportedError::class, $thrown);
+        $this->assertInstanceOf(GislConfigError::class, $thrown);
+        $this->assertMatchesRegularExpression(
+            '/image merge has no per-input options today/',
+            $thrown->getMessage(),
+        );
+        $this->assertSame('image', $thrown->mediaKind);
+        $this->assertSame([], $captured, 'per-input rejection fires before any upload');
     }
 
     public function test_video_merge_drops_merge_level_gap_duration(): void
@@ -681,16 +726,23 @@ final class MergeBuilderTest extends TestCase
         $captured = [];
         $client = self::makeClient(self::stubClient([], $captured));
 
-        $this->expectException(GislConfigError::class);
-        $this->expectExceptionMessageMatches('/image merges do not support per-input/');
+        $thrown = null;
+        try {
+            // No explicit mediaKind — relies on extension sniffing.
+            $client->merge([$imageA, $imageB])
+                ->sequence([
+                    Merge::asset($imageA),
+                    Merge::clip($imageB, new ClipOptions(transition: 'fade')),
+                ])
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } catch (GislPerInputOptionsNotSupportedError $e) {
+            $thrown = $e;
+        }
 
-        // No explicit mediaKind — relies on extension sniffing.
-        $client->merge([$imageA, $imageB])
-            ->sequence([
-                Merge::asset($imageA),
-                Merge::clip($imageB, new ClipOptions(transition: 'fade')),
-            ])
-            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        $this->assertInstanceOf(GislPerInputOptionsNotSupportedError::class, $thrown);
+        $this->assertInstanceOf(GislConfigError::class, $thrown);
+        $this->assertSame('image', $thrown->mediaKind);
+        $this->assertSame([], $captured, 'inferred-image per-input rejection fires before any upload');
     }
 
     public function test_media_kind_inference_from_first_asset_extension(): void
@@ -777,6 +829,54 @@ final class MergeBuilderTest extends TestCase
         $this->assertStringContainsString($workflowId, (string) $captured[3]->getUri());
         $this->assertStringContainsString('/downloads', (string) $captured[4]->getUri());
         $this->assertStringContainsString($workflowId, (string) $captured[4]->getUri());
+    }
+
+    // -----------------------------------------------------------------
+    // New typed merge-error classes — direct instantiation
+    // (mirrors the field+message coverage of the TS error classes in
+    //  packages/typescript/src/errors.ts).
+    // -----------------------------------------------------------------
+
+    public function test_undeclared_asset_error_carries_message_and_props(): void
+    {
+        $error = new GislUndeclaredAssetError('path:c.mp4', ['path:a.mp4', 'path:b.mp4']);
+
+        $this->assertInstanceOf(GislConfigError::class, $error);
+        $this->assertSame('path:c.mp4', $error->assetId);
+        $this->assertSame(['path:a.mp4', 'path:b.mp4'], $error->declaredAssets);
+        $this->assertSame(
+            "Sequence references asset 'path:c.mp4' but it wasn't declared in merge(...). "
+            . 'Declared assets: [path:a.mp4, path:b.mp4]. '
+            . 'Either pass it to merge(...) before sequencing, or remove the reference.',
+            $error->getMessage(),
+        );
+    }
+
+    public function test_unused_asset_error_carries_message_and_props(): void
+    {
+        $error = new GislUnusedAssetError(['path:c.mp4', 'path:d.mp4']);
+
+        $this->assertInstanceOf(GislConfigError::class, $error);
+        $this->assertSame(['path:c.mp4', 'path:d.mp4'], $error->unusedAssets);
+        $this->assertSame(
+            'Assets [path:c.mp4, path:d.mp4] were declared in merge(...) but never sequenced. '
+            . 'Reference them in .sequence(...), remove them from the declaration, '
+            . 'or pass {allowUnusedAssets: true} to opt out of this check.',
+            $error->getMessage(),
+        );
+    }
+
+    public function test_per_input_options_not_supported_error_carries_message_and_props(): void
+    {
+        $error = new GislPerInputOptionsNotSupportedError('image');
+
+        $this->assertInstanceOf(GislConfigError::class, $error);
+        $this->assertSame('image', $error->mediaKind);
+        $this->assertSame(
+            "image merge has no per-input options today; set 'transition' at the "
+            . '.merge(...) level instead — it applies to every join.',
+            $error->getMessage(),
+        );
     }
 
     // -----------------------------------------------------------------

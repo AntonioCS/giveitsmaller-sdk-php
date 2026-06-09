@@ -463,6 +463,27 @@ final class Invoke
     }
 
     /**
+     * Project a parity thumbnail op-spec into the new options-array shape
+     * (`thumbnail(array{width?: int, height?: int})`). An omitted dimension is
+     * left out of the array entirely so the lowered wire payload stays
+     * byte-identical to the prior positional `?int` call.
+     *
+     * @param array<string, mixed> $op
+     * @return array{width?: int, height?: int}
+     */
+    private static function thumbnailOptions(array $op): array
+    {
+        $options = [];
+        if (isset($op['width'])) {
+            $options['width'] = (int) $op['width'];
+        }
+        if (isset($op['height'])) {
+            $options['height'] = (int) $op['height'];
+        }
+        return $options;
+    }
+
+    /**
      * @param array<string, mixed> $op
      */
     private static function applyFilesOp(FilesRecipe $recipe, array $op): FilesRecipe
@@ -472,10 +493,7 @@ final class Invoke
                 isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
             ),
             'convert' => $recipe->convert((string) $op['format']),
-            'thumbnail' => $recipe->thumbnail(
-                isset($op['width']) ? (int) $op['width'] : null,
-                isset($op['height']) ? (int) $op['height'] : null,
-            ),
+            'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
             'text_watermark' => $recipe->textWatermark((string) $op['text']),
             default => throw new \RuntimeException("Unknown files op '" . \var_export($op['op'] ?? null, true) . "'"),
         };
@@ -491,10 +509,7 @@ final class Invoke
                 isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
             ),
             'convert' => $recipe->convert((string) $op['format']),
-            'thumbnail' => $recipe->thumbnail(
-                isset($op['width']) ? (int) $op['width'] : null,
-                isset($op['height']) ? (int) $op['height'] : null,
-            ),
+            'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
             'text_watermark' => $recipe->textWatermark((string) $op['text']),
             default => throw new \RuntimeException("Unknown lowering op '" . \var_export($op['op'] ?? null, true) . "'"),
         };

@@ -92,7 +92,7 @@ final class RecipeTest extends TestCase
     {
         $base = $this->recipe('clip.mov');
         $branchA = $base->convert('mp4')->compress(OptimizeFor::Size);
-        $branchB = $base->thumbnail(width: 320);
+        $branchB = $base->thumbnail(['width' => 320]);
 
         self::assertSame(0, $base->stepCount());
         self::assertSame(2, $branchA->stepCount());
@@ -164,14 +164,14 @@ final class RecipeTest extends TestCase
     #[Test]
     public function thumbnail_carries_both_dimensions(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(width: 320, height: 240));
+        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(['width' => 320, 'height' => 240]));
         self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 320, 'height' => 240]]], $ops);
     }
 
     #[Test]
     public function thumbnail_omits_an_unset_dimension(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(width: 320));
+        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(['width' => 320]));
         self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 320]]], $ops);
         self::assertArrayNotHasKey('height', $ops[0]['options'], 'an omitted dimension is not sent as null');
     }
@@ -179,7 +179,7 @@ final class RecipeTest extends TestCase
     #[Test]
     public function thumbnail_carries_height_only(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(height: 240));
+        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(['height' => 240]));
         self::assertSame([['type' => 'thumbnail', 'options' => ['height' => 240]]], $ops);
         self::assertArrayNotHasKey('width', $ops[0]['options']);
     }
@@ -199,7 +199,7 @@ final class RecipeTest extends TestCase
     #[Test]
     public function a_chain_preserves_operation_order_in_one_job(): void
     {
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4')->thumbnail(width: 100));
+        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4')->thumbnail(['width' => 100]));
         self::assertSame(['convert', 'thumbnail'], array_column($ops, 'type'));
     }
 

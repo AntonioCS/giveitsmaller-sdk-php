@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Ergonomic;
 
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislPerInputOptionsNotSupportedError;
 use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\Errors\GislUndeclaredAssetError;
+use Gisl\Sdk\Errors\GislUnusedAssetError;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
@@ -32,21 +35,25 @@ use Gisl\Sdk\WorkflowCreatePayload;
  *
  * Wire-truth boundaries (lowering.md §sequences, mirrored from TS):
  *  - Image merges: NO `per_input_options` (image-merge clips with any
- *    options raise {@see GislConfigError} at plan time); the merge-level
- *    `transition` applies between every join.
+ *    options raise {@see GislPerInputOptionsNotSupportedError} at plan
+ *    time); the merge-level `transition` applies between every join.
  *  - Audio merges: per-input `transition`/`crossfade_duration`/
  *    `gap_duration`; merge-level may also carry `gap_duration`.
  *  - Video merges: per-input `transition`/`crossfade_duration`;
  *    merge-level DROPS `gap_duration` (TS R2 medium ab2422e56ea0).
  *
- * Local validation runs BEFORE any upload (`planSequence()`). Errors are
- * unified under {@see GislConfigError} — the TS reference splits the same
- * cases across three subclasses (`GislUndeclaredAssetError`,
- * `GislUnusedAssetError`, `GislPerInputOptionsNotSupportedError`). The PHP
- * SDK collapses to one class per the P3 ticket scope ("local validation:
- * undeclared ref → GislConfigError; unused declared asset → GislConfigError
- * unless allowUnusedAssets"); the parity-comparator tolerates the
- * class-name divergence via a documented `KNOWN_DIVERGENCES` note.
+ * Local validation runs BEFORE any upload (`planSequence()`). The three
+ * sequence-level failures each raise a dedicated subclass of
+ * {@see GislConfigError}, mirroring the TS reference one-for-one:
+ *  - undeclared sequence ref → {@see GislUndeclaredAssetError}
+ *    (carries `$assetId` + `$declaredAssets`);
+ *  - declared-but-unsequenced asset → {@see GislUnusedAssetError}
+ *    (carries `$unusedAssets`), unless `allowUnusedAssets` is set;
+ *  - per-input options on an image merge →
+ *    {@see GislPerInputOptionsNotSupportedError} (carries `$mediaKind`).
+ * Catching `GislConfigError` still catches all three. Other plan-time
+ * guards (input bounds, invalid target-size, image output_type) remain
+ * bare {@see GislConfigError}, matching the TS reference.
  *
  * Differences from the TS reference (all PHP-idiomatic):
  *  - No `AbortSignal` — same constraint as {@see OperationBuilder}: only
@@ -189,20 +196,13 @@ final class MergeBuilder
             $assetRef = $isClip ? $entry->asset : $entry;
             $id = self::assetIdentity($assetRef);
             if (!isset($declared[$id])) {
-                throw new GislConfigError(sprintf(
-                    'merge sequence references asset %s which was not declared. Declared: %s',
-                    $id,
-                    implode(', ', array_keys($declared)),
-                ));
+                throw new GislUndeclaredAssetError($id, array_keys($declared));
             }
             $refIds[$id] = true;
             if ($isClip) {
                 $opts = $entry->options;
                 if (!$opts->isEmpty() && $mediaKind === 'image') {
-                    throw new GislConfigError(
-                        'image merges do not support per-input clip options today (transition/crossfadeDuration/gapDuration). '
-                        . 'Use the merge-level transition on MergeOptions for image merges.',
-                    );
+                    throw new GislPerInputOptionsNotSupportedError('image');
                 }
                 $positions[] = new PositionEntry($id, $opts);
             } else {
@@ -214,11 +214,7 @@ final class MergeBuilder
         if ($this->sequenceEntries !== null && $this->opOptions->allowUnusedAssets !== true) {
             $unused = array_values(array_diff(array_keys($declared), array_keys($refIds)));
             if (\count($unused) > 0) {
-                throw new GislConfigError(sprintf(
-                    'merge declared assets that were never referenced in sequence(): %s. '
-                    . 'Either reference them, drop them from merge(), or pass MergeOptions(allowUnusedAssets: true).',
-                    implode(', ', $unused),
-                ));
+                throw new GislUnusedAssetError($unused);
             }
         }
 

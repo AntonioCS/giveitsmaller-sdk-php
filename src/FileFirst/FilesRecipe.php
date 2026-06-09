@@ -76,10 +76,15 @@ final class FilesRecipe
         return $this->withRecipe($this->baseRecipe()->convert($format));
     }
 
-    /** Generate a preview of every input. Omitted dimensions are dropped from the wire options. */
-    public function thumbnail(?int $width = null, ?int $height = null): self
+    /**
+     * Generate a preview of every input. Omitted dimensions are dropped from
+     * the wire options. Options shape mirrors {@see Recipe::thumbnail()}.
+     *
+     * @param array{width?: int, height?: int} $options
+     */
+    public function thumbnail(array $options = []): self
     {
-        return $this->withRecipe($this->baseRecipe()->thumbnail($width, $height));
+        return $this->withRecipe($this->baseRecipe()->thumbnail($options));
     }
 
     /** Apply the same text watermark to every input. */
