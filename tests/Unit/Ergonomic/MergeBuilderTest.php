@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Tests\Unit\Ergonomic;
 
+use Gisl\Sdk\Ergonomic\Artifact;
 use Gisl\Sdk\Ergonomic\ClipOptions;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\Merge;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\PathAsset;
+use Gisl\Sdk\Ergonomic\Result;
+use Gisl\Sdk\Ergonomic\RunOptions;
 use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\GislClientConfig;
@@ -718,6 +721,64 @@ final class MergeBuilderTest extends TestCase
         $this->assertSame(1.5, $opts['gap_duration'], 'audio inference keeps gap_duration on the wire');
     }
 
+    public function test_run_projects_only_merge_job_artifacts_excluding_passthrough_src_jobs(): void
+    {
+        // p0SuJEeK — run() filters getWorkflowDownloads to ONLY the merge
+        // job's output (ref === 'merge'), dropping the passthrough src jobs
+        // whose output is the unchanged upload (plumbing, not a deliverable).
+        // PHP twin of merge.test.ts "drops src_* passthrough download groups".
+        // The PHP filter ships at MergeBuilder.php:136-139 untested; the plain
+        // OperationBuilder::run does NOT filter, so this is MergeBuilder-specific.
+        $pathA = self::writeTempFile('aaaa');
+        $pathB = self::writeTempFile('bbbb');
+
+        $workflowId = '01936fb2-0000-7000-8000-00000000ab01';
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-00000000ab02', 'a.mp4', 'video/mp4', 4),
+            self::uploadResponse('01936fb1-7bb3-7000-8000-00000000ab03', 'b.mp4', 'video/mp4', 4),
+            self::workflowCreatedResponse($workflowId),
+            self::workflowStatusResponse($workflowId, 'completed'),
+            self::workflowDownloadsResponse(),
+        ], $captured);
+
+        $client = self::makeClient($http);
+        // useSSE: false routes awaitTerminal to the single-poll path. The
+        // RunOptions default (useSSE: true) would issue an unstubbed
+        // GET /events SSE request and exhaust the 5-response queue.
+        $result = $client
+            ->merge([$pathA, $pathB], new MergeOptions(mediaKind: 'video'))
+            ->run(new RunOptions(maxWait: '5m', useSSE: false));
+
+        $this->assertInstanceOf(Result::class, $result);
+        $this->assertSame('completed', $result->status);
+
+        // The downloads stub returns THREE groups (src_0, src_1, merge). Only
+        // the merge group survives the filter — deleting it would yield 3.
+        $this->assertCount(1, $result->artifacts, 'src_* passthrough groups are filtered out');
+        $this->assertSame('merge', $result->artifacts[0]->ref);
+        // Pin the surviving artifact's payload (mirrors merge.test.ts:549) — not
+        // just its ref — so a mis-wired projection that kept the wrong group's
+        // url would be caught.
+        $this->assertSame('https://dl.test.example.com/merge.mp4', $result->artifacts[0]->url);
+
+        $refs = array_map(static fn (Artifact $a): string => $a->ref, $result->artifacts);
+        $this->assertNotContains('src_0', $refs);
+        $this->assertNotContains('src_1', $refs);
+
+        // Mirror the TS twin's operation assertion: the passthrough src-job
+        // output must never surface as a deliverable artifact.
+        $operations = array_map(static fn (Artifact $a): string => $a->operation, $result->artifacts);
+        $this->assertNotContains('passthrough', $operations);
+
+        // 5 outbound requests: 2 uploads, create, status poll, downloads.
+        $this->assertCount(5, $captured);
+        $this->assertStringContainsString('/status', (string) $captured[3]->getUri());
+        $this->assertStringContainsString($workflowId, (string) $captured[3]->getUri());
+        $this->assertStringContainsString('/downloads', (string) $captured[4]->getUri());
+        $this->assertStringContainsString($workflowId, (string) $captured[4]->getUri());
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -873,6 +934,64 @@ final class MergeBuilderTest extends TestCase
                 ],
                 'processing_plan' => ['jobs' => []],
                 'warnings' => [],
+            ],
+        ]);
+    }
+
+    private static function workflowStatusResponse(string $workflowId, string $status): ResponseInterface
+    {
+        // `status` deserializes through the WorkflowStatus enum, so it must be
+        // an allowable value; a TERMINAL one ('completed') lets pollToTerminal
+        // return on its first poll. created_at/updated_at/jobs mirror the real
+        // envelope (projectResult reads them null-safely, but keep it honest).
+        return self::jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'workflow_id' => $workflowId,
+                'status' => $status,
+                'created_at' => '2026-05-27T11:00:00Z',
+                'updated_at' => '2026-05-27T11:00:05Z',
+                'jobs' => [],
+            ],
+        ]);
+    }
+
+    /**
+     * Three download groups — two passthrough `src_*` jobs + the `merge` job —
+     * so the merge-ref filter is exercised non-vacuously: without it, all three
+     * would project to artifacts. job_id / operation_id MUST be UUID-v7 hex —
+     * generated-model hydration runs through setters that enforce the pattern.
+     */
+    private static function workflowDownloadsResponse(): ResponseInterface
+    {
+        $file = static fn (string $operation, string $operationId): array => [
+            'operation' => $operation,
+            'operation_id' => $operationId,
+            'filename' => $operation === 'merge' ? 'merged.mp4' : 'src.mp4',
+            'size_bytes' => 2048,
+            'download_url' => 'https://dl.test.example.com/' . $operation . '.mp4',
+        ];
+
+        return self::jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'downloads' => [
+                    [
+                        'ref' => 'src_0',
+                        'job_id' => '01936fb3-0000-7000-8000-0000000000a0',
+                        'files' => [$file('passthrough', '01936fb4-0000-7000-8000-0000000000f0')],
+                    ],
+                    [
+                        'ref' => 'src_1',
+                        'job_id' => '01936fb3-0000-7000-8000-0000000000a1',
+                        'files' => [$file('passthrough', '01936fb4-0000-7000-8000-0000000000f1')],
+                    ],
+                    [
+                        'ref' => 'merge',
+                        'job_id' => '01936fb3-0000-7000-8000-0000000000a2',
+                        'files' => [$file('merge', '01936fb4-0000-7000-8000-0000000000f2')],
+                    ],
+                ],
             ],
         ]);
     }
