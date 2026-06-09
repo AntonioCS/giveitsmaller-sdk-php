@@ -115,7 +115,7 @@ final class Handle
         }
         $downloads = $client->getWorkflowDownloads($this->workflowId);
 
-        return $this->project($finalStatus, $downloads->getDownloads() ?? []);
+        return $this->project($finalStatus, \array_values($downloads->getDownloads() ?? []));
     }
 
     /**
@@ -138,7 +138,7 @@ final class Handle
         }
         $downloads = $client->getWorkflowDownloads($this->workflowId);
 
-        return $this->project($status, $downloads->getDownloads() ?? []);
+        return $this->project($status, \array_values($downloads->getDownloads() ?? []));
     }
 
     /**

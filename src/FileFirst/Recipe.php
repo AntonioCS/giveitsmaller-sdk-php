@@ -224,7 +224,7 @@ final class Recipe
         return RunResult::fromTerminalDownloads(
             workflowId: $workflowId,
             finalStatus: $finalStatus,
-            jobDownloads: $downloads->getDownloads() ?? [],
+            jobDownloads: \array_values($downloads->getDownloads() ?? []),
             key: $this->key,
             downloader: new StreamingDownloader(),
         );

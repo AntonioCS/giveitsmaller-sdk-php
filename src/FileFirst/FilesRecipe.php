@@ -202,7 +202,7 @@ final class FilesRecipe
         return RunResult::fromTerminalMultiJob(
             workflowId: $workflowId,
             finalStatus: $finalStatus,
-            jobDownloads: $downloads->getDownloads() ?? [],
+            jobDownloads: \array_values($downloads->getDownloads() ?? []),
             keyByRef: $keyByRef,
             downloader: new StreamingDownloader(),
         );
@@ -257,7 +257,7 @@ final class FilesRecipe
      * checks are skipped. Pre-validates ALL input kinds before uploading
      * anything so a resource arm anywhere in the list fails fast.
      *
-     * @param (callable(\Gisl\Sdk\Ergonomic\UploadProgressEvent): void)|null $onProgressClosure
+     * @param (\Closure(\Gisl\Sdk\Ergonomic\UploadProgressEvent): void)|null $onProgressClosure
      */
     private function uploadAllAndCreate(
         ?string $webhook,
