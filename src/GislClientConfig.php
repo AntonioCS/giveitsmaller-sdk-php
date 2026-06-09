@@ -54,6 +54,7 @@ final class GislClientConfig
     public readonly int $multipartConcurrency;
     public readonly int $multipartMaxAttempts;
     public readonly int $multipartRetryBaseMs;
+    public readonly ?string $locale;
 
     /**
      * @param array<string, string> $headers Extra headers merged into every
@@ -65,6 +66,18 @@ final class GislClientConfig
      *                                       in `$timeoutMs`. Advisory in
      *                                       this scaffold — see class
      *                                       docblock.
+     * @param string|null $locale            BCP-47 language tag (e.g. `'fr-FR'`)
+     *                                       sent as `Accept-Language` on every
+     *                                       GISL-API request. A dedicated
+     *                                       `locale` wins over any
+     *                                       `Accept-Language` passed via
+     *                                       `$headers` (applied after the
+     *                                       `$headers` loop, so it overwrites
+     *                                       case-insensitively). An empty string
+     *                                       normalises to `null` (treated as
+     *                                       unset, matching the TS falsy guard).
+     *                                       Mirrors
+     *                                       `packages/typescript/src/types.ts:43-54`.
      */
     public function __construct(
         string $baseUrl,
@@ -76,6 +89,7 @@ final class GislClientConfig
         ?int $multipartConcurrency = null,
         ?int $multipartMaxAttempts = null,
         ?int $multipartRetryBaseMs = null,
+        ?string $locale = null,
     ) {
         // Strip a trailing slash so the request loop can concatenate
         // /api/... paths without duplicating separators.
@@ -98,6 +112,11 @@ final class GislClientConfig
         $this->multipartConcurrency = self::sanitiseConcurrency($multipartConcurrency);
         $this->multipartMaxAttempts = self::sanitiseAttempts($multipartMaxAttempts);
         $this->multipartRetryBaseMs = self::sanitiseRetryBaseMs($multipartRetryBaseMs);
+        // Normalise an empty-string locale to null so it reads as "unset" —
+        // matches the TS parity target, where `if (config.locale)` treats `''`
+        // as falsy and never installs an empty Accept-Language
+        // (packages/typescript/src/client.ts:527).
+        $this->locale = ($locale === '') ? null : $locale;
     }
 
     private static function sanitiseThreshold(?int $value): int

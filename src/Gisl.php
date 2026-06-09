@@ -85,6 +85,9 @@ final class Gisl
      * @param PresetDefaults|null           $presetDefaults Client-scope layered compress presets (P6).
      *                                                      When set, `compress()` calls resolve options
      *                                                      through the preset chain before the wire.
+     * @param string|null                   $locale         BCP-47 language tag (e.g. `fr-FR`) sent as
+     *                                                      `Accept-Language` on every request. See
+     *                                                      {@see GislClientConfig::$locale}.
      */
     public static function create(
         ?string $apiKey = null,
@@ -103,6 +106,7 @@ final class Gisl
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
         ?PresetDefaults $presetDefaults = null,
+        ?string $locale = null,
     ): GislErgonomicClient {
         return self::createInternal(
             apiKey: $apiKey,
@@ -122,6 +126,7 @@ final class Gisl
             streamFactory: $streamFactory,
             allowAnonymous: false,
             presetDefaults: $presetDefaults,
+            locale: $locale,
         );
     }
 
@@ -191,6 +196,7 @@ final class Gisl
         ?StreamFactoryInterface $streamFactory,
         bool $allowAnonymous,
         ?PresetDefaults $presetDefaults = null,
+        ?string $locale = null,
     ): GislErgonomicClient {
         $resolvedBaseUrl = Credentials::resolveEndpoint(
             baseUrl: $baseUrl,
@@ -211,6 +217,7 @@ final class Gisl
                 multipartConcurrency: $multipartConcurrency,
                 multipartMaxAttempts: $multipartMaxAttempts,
                 multipartRetryBaseMs: $multipartRetryBaseMs,
+                locale: $locale,
             );
             return new GislErgonomicClient(
                 $config,
@@ -257,6 +264,7 @@ final class Gisl
             multipartConcurrency: $multipartConcurrency,
             multipartMaxAttempts: $multipartMaxAttempts,
             multipartRetryBaseMs: $multipartRetryBaseMs,
+            locale: $locale,
         );
         return new GislErgonomicClient(
             $config,

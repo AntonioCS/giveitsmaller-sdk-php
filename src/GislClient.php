@@ -2292,8 +2292,8 @@ class GislClient
      * Auth-ownership: the import id this returns is owned by the
      * authenticated caller that created it. Referencing it from a client
      * with a different auth context 404s `upload_not_found` at
-     * workflow-create — same ownership rule as {@see FileInput::uploadId()}
-     * (api PqpD9ySv).
+     * workflow-create — same ownership rule as
+     * {@see \Gisl\Sdk\FileFirst\FileInput::uploadId()} (api PqpD9ySv).
      *
      * Mirrors `packages/typescript/src/client.ts::createExternalImport`.
      */
@@ -2355,6 +2355,17 @@ class GislClient
 
         foreach ($extraHeaders as $name => $value) {
             $request = $request->withHeader($name, $value);
+        }
+
+        // A dedicated `locale` unconditionally wins over any Accept-Language
+        // supplied via config headers OR per-call extraHeaders. Applied LAST so
+        // the invariant holds regardless of header source; PSR-7 withHeader
+        // replaces case-insensitively, so a differently-cased accept-language is
+        // also superseded. Mirrors packages/typescript/src/client.ts:523-534,
+        // which strips Accept-Language from the merged header set before setting
+        // locale (same net effect: locale always wins).
+        if ($this->config->locale !== null) {
+            $request = $request->withHeader('Accept-Language', $this->config->locale);
         }
 
         if ($body !== null) {
@@ -2445,6 +2456,22 @@ class GislClient
     }
 
     /**
+     * Lowercased response-header map mirroring TS `headersToRecord`
+     * (packages/typescript/src/client.ts). Keys are lowercased (RFC 9110
+     * case-insensitive); multi-value headers are comma-joined.
+     *
+     * @return array<string, string>
+     */
+    private function responseHeadersToMap(ResponseInterface $response): array
+    {
+        $map = [];
+        foreach ($response->getHeaders() as $name => $values) {
+            $map[\strtolower((string) $name)] = \implode(', ', $values);
+        }
+        return $map;
+    }
+
+    /**
      * Strip the `{ success: bool, data | error, ... }` wire envelope.
      *
      * @return mixed The contents of `data` on success.
@@ -2487,6 +2514,13 @@ class GislClient
             }
             return $decoded['data'];
         }
+
+        // Capture response-header surface for error construction. Mirrors
+        // packages/typescript/src/client.ts:630-633,639-642.
+        $responseHeaders = $this->responseHeadersToMap($response);
+        $contentLanguage = $response->hasHeader('Content-Language')
+            ? $response->getHeaderLine('Content-Language')
+            : null;
 
         // Failure envelope: { success: false, error, details?, message_key?, ... }
         $errorCode = isset($decoded['error']) && \is_string($decoded['error'])
@@ -2536,6 +2570,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2562,6 +2598,8 @@ class GislClient
                     $locale,
                     $messageParams,
                     $typed,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2578,6 +2616,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2597,6 +2637,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2613,6 +2655,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2629,6 +2673,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2645,6 +2691,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2676,6 +2724,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2701,6 +2751,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2722,6 +2774,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2756,6 +2810,8 @@ class GislClient
                     $messageKey,
                     $locale,
                     $messageParams,
+                    $responseHeaders,
+                    $contentLanguage,
                 );
             }
         }
@@ -2775,6 +2831,8 @@ class GislClient
                 $messageKey,
                 $locale,
                 $messageParams,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
 
@@ -2795,6 +2853,8 @@ class GislClient
                 $messageKey,
                 $locale,
                 $messageParams,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
         if ($statusCode === 403 && $errorType === 'MULTIPART_SESSION_OWNERSHIP') {
@@ -2806,6 +2866,8 @@ class GislClient
                 $messageKey,
                 $locale,
                 $messageParams,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
         if ($statusCode === 403 && $errorType === 'MULTIPART_SESSION_AUTH_REQUIRED') {
@@ -2817,6 +2879,8 @@ class GislClient
                 $messageKey,
                 $locale,
                 $messageParams,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
         // 422 `FILE_TOO_LARGE_FOR_MULTIPART` — pre-S3 capacity reject on the
@@ -2834,6 +2898,8 @@ class GislClient
                 $messageKey,
                 $locale,
                 $messageParams,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
 
@@ -2858,6 +2924,8 @@ class GislClient
                 $locale,
                 $messageParams,
                 null,
+                $responseHeaders,
+                $contentLanguage,
             );
         }
 
@@ -2869,6 +2937,8 @@ class GislClient
             $messageKey,
             $locale,
             $messageParams,
+            $responseHeaders,
+            $contentLanguage,
         );
     }
 

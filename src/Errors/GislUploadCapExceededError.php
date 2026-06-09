@@ -43,9 +43,15 @@ final class GislUploadCapExceededError extends GislApiError
     public const KIND_V2_MULTIPART = 'cap_v2_multipart';
 
     /**
-     * @param string $kind One of the KIND_* constants. `absolute_413` always
-     *                      carries a null `$typedPayload` (413 has no
-     *                      structured envelope on the wire).
+     * @param string                $kind             One of the KIND_* constants.
+     *                                                `absolute_413` always carries a null
+     *                                                `$typedPayload` (413 has no structured
+     *                                                envelope on the wire).
+     * @param array<string, string> $responseHeaders  HTTP response headers, keys LOWERCASED.
+     *                                                Multi-value headers comma-joined.
+     *                                                Mirrors {@see GislApiError::$responseHeaders}.
+     * @param string|null           $contentLanguage  `Content-Language` response header.
+     *                                                DISTINCT from `$locale` (I26 body tag).
      */
     public function __construct(
         string $message,
@@ -57,7 +63,9 @@ final class GislUploadCapExceededError extends GislApiError
         ?string $messageKey = null,
         ?string $locale = null,
         ?array $messageParams = null,
+        array $responseHeaders = [],
+        ?string $contentLanguage = null,
     ) {
-        parent::__construct($message, $statusCode, $errorCode, $payload, $messageKey, $locale, $messageParams);
+        parent::__construct($message, $statusCode, $errorCode, $payload, $messageKey, $locale, $messageParams, $responseHeaders, $contentLanguage);
     }
 }

@@ -75,6 +75,34 @@ final class GislTest extends TestCase
         self::assertSame('https://api.giveitsmaller.com', $client->config->baseUrl);
     }
 
+    public function testCreateForwardsLocaleToConfig(): void
+    {
+        $client = Gisl::create(
+            apiKey: 'explicit-key',
+            locale: 'fr-FR',
+            httpClient: $this->stubClient(),
+            requestFactory: $this->factory,
+            streamFactory: $this->factory,
+        );
+
+        // Regression guard: the ergonomic factory must thread `locale` into
+        // GislClientConfig — without it the option is only reachable via the
+        // low-level `new GislClientConfig(...)` constructor (codex 0883a91c).
+        self::assertSame('fr-FR', $client->config->locale);
+    }
+
+    public function testCreateLocaleDefaultsToNull(): void
+    {
+        $client = Gisl::create(
+            apiKey: 'explicit-key',
+            httpClient: $this->stubClient(),
+            requestFactory: $this->factory,
+            streamFactory: $this->factory,
+        );
+
+        self::assertNull($client->config->locale);
+    }
+
     public function testCreateWiresConcurrentUploaderByDefault(): void
     {
         $client = Gisl::create(

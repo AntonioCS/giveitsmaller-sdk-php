@@ -18,23 +18,39 @@ namespace Gisl\Sdk\Errors;
 class GislApiError extends GislError
 {
     /**
-     * @param int                          $statusCode    HTTP status code.
-     * @param string                       $errorCode     Wire-stable machine code from
-     *                                                    `error` field. Never localised.
-     * @param array<string, mixed>         $payload       Full decoded envelope body for
-     *                                                    caller-side narrowing (`details`,
-     *                                                    `message_key`, `locale`,
-     *                                                    `message_params` when present).
-     * @param string|null                  $messageKey    Stable, never-localised i18n key.
-     *                                                    Carried through from the wire
-     *                                                    `message_key` field per I26.
-     * @param string|null                  $locale        Locale tag (e.g. `en-GB`) the
-     *                                                    server resolved for the
-     *                                                    `message` and `message_key`
-     *                                                    on this response.
-     * @param array<string, mixed>|null    $messageParams Substitution params for
-     *                                                    client-side i18n catalog
-     *                                                    rendering of `messageKey`.
+     * @param int                          $statusCode       HTTP status code.
+     * @param string                       $errorCode        Wire-stable machine code from
+     *                                                       `error` field. Never localised.
+     * @param array<string, mixed>         $payload          Full decoded envelope body for
+     *                                                       caller-side narrowing (`details`,
+     *                                                       `message_key`, `locale`,
+     *                                                       `message_params` when present).
+     * @param string|null                  $messageKey       Stable, never-localised i18n key.
+     *                                                       Carried through from the wire
+     *                                                       `message_key` field per I26.
+     * @param string|null                  $locale           Locale tag (e.g. `en-GB`) the
+     *                                                       server resolved for the
+     *                                                       `message` and `message_key`
+     *                                                       on this response.
+     * @param array<string, mixed>|null    $messageParams    Substitution params for
+     *                                                       client-side i18n catalog
+     *                                                       rendering of `messageKey`.
+     * @param array<string, string>        $responseHeaders  HTTP response headers, keys
+     *                                                       LOWERCASED (RFC 9110
+     *                                                       case-insensitive). Multi-value
+     *                                                       headers (e.g. `set-cookie`) are
+     *                                                       collapsed to a single
+     *                                                       comma-joined string — do NOT
+     *                                                       rely on this map for cookies.
+     *                                                       Mirrors
+     *                                                       `packages/typescript/src/errors.ts:34-41`.
+     * @param string|null                  $contentLanguage  The `Content-Language` response
+     *                                                       header value — the language the
+     *                                                       server actually resolved for
+     *                                                       content negotiation. DISTINCT
+     *                                                       from `$locale`, which is the
+     *                                                       body-envelope I26 localisation
+     *                                                       tag (`ErrorEnvelope.locale`).
      */
     public function __construct(
         string $message,
@@ -44,6 +60,8 @@ class GislApiError extends GislError
         public readonly ?string $messageKey = null,
         public readonly ?string $locale = null,
         public readonly ?array $messageParams = null,
+        public readonly array $responseHeaders = [],
+        public readonly ?string $contentLanguage = null,
     ) {
         parent::__construct($message);
     }

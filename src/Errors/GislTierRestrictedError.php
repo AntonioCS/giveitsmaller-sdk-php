@@ -18,6 +18,13 @@ use Gisl\Generated\OpenApi\Model\TierRestrictionResponse;
  */
 final class GislTierRestrictedError extends GislApiError
 {
+    /**
+     * @param array<string, string> $responseHeaders  HTTP response headers, keys LOWERCASED.
+     *                                                Multi-value headers comma-joined.
+     *                                                Mirrors {@see GislApiError::$responseHeaders}.
+     * @param string|null           $contentLanguage  `Content-Language` response header.
+     *                                                DISTINCT from `$locale` (I26 body tag).
+     */
     public function __construct(
         string $message,
         int $statusCode,
@@ -27,7 +34,9 @@ final class GislTierRestrictedError extends GislApiError
         ?string $messageKey = null,
         ?string $locale = null,
         ?array $messageParams = null,
+        array $responseHeaders = [],
+        ?string $contentLanguage = null,
     ) {
-        parent::__construct($message, $statusCode, $errorCode, $payload, $messageKey, $locale, $messageParams);
+        parent::__construct($message, $statusCode, $errorCode, $payload, $messageKey, $locale, $messageParams, $responseHeaders, $contentLanguage);
     }
 }
