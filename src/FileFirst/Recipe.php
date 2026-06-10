@@ -10,6 +10,7 @@ use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
+use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -180,11 +181,15 @@ final class Recipe
      *                                 or milliseconds; defaults to 300s.
      * @param (callable(\Gisl\Sdk\Ergonomic\ProgressEvent): void)|null $onProgress
      * @param int|null $pollIntervalMs Override the poll-fallback interval (ms).
+     * @param Cancellation|null $cancellation Cooperative cancellation token —
+     *        cancel it to abort the run early (between steps) with a
+     *        {@see \Gisl\Sdk\Errors\GislAbortError}.
      */
     public function run(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
         ?int $pollIntervalMs = null,
+        ?Cancellation $cancellation = null,
     ): RunResult {
         if ($this->client === null) {
             throw new GislConfigError(
@@ -198,7 +203,7 @@ final class Recipe
 
         // 1+2. Upload (when required) + create the workflow. Shared with
         // submit() (which passes a webhook → callback_url). run() passes none.
-        $created = $this->uploadAndCreate(null, $deadlineMs, $onProgressClosure);
+        $created = $this->uploadAndCreate(null, $deadlineMs, $onProgressClosure, $cancellation);
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -209,11 +214,13 @@ final class Recipe
             onProgress: $onProgressClosure,
             useSSE: true,
             pollIntervalMs: $pollIntervalMs,
+            cancellation: $cancellation,
         );
 
         // 4. Fetch downloads. Codex TS r1 medium 42a6ea3b6102 — the maxWait
         // deadline covers upload + create + wait + downloads, so check before
         // issuing the request rather than letting a slow call exceed it.
+        BuilderInternals::throwIfCancelled($cancellation, 'downloads fetch');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Workflow {$workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",
@@ -289,7 +296,11 @@ final class Recipe
         ?string $webhook,
         ?int $deadlineMs,
         ?\Closure $onProgressClosure,
+        ?Cancellation $cancellation = null,
     ): WorkflowCreateResponse {
+        // 0. Honour an already-cancelled token before spending the upload.
+        BuilderInternals::throwIfCancelled($cancellation, 'upload');
+
         // 1. Resolve the upload id. A pre-uploaded id skips the upload entirely;
         // a path is uploaded now, emitting UploadProgressEvent from the byte
         // counter. Resource-stream inputs are deferred (see GislClient).
@@ -315,6 +326,7 @@ final class Recipe
         // Codex TS r2 medium 9a117f04eb59 — run() passes a whole-run deadline so
         // a slow upload doesn't proceed to createWorkflow past maxWait. submit()
         // passes null (fire-and-forget, no upload cap), so the check is skipped.
+        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
         if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError('Upload completed but maxWait elapsed before workflow could be created.');
         }

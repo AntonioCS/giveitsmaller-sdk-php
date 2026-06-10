@@ -49,11 +49,14 @@ use Gisl\Sdk\WorkflowCreatePayload;
  * `merge.ts` to consume.
  *
  * Differences from the TS reference, all PHP-idiomatic:
- *  - No `AbortSignal` analogue — PHP's PSR-18 surface has no equivalent;
- *    the only abort signal is the wall-clock `maxWait` deadline. A
- *    cancellation primitive lands in a follow-up (VOxtu0RZ-B2 / similar).
+ *  - `AbortSignal` is replaced by a cooperative {@see \Gisl\Sdk\Cancellation}
+ *    token (passed via {@see RunOptions::$cancellation} /
+ *    {@see SubmitOptions::$cancellation}); PHP has no event-loop abort, so
+ *    cancellation is checked between steps alongside the `maxWait` deadline
+ *    (VOxtu0RZ-B3). Mid-request transfer abort remains a follow-up (VOxtu0RZ-B4).
  *  - Input is `string` filesystem path only (matches existing
- *    `GislClient::uploadFile()`'s contract); no Blob/File analogue.
+ *    `GislClient::uploadFile()`'s contract); no Blob/File analogue
+ *    (in-memory/stream input is VOxtu0RZ-B4).
  *  - The SSE generator cannot be interrupted mid-frame on a blocking
  *    read. The deadline check fires between yielded frames, and the
  *    poll-fallback path is preferred for callers concerned about quiet
@@ -233,6 +236,9 @@ final class OperationBuilder
         // Mirrors builder.ts:453-455.
         $resolved = $this->resolve();
 
+        // Honour an already-cancelled token before spending the upload.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'upload');
+
         // 1. Upload — emits UploadProgressEvent from the byte counter.
         $uploadOpts = null;
         if ($onProgress !== null) {
@@ -247,6 +253,7 @@ final class OperationBuilder
         // Codex TS r2 medium 9a117f04eb59 — check the deadline AFTER upload
         // so a slow upload doesn't proceed to createWorkflow past the
         // caller's deadline.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'workflow creation');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 'Upload completed but maxWait elapsed before workflow could be created.',
@@ -270,12 +277,14 @@ final class OperationBuilder
             onProgress: $onProgress,
             useSSE: $options->useSSE,
             pollIntervalMs: $options->pollIntervalMs,
+            cancellation: $options->cancellation,
         );
 
         // 4. Fetch downloads. Codex TS r1 medium 42a6ea3b6102 — the
         // maxWait deadline covers upload + create + wait + downloads, so
         // check the deadline before issuing the downloads request rather
         // than letting a slow getWorkflowDownloads silently exceed it.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'downloads fetch');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Workflow {$workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",
@@ -303,8 +312,12 @@ final class OperationBuilder
         // Resolve presets before any I/O so a GislConfigError fails the
         // call before the upload — same fail-early contract as run().
         $resolved = $this->resolve();
+        BuilderInternals::throwIfCancelled($options->cancellation, 'upload');
         $uploadResp = $this->client->uploadFile($this->input);
 
+        // A cancel that arrived DURING the upload must not still create a
+        // workflow (parity with run() + MergeBuilder::submit()).
+        BuilderInternals::throwIfCancelled($options->cancellation, 'workflow creation');
         $job = new JobDefinitionPayload(
             operations: [new OperationDef(type: $this->opType, options: $resolved['wireOptions'])],
             id: 'op',

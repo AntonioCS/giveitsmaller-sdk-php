@@ -55,13 +55,15 @@ final class MapEachBuilder
         $totalBudgetMs = MaxWait::parse($options->maxWait);
         $deadlineMs = self::nowMs() + $totalBudgetMs;
 
-        // 1. Run the parent against the full deadline.
+        // 1. Run the parent against the full deadline. Propagate the
+        // cancellation token so a cancel aborts the parent run too.
         $remainingForParent = \max(1, $deadlineMs - self::nowMs());
         $parentResult = $this->parent->run(new RunOptions(
             maxWait: $remainingForParent,
             onProgress: $options->onProgress,
             useSSE: $options->useSSE,
             pollIntervalMs: $options->pollIntervalMs,
+            cancellation: $options->cancellation,
         ));
 
         // 2. Fan out the fn over each artifact, sequentially.
@@ -72,6 +74,7 @@ final class MapEachBuilder
 
         $fn = $this->fn;
         foreach ($parentResult->artifacts as $art) {
+            BuilderInternals::throwIfCancelled($options->cancellation, 'fan-out child run');
             $remaining = $deadlineMs - self::nowMs();
             if ($remaining <= 0) {
                 throw new GislTimeoutError(
@@ -89,6 +92,7 @@ final class MapEachBuilder
                 onProgress: $options->onProgress,
                 useSSE: $options->useSSE,
                 pollIntervalMs: $options->pollIntervalMs,
+                cancellation: $options->cancellation,
             ));
             foreach ($childResult->artifacts as $a) {
                 $collectedArtifacts[] = $a;

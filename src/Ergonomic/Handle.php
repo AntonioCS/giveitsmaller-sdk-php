@@ -9,6 +9,7 @@ use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislResultNotReadyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\FileFirst\RunResult;
 use Gisl\Sdk\FileFirst\StreamingDownloader;
 use Gisl\Sdk\GislClient;
@@ -87,6 +88,10 @@ final class Handle
      *                                 (`'2h'`/`'30m'`/`'120s'`) or
      *                                 milliseconds; defaults to 300s.
      * @param (callable(ProgressEvent): void)|null $onProgress
+     * @param Cancellation|null $cancellation Cooperative cancellation token —
+     *        cancel it to abort the wait early with a
+     *        {@see \Gisl\Sdk\Errors\GislAbortError} (checked between SSE frames /
+     *        poll iterations, like the `maxWait` deadline).
      *
      * @throws GislConfigError reason `no_client` when no client is bound.
      * @throws GislTimeoutError when `$maxWait` elapses before terminal.
@@ -94,6 +99,7 @@ final class Handle
     public function wait(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
+        ?Cancellation $cancellation = null,
     ): RunResult {
         $client = $this->requireClient();
         $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($maxWait ?? 300_000);
@@ -106,8 +112,10 @@ final class Handle
             onProgress: $onProgressClosure,
             useSSE: true,
             pollIntervalMs: null,
+            cancellation: $cancellation,
         );
 
+        BuilderInternals::throwIfCancelled($cancellation, 'downloads fetch');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Workflow {$this->workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",

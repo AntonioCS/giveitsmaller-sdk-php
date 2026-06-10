@@ -6,6 +6,8 @@ namespace Gisl\Sdk\Ergonomic;
 
 use Gisl\Generated\OpenApi\Model\SseEventType;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
+use Gisl\Sdk\Cancellation;
+use Gisl\Sdk\Errors\GislAbortError;
 use Gisl\Sdk\Errors\GislNetworkError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\GislClient;
@@ -38,6 +40,20 @@ final class BuilderInternals
     public static function nowMs(): int
     {
         return (int) (\microtime(true) * 1_000);
+    }
+
+    /**
+     * Cooperative-cancellation checkpoint. Throws {@see GislAbortError} when the
+     * caller's {@see Cancellation} token has been cancelled. A null token (the
+     * default) is a no-op. Call this at the same boundaries the `maxWait`
+     * deadline is checked — before/after uploads, before workflow creation, and
+     * between SSE frames / poll iterations.
+     */
+    public static function throwIfCancelled(?Cancellation $cancellation, string $context): void
+    {
+        if ($cancellation !== null && $cancellation->isCancelled()) {
+            throw new GislAbortError("Cancelled before {$context}.");
+        }
     }
 
     /**
@@ -130,10 +146,11 @@ final class BuilderInternals
         ?\Closure $onProgress,
         bool $useSSE,
         ?int $pollIntervalMs,
+        ?Cancellation $cancellation = null,
     ): WorkflowStatusResponse {
         if ($useSSE) {
             try {
-                return self::consumeSseToTerminal($client, $workflowId, $deadlineMs, $onProgress);
+                return self::consumeSseToTerminal($client, $workflowId, $deadlineMs, $onProgress, $cancellation);
             } catch (GislTimeoutError $e) {
                 // Caller-deadline elapsed during SSE — propagate directly,
                 // do NOT fall back to poll (the deadline is already done).
@@ -151,7 +168,7 @@ final class BuilderInternals
             // re-issue the same doomed request via poll (codex r2 high
             // 93a6f1be1fcd / round-2 reaffirmation).
         }
-        return self::pollToTerminal($client, $workflowId, $deadlineMs, $pollIntervalMs);
+        return self::pollToTerminal($client, $workflowId, $deadlineMs, $pollIntervalMs, $cancellation);
     }
 
     /**
@@ -162,7 +179,9 @@ final class BuilderInternals
         string $workflowId,
         int $deadlineMs,
         ?\Closure $onProgress,
+        ?Cancellation $cancellation = null,
     ): WorkflowStatusResponse {
+        self::throwIfCancelled($cancellation, "SSE wait for workflow {$workflowId}");
         if (self::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Workflow {$workflowId} did not complete before maxWait deadline.",
@@ -189,6 +208,7 @@ final class BuilderInternals
             if (\in_array($event->event, $terminalEvents, true)) {
                 return $client->getWorkflowStatus($workflowId);
             }
+            self::throwIfCancelled($cancellation, "SSE wait for workflow {$workflowId}");
             if (self::nowMs() >= $deadlineMs) {
                 throw new GislTimeoutError(
                     "Workflow {$workflowId} did not complete before maxWait deadline.",
@@ -211,6 +231,7 @@ final class BuilderInternals
         string $workflowId,
         int $deadlineMs,
         ?int $pollIntervalMs,
+        ?Cancellation $cancellation = null,
     ): WorkflowStatusResponse {
         // Codex TS r1 medium 89130e3ea75d — guard against 0/negative/NaN
         // pollIntervalMs that would hammer getWorkflowStatus.
@@ -224,6 +245,7 @@ final class BuilderInternals
 
         $terminal = \Gisl\Sdk\WorkflowConstants::TERMINAL_STATUSES;
         while (true) {
+            self::throwIfCancelled($cancellation, "poll wait for workflow {$workflowId}");
             if (self::nowMs() >= $deadlineMs) {
                 throw new GislTimeoutError(
                     "Workflow {$workflowId} did not complete before maxWait deadline.",
@@ -244,6 +266,9 @@ final class BuilderInternals
                     "Workflow {$workflowId} did not complete before maxWait deadline.",
                 );
             }
+            // Abort before sleeping out the interval — a cancel that arrived
+            // during the status fetch should not wait a full poll cycle.
+            self::throwIfCancelled($cancellation, "poll wait for workflow {$workflowId}");
             \usleep($intervalMs * 1_000);
         }
     }

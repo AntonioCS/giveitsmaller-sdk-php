@@ -9,6 +9,7 @@ use Gisl\Sdk\Errors\GislPerInputOptionsNotSupportedError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Errors\GislUndeclaredAssetError;
 use Gisl\Sdk\Errors\GislUnusedAssetError;
+use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
@@ -101,10 +102,12 @@ final class MergeBuilder
         // 1. Validate locally BEFORE any upload.
         $plan = $this->planSequence();
 
-        // 2. Upload each unique asset exactly ONCE. Pass the deadline so the
-        // upload loop can abort mid-batch on a slow connection.
-        $uploadedByAssetId = $this->uploadUniqueAssets($plan, $onProgress, $deadlineMs);
+        // 2. Upload each unique asset exactly ONCE. Pass the deadline + the
+        // cancellation token so the upload loop can abort mid-batch on a slow
+        // connection or a caller cancel.
+        $uploadedByAssetId = $this->uploadUniqueAssets($plan, $onProgress, $deadlineMs, $options->cancellation);
 
+        BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 'Upload(s) completed but maxWait elapsed before merge workflow could be created.',
@@ -124,9 +127,11 @@ final class MergeBuilder
             onProgress: $onProgress,
             useSSE: $options->useSSE,
             pollIntervalMs: $options->pollIntervalMs,
+            cancellation: $options->cancellation,
         );
 
         // 5. Fetch downloads + project.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'downloads fetch');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Merge workflow {$workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",
@@ -155,8 +160,9 @@ final class MergeBuilder
     public function submit(SubmitOptions $options): Handle
     {
         $plan = $this->planSequence();
-        $uploadedByAssetId = $this->uploadUniqueAssets($plan, onProgress: null, deadlineMs: null);
+        $uploadedByAssetId = $this->uploadUniqueAssets($plan, onProgress: null, deadlineMs: null, cancellation: $options->cancellation);
 
+        BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
         $payload = $this->buildPayload($plan, $uploadedByAssetId, callbackUrl: $options->webhook);
         $created = $this->client->createWorkflow($payload);
 
@@ -308,11 +314,13 @@ final class MergeBuilder
         SequencePlan $plan,
         ?\Closure $onProgress,
         ?int $deadlineMs,
+        ?Cancellation $cancellation = null,
     ): array {
         $uploaded = [];
         $total = \count($plan->uniqueAssets);
         $done = 0;
         foreach ($plan->uniqueAssets as $id => $asset) {
+            BuilderInternals::throwIfCancelled($cancellation, "merge upload (after {$done} of {$total} assets)");
             if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
                 throw new GislTimeoutError(
                     "maxWait elapsed mid-upload (after {$done} of {$total} merge assets).",

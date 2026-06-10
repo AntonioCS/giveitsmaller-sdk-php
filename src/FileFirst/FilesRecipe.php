@@ -9,6 +9,7 @@ use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
+use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -155,11 +156,15 @@ final class FilesRecipe
      * @param string|int|null $maxWait Wall-clock deadline for the whole run.
      * @param (callable(\Gisl\Sdk\Ergonomic\ProgressEvent): void)|null $onProgress
      * @param int|null $pollIntervalMs Override the poll-fallback interval (ms).
+     * @param Cancellation|null $cancellation Cooperative cancellation token —
+     *        cancel it to abort the fan-out early (between uploads / wait frames)
+     *        with a {@see \Gisl\Sdk\Errors\GislAbortError}.
      */
     public function run(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
         ?int $pollIntervalMs = null,
+        ?Cancellation $cancellation = null,
     ): RunResult {
         if ($this->client === null) {
             throw new GislConfigError(
@@ -173,7 +178,7 @@ final class FilesRecipe
 
         // 1+2. Upload EVERY input + create ONE multi-job workflow. Shared with
         // submit() (which passes a webhook → callback_url and a null deadline).
-        $created = $this->uploadAllAndCreate(null, $deadlineMs, $onProgressClosure);
+        $created = $this->uploadAllAndCreate(null, $deadlineMs, $onProgressClosure, $cancellation);
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -185,9 +190,11 @@ final class FilesRecipe
             onProgress: $onProgressClosure,
             useSSE: true,
             pollIntervalMs: $pollIntervalMs,
+            cancellation: $cancellation,
         );
 
         // 4. Fetch downloads + project per-job into the partitioned RunResult.
+        BuilderInternals::throwIfCancelled($cancellation, 'downloads fetch');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 "Workflow {$workflowId} reached terminal status but maxWait elapsed before downloads could be fetched.",
@@ -268,6 +275,7 @@ final class FilesRecipe
         ?string $webhook,
         ?int $deadlineMs,
         ?\Closure $onProgressClosure,
+        ?Cancellation $cancellation = null,
     ): WorkflowCreateResponse {
         \assert($this->client !== null);
 
@@ -287,8 +295,10 @@ final class FilesRecipe
         // path otherwise via the byte-counter progress closure).
         $fileIds = [];
         foreach ($this->inputs as $input) {
-            // Fail fast between uploads — a deadline that elapses mid-batch
-            // should not force every remaining input to upload before throwing.
+            // Fail fast between uploads — a deadline that elapses or a caller
+            // cancel mid-batch should not force every remaining input to upload
+            // before throwing.
+            BuilderInternals::throwIfCancelled($cancellation, 'fan-out upload');
             if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
                 throw new GislTimeoutError('maxWait elapsed during fan-out uploads before all inputs were uploaded.');
             }
@@ -307,6 +317,7 @@ final class FilesRecipe
             }
         }
 
+        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
         if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError('Uploads completed but maxWait elapsed before workflow could be created.');
         }
