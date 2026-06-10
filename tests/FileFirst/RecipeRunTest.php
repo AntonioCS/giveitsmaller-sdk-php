@@ -14,6 +14,8 @@ use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\Recipe;
+use Gisl\Sdk\FileFirst\RunResult;
+use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -334,21 +336,66 @@ final class RecipeRunTest extends TestCase
     }
 
     #[Test]
-    public function resource_input_arm_throws_resource_input_unsupported(): void
+    public function resource_input_arm_uploads_seekable_stream(): void
     {
-        // A resource-stream input is not yet supported by run() — it must fail
-        // fast with a typed config error BEFORE any network call.
-        $stream = \fopen('php://memory', 'rb');
+        // VOxtu0RZ-B4: a seekable stream input now uploads end-to-end (it was
+        // previously rejected as resource_input_unsupported).
+        $stream = \fopen('php://temp', 'r+b');
         self::assertIsResource($stream);
+        \fwrite($stream, 'image-bytes');
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ]);
+        $client = $this->makeClient($http);
+        try {
+            $result = $this->recipe($client, FileInput::resource($stream))->compress()->run();
+            self::assertInstanceOf(RunResult::class, $result);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function compress_optimize_on_resource_fails_before_upload(): void
+    {
+        // VOxtu0RZ-B4 (codex): compress(optimize) needs an inferable media
+        // class; a stream carries no extension, so lowering throws media_unknown
+        // — and it must throw BEFORE the upload, not after spending the bytes.
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        \fwrite($stream, 'bytes');
+        $http = $this->stubClient([]);   // empty — any request means the upload ran
+        $client = $this->makeClient($http);
+        try {
+            $this->recipe($client, FileInput::resource($stream))->compress(OptimizeFor::Size)->run();
+            self::fail('expected GislConfigError media_unknown');
+        } catch (GislConfigError $e) {
+            self::assertSame('media_unknown', $e->getReason());
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function resource_input_arm_rejects_non_seekable_stream(): void
+    {
+        // A non-seekable stream (a pipe) is rejected with an actionable error
+        // (Option B) rather than buffered to disk.
+        $pipe = \popen('printf x', 'r');
+        self::assertIsResource($pipe);
         $http = $this->stubClient([]);   // empty queue — no request should fire
         $client = $this->makeClient($http);
         try {
-            $this->recipe($client, FileInput::resource($stream))->compress()->run();
+            $this->recipe($client, FileInput::resource($pipe))->compress()->run();
             self::fail('expected GislConfigError');
         } catch (GislConfigError $e) {
-            self::assertSame('resource_input_unsupported', $e->getReason());
+            self::assertSame('non_seekable_stream', $e->getReason());
         } finally {
-            \fclose($stream);
+            \pclose($pipe);
         }
     }
 

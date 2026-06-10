@@ -49,6 +49,7 @@ use Gisl\Sdk\Errors\GislFeatureTierRestrictedError;
 use Gisl\Sdk\Errors\GislMultipartPartCountError;
 use Gisl\Sdk\Errors\GislMultipartPartError;
 use Gisl\Sdk\Http\MultipartPartUploader;
+use Gisl\Sdk\Http\UploadSource;
 use Gisl\Sdk\Errors\GislMultipartSessionAuthRequiredError;
 use Gisl\Sdk\Errors\GislMultipartSessionNotFoundError;
 use Gisl\Sdk\Errors\GislMultipartSessionOwnershipError;
@@ -165,42 +166,44 @@ class GislClient
      * Upload a file. Routes to single-shot for files at-or-below
      * `multipartThresholdBytes`, else to the sequential multipart path.
      *
-     * @param string|resource $filePathOrResource Filesystem path string. Stream
-     *                                            resources are deferred to
-     *                                            `bf68ju2r` (B2) — the chunked
-     *                                            path needs random-access
-     *                                            reads and the resource
-     *                                            contract there is still
-     *                                            being decided.
+     * @param string|resource $filePathOrResource Filesystem path string, or an
+     *                                            open **seekable** stream
+     *                                            resource (the in-memory/Blob
+     *                                            analogue, VOxtu0RZ-B4). A
+     *                                            non-seekable stream
+     *                                            (php://stdin, a pipe) is
+     *                                            rejected with an actionable
+     *                                            error — buffer it to a temp
+     *                                            path or pass a seekable
+     *                                            stream (php://temp).
      */
     public function uploadFile(
         mixed $filePathOrResource,
         ?UploadOptions $options = null,
     ): UploadResponse {
         if (\is_resource($filePathOrResource)) {
-            throw new GislConfigError(
-                'Stream-resource uploadFile() is deferred to VOxtu0RZ-B2; pass a filesystem path for now.',
-            );
-        }
-        if (!\is_string($filePathOrResource)) {
+            $source = UploadSource::fromStream($filePathOrResource);
+        } elseif (\is_string($filePathOrResource)) {
+            $source = UploadSource::fromPath($filePathOrResource);
+        } else {
             throw new GislConfigError(
                 'uploadFile expected a string filesystem path or a stream resource; got ' . \get_debug_type($filePathOrResource) . '.',
             );
         }
 
-        $filePath = $filePathOrResource;
-        if (!\is_file($filePath) || !\is_readable($filePath)) {
-            throw new GislConfigError("File not found or not readable: {$filePath}");
-        }
-
-        $size = \filesize($filePath);
-        if ($size === false) {
-            throw new GislConfigError("Unable to stat file: {$filePath}");
-        }
-
-        $fileName = \basename($filePath);
+        $size = $source->size();
+        $fileName = $source->name();
 
         if (\is_string($options?->resumeUploadId) && $options->resumeUploadId !== '') {
+            // Resume re-walks a durable multipart session — it requires a
+            // re-openable filesystem path; a stream cursor does not survive the
+            // original process, so stream resume is unsupported.
+            if (!$source->isConcurrencySafe()) {
+                throw new GislConfigError(
+                    'uploadFile: resumeUploadId is not supported for stream inputs; resume requires a filesystem path.',
+                    reason: 'stream_resume_unsupported',
+                );
+            }
             // SDK-3 (Wb6ebOMM): resume path takes the durable session's
             // `recommended_chunk_size` from /status (initiate is skipped).
             // Below the multipart threshold a resume is meaningless — the
@@ -216,7 +219,7 @@ class GislClient
                 );
             }
             return $this->multipartResume(
-                filePath: $filePath,
+                source: $source,
                 fileName: $fileName,
                 totalSize: $size,
                 resumeUploadId: $options->resumeUploadId,
@@ -225,14 +228,14 @@ class GislClient
         }
 
         if ($size > $this->config->multipartThresholdBytes) {
-            return $this->multipartUpload($filePath, $fileName, $size, $options);
+            return $this->multipartUpload($source, $fileName, $size, $options);
         }
 
-        return $this->singleShotUpload($filePath, $fileName, $size, $options);
+        return $this->singleShotUpload($source, $fileName, $size, $options);
     }
 
     private function singleShotUpload(
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         int $size,
         ?UploadOptions $options,
@@ -240,7 +243,7 @@ class GislClient
         $boundary = $this->generateMultipartBoundary();
         $body = $this->buildSingleShotMultipartBody(
             boundary: $boundary,
-            filePath: $filePath,
+            source: $source,
             fileName: $fileName,
             contentType: $options?->contentType,
         );
@@ -289,7 +292,7 @@ class GislClient
      * `UploadResponse` and the complete endpoint does not re-emit it).
      */
     private function multipartUpload(
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         int $totalSize,
         ?UploadOptions $options,
@@ -297,7 +300,7 @@ class GislClient
         $firstChunkSize = \min($totalSize, GislClientConfig::DEFAULT_MULTIPART_FIRST_CHUNK_SIZE_BYTES);
 
         $initiate = $this->multipartInitiate(
-            filePath: $filePath,
+            source: $source,
             fileName: $fileName,
             totalSize: $totalSize,
             firstChunkSize: $firstChunkSize,
@@ -411,10 +414,12 @@ class GislClient
         // Gisl::create on ext-curl), PUT parts with bounded fan-out; otherwise
         // the sequential PSR-18 loop — the default, and the path the
         // StubPsr18Client parity suite captures. Both preserve the typed
-        // errors + per-part progress.
-        if ($this->partUploader !== null) {
+        // errors + per-part progress. A stream source is NOT concurrency-safe
+        // (one shared cursor), so it always takes the sequential loop even when
+        // a concurrent uploader is present (VOxtu0RZ-B4).
+        if ($this->partUploader !== null && $source->isConcurrencySafe()) {
             $etagByPart = $this->partUploader->uploadParts(
-                $filePath,
+                $source->path(),
                 $descriptors,
                 $uploadId,
                 $this->config->multipartConcurrency,
@@ -427,7 +432,7 @@ class GislClient
                 $etag = $this->putChunkWithRetry(
                     partNumber: $d['partNumber'],
                     url: $d['url'],
-                    filePath: $filePath,
+                    source: $source,
                     offset: $d['offset'],
                     length: $d['length'],
                     uploadId: $uploadId,
@@ -514,7 +519,7 @@ class GislClient
      * regen.
      */
     private function multipartResume(
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         int $totalSize,
         string $resumeUploadId,
@@ -701,7 +706,7 @@ class GislClient
                 };
 
                 $etagByPart = $this->partUploader->uploadParts(
-                    $filePath,
+                    $source->path(),
                     $descriptors,
                     $uploadId,
                     $this->config->multipartConcurrency,
@@ -731,7 +736,7 @@ class GislClient
                     // Surface read failures as the typed GislMultipartPartError
                     // (mirrors fresh-path putChunkWithRetry pattern).
                     try {
-                        $chunkBytes = $this->readChunk($filePath, $d['offset'], $contentLength);
+                        $chunkBytes = $this->readChunk($source, $d['offset'], $contentLength);
                     } catch (GislError $e) {
                         throw new GislMultipartPartError(
                             "multipartResume: failed to read bytes for part {$partNumber}: " . $e->getMessage(),
@@ -1194,7 +1199,7 @@ class GislClient
     }
 
     private function multipartInitiate(
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         int $totalSize,
         int $firstChunkSize,
@@ -1204,7 +1209,7 @@ class GislClient
         $boundary = $this->generateMultipartBoundary();
         $body = $this->buildMultipartInitiateBody(
             boundary: $boundary,
-            filePath: $filePath,
+            source: $source,
             fileName: $fileName,
             firstChunkSize: $firstChunkSize,
             totalSize: $totalSize,
@@ -1242,7 +1247,7 @@ class GislClient
     private function putChunkWithRetry(
         int $partNumber,
         string $url,
-        string $filePath,
+        UploadSource $source,
         int $offset,
         int $length,
         string $uploadId,
@@ -1253,7 +1258,7 @@ class GislClient
         // read / seek failure) would otherwise lose the per-part context
         // (codex review; mirrors the TS reference).
         try {
-            $chunkBytes = $this->readChunk($filePath, $offset, $length);
+            $chunkBytes = $this->readChunk($source, $offset, $length);
         } catch (GislError $e) {
             throw new GislMultipartPartError(
                 "Failed to read bytes for part {$partNumber}: " . $e->getMessage(),
@@ -1360,34 +1365,13 @@ class GislClient
         \usleep($delayMs * 1000);
     }
 
-    private function readChunk(string $filePath, int $offset, int $length): string
+    private function readChunk(UploadSource $source, int $offset, int $length): string
     {
-        if ($length < 1) {
-            // fread requires length >= 1; a zero-byte chunk is never produced
-            // by the multipart router (initiate enforces a non-zero first
-            // chunk; subsequent chunk_size is recommendedChunkSize >= 1) but
-            // guarding here keeps PHPStan honest and surfaces wire bugs early.
-            throw new GislError("readChunk called with non-positive length ({$length}) at offset {$offset}.");
-        }
-        $fh = @\fopen($filePath, 'rb');
-        if ($fh === false) {
-            throw new GislError("Unable to reopen {$filePath} for chunk read.");
-        }
-        try {
-            if (\fseek($fh, $offset) !== 0) {
-                throw new GislError("Failed to seek to offset {$offset} in {$filePath}.");
-            }
-            $bytes = \fread($fh, $length);
-            if ($bytes === false || \strlen($bytes) !== $length) {
-                $got = $bytes === false ? 'false' : (string) \strlen($bytes);
-                throw new GislError(
-                    "Short read at offset {$offset} in {$filePath}: expected {$length} bytes, got {$got}.",
-                );
-            }
-            return $bytes;
-        } finally {
-            \fclose($fh);
-        }
+        // Byte reads funnel through UploadSource so the engine is agnostic to a
+        // path vs a seekable stream (VOxtu0RZ-B4). A path source reopens a fresh
+        // handle per read (concurrency-safe); a stream source seeks its held
+        // handle (sequential-only, gated upstream).
+        return $source->readRange($offset, $length);
     }
 
     private function fireProgress(?UploadOptions $options, int $uploaded, int $total): void
@@ -3092,7 +3076,7 @@ class GislClient
 
     private function buildSingleShotMultipartBody(
         string $boundary,
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         ?string $contentType = null,
     ): \Psr\Http\Message\StreamInterface {
@@ -3109,10 +3093,7 @@ class GislClient
         }
         $this->assertContentTypeHeaderSafe($contentType);
 
-        $contents = \file_get_contents($filePath);
-        if ($contents === false) {
-            throw new GislConfigError("Unable to read file: {$filePath}");
-        }
+        $contents = $source->readAll();
 
         // Single FormData field named "file" with filename. Mirrors the TS
         // singleUpload() at packages/typescript/src/client.ts:687-701.
@@ -3141,7 +3122,7 @@ class GislClient
      */
     private function buildMultipartInitiateBody(
         string $boundary,
-        string $filePath,
+        UploadSource $source,
         string $fileName,
         int $firstChunkSize,
         int $totalSize,
@@ -3156,7 +3137,7 @@ class GislClient
         }
         $this->assertContentTypeHeaderSafe($contentType);
 
-        $firstChunkBytes = $this->readChunk($filePath, 0, $firstChunkSize);
+        $firstChunkBytes = $this->readChunk($source, 0, $firstChunkSize);
 
         $crlf = "\r\n";
         $body = "--{$boundary}{$crlf}"

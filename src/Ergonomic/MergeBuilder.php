@@ -11,6 +11,7 @@ use Gisl\Sdk\Errors\GislUndeclaredAssetError;
 use Gisl\Sdk\Errors\GislUnusedAssetError;
 use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\GislClient;
+use Gisl\Sdk\Http\UploadSource;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
 use Gisl\Sdk\Sources;
@@ -276,6 +277,17 @@ final class MergeBuilder
             );
         }
 
+        // Preflight every asset BEFORE any upload — a non-seekable/non-readable
+        // Merge::resource() or a missing/unreadable path anywhere must fail fast,
+        // not after earlier assets have already uploaded (codex VOxtu0RZ-B4).
+        foreach ($uploadSet as $asset) {
+            if ($asset instanceof ResourceAsset) {
+                UploadSource::assertUploadableStream($asset->resource);
+            } elseif ($asset instanceof PathAsset) {
+                UploadSource::fromPath($asset->path);
+            }
+        }
+
         return new SequencePlan($mediaKind, $positions, $uploadSet);
     }
 
@@ -331,7 +343,6 @@ final class MergeBuilder
                 $done++;
                 continue;
             }
-            /** @var PathAsset $asset */
             $uploadOpts = null;
             if ($onProgress !== null) {
                 $uploadOpts = new UploadOptions(
@@ -340,7 +351,15 @@ final class MergeBuilder
                     },
                 );
             }
-            $resp = $this->client->uploadFile($asset->path, $uploadOpts);
+            // A path or a seekable stream resource (VOxtu0RZ-B4) uploads now.
+            if ($asset instanceof ResourceAsset) {
+                \assert(\is_resource($asset->resource));
+                $uploadTarget = $asset->resource;
+            } else {
+                /** @var PathAsset $asset */
+                $uploadTarget = $asset->path;
+            }
+            $resp = $this->client->uploadFile($uploadTarget, $uploadOpts);
             $uploaded[$id] = $resp->getFileId() ?? '';
             $done++;
         }
@@ -503,9 +522,11 @@ final class MergeBuilder
 
     /**
      * Asset identity for dedupe. Handles use their fileId; paths use the
-     * EXACT caller-provided string (no trim, no trailing-slash strip).
-     * Mirrors TS R2 medium bb500566a683 — exact-string ensures the upload
-     * call's path matches the dedupe identity character-for-character.
+     * EXACT caller-provided string (no trim, no trailing-slash strip);
+     * resources use their stream id (referential identity — the SAME handle
+     * twice collapses to one upload, two distinct handles do not).
+     * Mirrors TS R2 medium bb500566a683 — exact identity ensures the upload
+     * call matches the dedupe identity character-for-character.
      */
     private static function assetIdentity(Asset $a): string
     {
@@ -514,6 +535,9 @@ final class MergeBuilder
         }
         if ($a instanceof PathAsset) {
             return "path:{$a->path}";
+        }
+        if ($a instanceof ResourceAsset) {
+            return 'resource:' . \get_resource_id($a->resource);
         }
         // Unreachable — the Asset interface is sealed via the Merge factory.
         throw new \LogicException('Unknown Asset variant: ' . get_class($a));

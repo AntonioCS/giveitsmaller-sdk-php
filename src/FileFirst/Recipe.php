@@ -139,6 +139,19 @@ final class Recipe
         return new WorkflowCreatePayload(jobs: [$job], callbackUrl: $callbackUrl);
     }
 
+    /**
+     * Trigger the per-step lowering purely for its validation side effects
+     * (e.g. {@see lowerCompressOptions()}'s `media_unknown` guard), discarding
+     * the result. Used to fail fast BEFORE uploading bytes. Lowering does not
+     * depend on the upload id, so this is a faithful preflight.
+     */
+    private function assertOperationsLowerable(): void
+    {
+        foreach ($this->steps as $step) {
+            $this->lowerStep($step);
+        }
+    }
+
     /** The result-addressing key passed to `file()`, or null. */
     public function key(): ?string
     {
@@ -301,12 +314,19 @@ final class Recipe
         // 0. Honour an already-cancelled token before spending the upload.
         BuilderInternals::throwIfCancelled($cancellation, 'upload');
 
+        // Preflight the operation lowering BEFORE any upload so a local lowering
+        // failure (e.g. compress(optimize: ...) on a stream / upload-id input
+        // with no inferable media) fails fast instead of after the upload bytes
+        // are spent (codex VOxtu0RZ-B4).
+        $this->assertOperationsLowerable();
+
         // 1. Resolve the upload id. A pre-uploaded id skips the upload entirely;
-        // a path is uploaded now, emitting UploadProgressEvent from the byte
-        // counter. Resource-stream inputs are deferred (see GislClient).
+        // a path or a seekable stream resource (VOxtu0RZ-B4) is uploaded now,
+        // emitting UploadProgressEvent from the byte counter. A non-seekable
+        // stream is rejected by uploadFile().
         if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
             $fileId = BuilderInternals::coerceString($this->input->fileId);
-        } elseif ($this->input->kind === FileInput::KIND_PATH) {
+        } else {
             $uploadOpts = $onProgressClosure !== null
                 ? new UploadOptions(
                     onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
@@ -314,13 +334,13 @@ final class Recipe
                     },
                 )
                 : null;
-            $uploadResp = $this->client?->uploadFile(BuilderInternals::coerceString($this->input->path), $uploadOpts);
+            $uploadTarget = BuilderInternals::coerceString($this->input->path);
+            if ($this->input->kind === FileInput::KIND_RESOURCE) {
+                \assert(\is_resource($this->input->resource));
+                $uploadTarget = $this->input->resource;
+            }
+            $uploadResp = $this->client?->uploadFile($uploadTarget, $uploadOpts);
             $fileId = $uploadResp?->getFileId() ?? '';
-        } else {
-            throw new GislConfigError(
-                'Recipe::run() does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
-                reason: 'resource_input_unsupported',
-            );
         }
 
         // Codex TS r2 medium 9a117f04eb59 — run() passes a whole-run deadline so

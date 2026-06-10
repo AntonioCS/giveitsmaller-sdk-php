@@ -43,6 +43,18 @@ final class Merge
     }
 
     /**
+     * Wrap an open, seekable stream resource as a merge asset (the in-memory /
+     * Blob analogue, VOxtu0RZ-B4). A non-seekable stream is rejected when the
+     * merge uploads.
+     *
+     * @param resource $resource
+     */
+    public static function resource(mixed $resource): ResourceAsset
+    {
+        return new ResourceAsset($resource);
+    }
+
+    /**
      * Wrap an {@see Asset} or a bare path string as a positional
      * {@see ClipEntry} carrying per-position options.
      */

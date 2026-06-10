@@ -145,28 +145,63 @@ final class GislClientTest extends TestCase
         }
     }
 
-    public function testUploadFileRejectsResourceInScaffold(): void
+    public function testUploadFileRejectsNonSeekableStream(): void
     {
+        // VOxtu0RZ-B4 Option B: a non-seekable stream (a pipe) has no random
+        // access for chunked PUTs + no reliable size, so it is rejected with an
+        // actionable error rather than a hidden buffer-to-disk copy.
         $captured = [];
-        $http = $this->stubClient([], $captured);
-        $client = $this->makeClient($http);
+        $client = $this->makeClient($this->stubClient([], $captured));
 
-        $tmp = $this->writeTempFile('x');
+        $pipe = \popen('printf hello', 'r');
+        self::assertNotFalse($pipe);
         try {
-            $resource = \fopen($tmp, 'rb');
-            self::assertNotFalse($resource);
-            try {
-                $this->expectException(GislConfigError::class);
-                $this->expectExceptionMessageMatches('/Stream-resource uploadFile/');
-                $client->uploadFile($resource);
-            } finally {
-                \fclose($resource);
-            }
+            $this->expectException(GislConfigError::class);
+            $this->expectExceptionMessageMatches('/non-seekable stream/');
+            $client->uploadFile($pipe);
         } finally {
-            @\unlink($tmp);
+            \pclose($pipe);
+            self::assertCount(0, $captured, 'a rejected non-seekable stream must not upload');
         }
-        // Stub should never have been invoked.
-        self::assertCount(0, $captured);
+    }
+
+    public function testUploadFileSeekableStreamSingleShotHappyPath(): void
+    {
+        // A seekable in-memory stream (php://temp) uploads end-to-end via the
+        // single-shot path, just like a filesystem path (VOxtu0RZ-B4).
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertNotFalse($stream);
+        \fwrite($stream, 'hello world');
+        \rewind($stream);
+
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, [
+                'success' => true,
+                'data' => [
+                    'file_id' => '01936fb2-0000-7000-8000-0000000000ab',
+                    'original_name' => 'upload.bin',
+                    'mime_type' => 'application/octet-stream',
+                    'size_bytes' => 11,
+                ],
+            ]),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        try {
+            $result = $client->uploadFile($stream);
+        } finally {
+            \fclose($stream);
+        }
+
+        self::assertInstanceOf(UploadResponse::class, $result);
+        self::assertSame('01936fb2-0000-7000-8000-0000000000ab', $result->getFileId());
+        self::assertCount(1, $captured);
+        $request = $captured[0];
+        self::assertSame('/api/uploads', $request->getUri()->getPath());
+        // The stream's bytes crossed the wire in the multipart body, and the
+        // SDK never closed the caller's stream (we fclose it ourselves above).
+        self::assertStringContainsString('hello world', (string) $request->getBody());
     }
 
     public function testUploadFileRejectsMissingPath(): void

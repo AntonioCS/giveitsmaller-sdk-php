@@ -365,21 +365,98 @@ final class FilesRecipeTest extends TestCase
     }
 
     #[Test]
-    public function run_resource_input_arm_throws_resource_input_unsupported(): void
+    public function run_compress_optimize_on_no_media_input_fails_before_any_upload(): void
     {
-        // A resource-stream input is not supported by the fan-out run() — it
-        // must fail fast with a typed config error BEFORE any network call.
-        $stream = \fopen('php://memory', 'rb');
-        self::assertIsResource($stream);
+        // The fan-out preflights per-input lowering before any upload, so
+        // compress(optimize) on an input with no inferable media (a pre-uploaded
+        // id) throws media_unknown BEFORE earlier inputs upload (codex r2).
+        $http = $this->stubClient([]);   // empty — any request means an input uploaded
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::uploadId('id0'), FileInput::uploadId('id1')])
+                ->compress(OptimizeFor::Size)
+                ->run();
+            self::fail('expected GislConfigError media_unknown');
+        } catch (GislConfigError $e) {
+            self::assertSame('media_unknown', $e->getReason());
+        }
+    }
+
+    #[Test]
+    public function run_missing_path_after_valid_path_fails_before_any_upload(): void
+    {
+        // Path existence is preflighted before any upload too (codex r3), so a
+        // missing path listed after a valid one does NOT upload the valid one.
+        $valid = \tempnam(\sys_get_temp_dir(), 'gisl');
+        self::assertNotFalse($valid);
+        \file_put_contents($valid, 'ok');
+        $http = $this->stubClient([]);   // empty — any request means the valid path uploaded
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::path($valid), FileInput::path('/nonexistent/missing.bin')])
+                ->compress()
+                ->run();
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertStringContainsString('File not found', $e->getMessage());
+        } finally {
+            @\unlink($valid);
+        }
+    }
+
+    #[Test]
+    public function file_input_resource_rejects_non_resource(): void
+    {
+        // FileInput::resource() validates its argument (mirrors Merge::resource())
+        // so a misuse fails at construction, not as a silent path upload (codex r2).
+        $this->expectException(GislConfigError::class);
+        $this->expectExceptionMessageMatches('/expected an open stream resource/');
+        /** @phpstan-ignore-next-line — deliberately passing a non-resource. */
+        FileInput::resource('not a resource');
+    }
+
+    #[Test]
+    public function run_non_seekable_resource_after_path_fails_before_any_upload(): void
+    {
+        // The fan-out preflights ALL resource inputs for seekability before
+        // uploading ANY input, so a non-seekable stream listed after a path
+        // input does NOT leave the path uploaded (codex VOxtu0RZ-B4).
+        $path = \tempnam(\sys_get_temp_dir(), 'gisl');
+        self::assertNotFalse($path);
+        \file_put_contents($path, 'ok');
+        $pipe = \popen('printf x', 'r');
+        self::assertIsResource($pipe);
+        $http = $this->stubClient([]);   // empty — any request means the path uploaded
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::path($path), FileInput::resource($pipe)])->compress()->run();
+            self::fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            self::assertSame('non_seekable_stream', $e->getReason());
+        } finally {
+            \pclose($pipe);
+            @\unlink($path);
+        }
+    }
+
+    #[Test]
+    public function run_resource_input_arm_rejects_non_seekable_stream(): void
+    {
+        // VOxtu0RZ-B4: seekable stream inputs are now uploaded by the fan-out
+        // (covered via the single-file Recipe + GislClient suites); a
+        // NON-seekable stream is rejected with an actionable error (Option B)
+        // BEFORE any network call.
+        $pipe = \popen('printf x', 'r');
+        self::assertIsResource($pipe);
         $http = $this->stubClient([]);   // empty queue — no request should fire
         $client = $this->makeClient($http);
         try {
-            $client->files([FileInput::resource($stream)])->compress()->run();
+            $client->files([FileInput::resource($pipe)])->compress()->run();
             self::fail('expected GislConfigError');
         } catch (GislConfigError $e) {
-            self::assertSame('resource_input_unsupported', $e->getReason());
+            self::assertSame('non_seekable_stream', $e->getReason());
         } finally {
-            \fclose($stream);
+            \pclose($pipe);
         }
     }
 

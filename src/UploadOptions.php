@@ -11,12 +11,11 @@ use Gisl\Sdk\Errors\GislConfigError;
  * Per-call options for {@see GislClient::uploadFile()}.
  *
  * Mirrors the TS `UploadOptions` interface at packages/typescript/src/types.ts:392-410.
- * `signal` is intentionally absent in this scaffold — PHP's PSR-18 / PSR-7
- * surface has no `AbortSignal` analogue, and the upload flow lands in
- * VOxtu0RZ-B2 which will introduce a cancellation primitive (likely a
- * `CancellationToken` interface compatible with PSR-related drafts). Adding
- * a stub now would commit us to a shape the cancellation work might want
- * to revise.
+ * `signal` is intentionally absent here — PHP's PSR-18 / PSR-7 surface has no
+ * `AbortSignal` analogue. Cooperative cancellation lives at the ergonomic
+ * layer ({@see \Gisl\Sdk\Cancellation} via `RunOptions`/`SubmitOptions`,
+ * VOxtu0RZ-B3), which checks between steps; an in-flight transfer is not
+ * interrupted mid-request (transfer-level abort is a possible follow-up).
  */
 final class UploadOptions
 {

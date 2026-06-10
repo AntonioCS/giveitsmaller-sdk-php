@@ -12,6 +12,7 @@ use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
+use Gisl\Sdk\Http\UploadSource;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\JobDefinitionPayload;
@@ -279,20 +280,28 @@ final class FilesRecipe
     ): WorkflowCreateResponse {
         \assert($this->client !== null);
 
-        // Pre-validate ALL input kinds before uploading anything — a resource
-        // arm anywhere in the list must fail fast, not after earlier path
-        // inputs have already been uploaded.
+        // Preflight EVERY input before uploading ANY of them — a non-seekable/
+        // non-readable stream OR an un-lowerable op chain (e.g. compress(optimize)
+        // on an input with no inferable media) anywhere in the list must fail
+        // fast, not after earlier inputs have already uploaded (codex VOxtu0RZ-B4).
         foreach ($this->inputs as $input) {
-            if ($input->kind !== FileInput::KIND_UPLOAD_ID && $input->kind !== FileInput::KIND_PATH) {
-                throw new GislConfigError(
-                    'FilesRecipe does not yet support resource-stream inputs; use a filesystem path or a pre-uploaded file id.',
-                    reason: 'resource_input_unsupported',
-                );
+            if ($input->kind === FileInput::KIND_RESOURCE) {
+                UploadSource::assertUploadableStream($input->resource);
+            } elseif ($input->kind === FileInput::KIND_PATH) {
+                // Validate existence/readability now (codex VOxtu0RZ-B4 r3) so a
+                // missing path later in the list does not leave earlier inputs
+                // uploaded. `fromPath()` throws GislConfigError on a bad path.
+                UploadSource::fromPath(BuilderInternals::coerceString($input->path));
             }
+            // Lower this input's op chain with a placeholder id to trigger its
+            // per-input validation (media_unknown etc.) before any upload.
+            $preflight = new Recipe($input, null, $this->steps, $this->presetDefaults, $this->scopedPresetDefaults);
+            $preflight->toWorkflowPayload('preflight');
         }
 
-        // 1. Upload EVERY input (verbatim for a pre-uploaded id; uploading a
-        // path otherwise via the byte-counter progress closure).
+        // 1. Upload EVERY input: verbatim for a pre-uploaded id; a path or a
+        // seekable stream resource (VOxtu0RZ-B4) otherwise, via the byte-counter
+        // progress closure.
         $fileIds = [];
         foreach ($this->inputs as $input) {
             // Fail fast between uploads — a deadline that elapses or a caller
@@ -312,7 +321,12 @@ final class FilesRecipe
                         },
                     )
                     : null;
-                $uploadResp = $this->client->uploadFile(BuilderInternals::coerceString($input->path), $uploadOpts);
+                $uploadTarget = BuilderInternals::coerceString($input->path);
+                if ($input->kind === FileInput::KIND_RESOURCE) {
+                    \assert(\is_resource($input->resource));
+                    $uploadTarget = $input->resource;
+                }
+                $uploadResp = $this->client->uploadFile($uploadTarget, $uploadOpts);
                 $fileIds[] = $uploadResp->getFileId() ?? '';
             }
         }

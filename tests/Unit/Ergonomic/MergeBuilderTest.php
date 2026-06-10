@@ -86,6 +86,94 @@ final class MergeBuilderTest extends TestCase
         $this->assertArrayNotHasKey('per_input_options', $mergeJob['inputs'][1]);
     }
 
+    public function test_merge_submit_uploads_seekable_resource_assets(): void
+    {
+        // VOxtu0RZ-B4: Merge::resource() wraps a seekable stream as a merge
+        // asset; each is uploaded just like a path.
+        $streamA = \fopen('php://temp', 'r+b');
+        $streamB = \fopen('php://temp', 'r+b');
+        self::assertNotFalse($streamA);
+        self::assertNotFalse($streamB);
+        \fwrite($streamA, 'aaaa');
+        \fwrite($streamB, 'bbbb');
+
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000e1', 'upload.bin', 'video/mp4', 4),
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000e2', 'upload.bin', 'video/mp4', 4),
+            self::workflowCreatedResponse('01936fb2-0000-7000-8000-0000000000e3'),
+        ], $captured);
+
+        $client = self::makeClient($http);
+        try {
+            $handle = $client
+                ->merge([Merge::resource($streamA), Merge::resource($streamB)], new MergeOptions(mediaKind: 'video'))
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } finally {
+            \fclose($streamA);
+            \fclose($streamB);
+        }
+
+        $this->assertSame('01936fb2-0000-7000-8000-0000000000e3', $handle->workflowId);
+        // 2 distinct resource handles → 2 uploads + 1 workflow create.
+        $this->assertCount(3, $captured);
+        $this->assertStringContainsString('/api/uploads', (string) $captured[0]->getUri());
+        $this->assertStringContainsString('/api/uploads', (string) $captured[1]->getUri());
+        $this->assertStringContainsString('/api/workflows', (string) $captured[2]->getUri());
+        // The stream bytes crossed the wire.
+        $this->assertStringContainsString('aaaa', (string) $captured[0]->getBody());
+        $this->assertStringContainsString('bbbb', (string) $captured[1]->getBody());
+    }
+
+    public function test_merge_dedupes_same_resource_handle_to_single_upload(): void
+    {
+        // Referential identity: the SAME resource referenced twice uploads ONCE
+        // (dedupe by resource id), mirroring the path/handle dedupe contract.
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertNotFalse($stream);
+        \fwrite($stream, 'shared');
+        $asset = Merge::resource($stream);
+
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000f3', 'upload.bin', 'video/mp4', 6),
+            self::workflowCreatedResponse('01936fb2-0000-7000-8000-0000000000f4'),
+        ], $captured);
+
+        $client = self::makeClient($http);
+        try {
+            $client
+                ->merge([$asset, $asset], new MergeOptions(mediaKind: 'video'))
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+        } finally {
+            \fclose($stream);
+        }
+
+        // 1 upload (deduped) + 1 workflow create.
+        $this->assertCount(2, $captured);
+        $this->assertStringContainsString('/api/uploads', (string) $captured[0]->getUri());
+        $this->assertStringContainsString('/api/workflows', (string) $captured[1]->getUri());
+    }
+
+    public function test_merge_missing_path_fails_before_any_upload(): void
+    {
+        // planSequence preflights path existence before uploadUniqueAssets
+        // (codex VOxtu0RZ-B4 r3), so a missing path uploads nothing.
+        $valid = self::writeTempFile('a');
+        $captured = [];
+        $http = self::stubClient([], $captured);
+        $client = self::makeClient($http);
+        try {
+            $client
+                ->merge([Merge::asset($valid), Merge::asset('/nonexistent/missing.mp4')], new MergeOptions(mediaKind: 'video'))
+                ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+            $this->fail('expected GislConfigError');
+        } catch (GislConfigError $e) {
+            $this->assertStringContainsString('File not found', $e->getMessage());
+        }
+        $this->assertCount(0, $captured, 'no upload may fire when a path preflight fails');
+    }
+
     public function test_sequence_with_clip_emits_per_input_options_on_video(): void
     {
         $pathA = self::writeTempFile('a');
