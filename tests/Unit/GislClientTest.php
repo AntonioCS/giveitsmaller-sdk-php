@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Generated\OpenApi\Model\UploadResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowListResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
@@ -691,9 +692,153 @@ final class GislClientTest extends TestCase
         self::assertSame('application/json', $request->getHeaderLine('Accept'));
     }
 
+    public function testListWorkflowsBuildsQueryAndHydrates(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->workflowListEnvelope(
+                [$this->workflowSummary('01936fb2-0000-7000-8000-000000000001')],
+                nextCursor: 'cursor_next',
+                isTruncated: true,
+            )),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $page = $client->listWorkflows('cursor_abc', 50);
+
+        self::assertInstanceOf(WorkflowListResponse::class, $page);
+        self::assertCount(1, $page->getWorkflows() ?? []);
+        self::assertSame('cursor_next', $page->getNextCursor());
+        self::assertTrue($page->getIsTruncated());
+
+        self::assertCount(1, $captured);
+        $uri = $captured[0]->getUri();
+        self::assertSame('GET', $captured[0]->getMethod());
+        self::assertSame('/api/workflows', $uri->getPath());
+        // Query carries cursor + limit.
+        \parse_str($uri->getQuery(), $q);
+        self::assertSame('cursor_abc', $q['cursor']);
+        self::assertSame('50', $q['limit']);
+    }
+
+    public function testListWorkflowsOmitsEmptyQueryOnFirstPage(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->workflowListEnvelope([], nextCursor: null, isTruncated: false)),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $client->listWorkflows();
+
+        self::assertSame('/api/workflows', $captured[0]->getUri()->getPath());
+        self::assertSame('', $captured[0]->getUri()->getQuery(), 'no cursor/limit → bare path');
+    }
+
+    public function testWorkflowsAutoPaginatesAcrossPages(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            // Page 1: truncated, points at cursor_2.
+            $this->jsonResponse(200, $this->workflowListEnvelope([
+                $this->workflowSummary('01936fb2-0000-7000-8000-0000000000a1'),
+                $this->workflowSummary('01936fb2-0000-7000-8000-0000000000a2'),
+            ], nextCursor: 'cursor_2', isTruncated: true)),
+            // Page 2: final page.
+            $this->jsonResponse(200, $this->workflowListEnvelope([
+                $this->workflowSummary('01936fb2-0000-7000-8000-0000000000a3'),
+            ], nextCursor: null, isTruncated: false)),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $ids = [];
+        foreach ($client->workflows(2) as $summary) {
+            $ids[] = $summary->getWorkflowId();
+        }
+
+        // All 3 rows yielded across the 2 pages, in order.
+        self::assertSame([
+            '01936fb2-0000-7000-8000-0000000000a1',
+            '01936fb2-0000-7000-8000-0000000000a2',
+            '01936fb2-0000-7000-8000-0000000000a3',
+        ], $ids);
+
+        // Exactly 2 requests: first with no cursor (limit only), second with cursor_2.
+        self::assertCount(2, $captured);
+        \parse_str($captured[0]->getUri()->getQuery(), $q1);
+        self::assertArrayNotHasKey('cursor', $q1, 'first page carries no cursor');
+        self::assertSame('2', $q1['limit']);
+        \parse_str($captured[1]->getUri()->getQuery(), $q2);
+        self::assertSame('cursor_2', $q2['cursor']);
+        self::assertSame('2', $q2['limit']);
+    }
+
+    public function testWorkflowsStopsOnNonAdvancingCursor(): void
+    {
+        // A misbehaving server that reports is_truncated:true but repeats the
+        // SAME cursor must NOT loop forever — only 2 requests fire (the stub
+        // queue has exactly 2; a 3rd would throw "queue exhausted").
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, $this->workflowListEnvelope(
+                [$this->workflowSummary('01936fb2-0000-7000-8000-0000000000b1')],
+                nextCursor: 'stuck',
+                isTruncated: true,
+            )),
+            $this->jsonResponse(200, $this->workflowListEnvelope(
+                [$this->workflowSummary('01936fb2-0000-7000-8000-0000000000b2')],
+                nextCursor: 'stuck', // same cursor it was just called with → stop
+                isTruncated: true,
+            )),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $ids = [];
+        foreach ($client->workflows() as $summary) {
+            $ids[] = $summary->getWorkflowId();
+        }
+
+        self::assertSame([
+            '01936fb2-0000-7000-8000-0000000000b1',
+            '01936fb2-0000-7000-8000-0000000000b2',
+        ], $ids);
+        self::assertCount(2, $captured, 'non-advancing cursor stops the walk (no infinite loop)');
+    }
+
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function workflowSummary(string $workflowId): array
+    {
+        return [
+            'workflow_id' => $workflowId,
+            'status' => 'completed',
+            'created_at' => '2026-06-10T11:00:00Z',
+            'jobs' => [
+                ['job_id' => '01936fb3-0001-7000-8000-000000000001', 'ref' => 'op', 'job_type' => 'image', 'status' => 'completed'],
+            ],
+        ];
+    }
+
+    /**
+     * @param list<array<string, mixed>> $summaries
+     * @return array<string, mixed>
+     */
+    private function workflowListEnvelope(array $summaries, ?string $nextCursor, bool $isTruncated): array
+    {
+        return [
+            'success' => true,
+            'data' => [
+                'workflows' => $summaries,
+                'next_cursor' => $nextCursor,
+                'is_truncated' => $isTruncated,
+            ],
+        ];
+    }
 
     private function writeTempFile(string $contents): string
     {

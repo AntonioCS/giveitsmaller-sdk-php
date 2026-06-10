@@ -35,8 +35,10 @@ use Gisl\Generated\OpenApi\Model\ProbePendingResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowExpiredResponse;
 use Gisl\Generated\OpenApi\Model\UploadDurationExceedsTierResponse;
 use Gisl\Generated\OpenApi\Model\UploadSizeExceedsTierResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowListResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowResumeResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
+use Gisl\Generated\OpenApi\Model\WorkflowSummary;
 use Gisl\Generated\OpenApi\ObjectSerializer;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
@@ -1418,6 +1420,73 @@ class GislClient
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
         return $this->hydrate(WorkflowStatusResponse::class, $data);
+    }
+
+    /**
+     * List the caller's workflows — a cursor-paginated, user-scoped summary
+     * list, most-recent-first. Each row is a lightweight {@see WorkflowSummary}
+     * (id / status / created_at + per-job type+status + a deliverable-output
+     * count); it does NOT inline per-op `result_metadata` or output details —
+     * drill in via {@see getWorkflowStatus()} / {@see getWorkflowDownloads()}.
+     *
+     * Auth is REQUIRED (the list is user-scoped; an anonymous caller gets a
+     * 401 → {@see \Gisl\Sdk\Errors\GislAuthError}). Walk pages by passing each
+     * response's `nextCursor` as the next call's `$cursor` until `isTruncated`
+     * is false, or use {@see workflows()} to auto-paginate. Mirrors
+     * `packages/typescript/src/client.ts::listWorkflows`.
+     *
+     * @param string|null $cursor Opaque cursor from a prior page's `nextCursor`
+     *                            (omit for the first page — treat as opaque).
+     * @param int|null    $limit  Rows per page (1-100; server default 20).
+     */
+    public function listWorkflows(?string $cursor = null, ?int $limit = null): WorkflowListResponse
+    {
+        $params = [];
+        if ($cursor !== null && $cursor !== '') {
+            $params['cursor'] = $cursor;
+        }
+        if ($limit !== null) {
+            $params['limit'] = (string) $limit;
+        }
+        $query = $params === [] ? '' : '?' . \http_build_query($params);
+
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: '/api/workflows' . $query,
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(WorkflowListResponse::class, $data);
+    }
+
+    /**
+     * Auto-paginating iterator over ALL of the caller's workflows, yielding
+     * each {@see WorkflowSummary} most-recent-first across page boundaries —
+     * the ergonomic companion to {@see listWorkflows()}. Walks `nextCursor`
+     * until the server reports `isTruncated: false`. Mirrors the TS
+     * `workflows()` async generator.
+     *
+     * @param int|null $limit Page-size hint passed to each underlying request.
+     * @return \Generator<int, WorkflowSummary>
+     */
+    public function workflows(?int $limit = null): \Generator
+    {
+        $cursor = null;
+        for (;;) {
+            $page = $this->listWorkflows($cursor, $limit);
+            foreach ($page->getWorkflows() ?? [] as $summary) {
+                yield $summary;
+            }
+            $next = $page->getNextCursor();
+            // Stop on a final page, an empty cursor, OR a non-advancing cursor
+            // — a server that repeats the same cursor on a truncated page would
+            // otherwise loop forever, refetching + re-yielding the same rows.
+            if ($page->getIsTruncated() !== true || $next === null || $next === '' || $next === $cursor) {
+                return;
+            }
+            $cursor = $next;
+        }
     }
 
     /**
