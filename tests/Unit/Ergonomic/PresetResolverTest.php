@@ -51,11 +51,10 @@ final class PresetResolverTest extends TestCase
         $this->assertSame('Size', $ro->preset);
         // Stable cell values from the generated PRESETS image_compress/Size cell.
         $this->assertSame(65, $out['wireOptions']['quality']);
-        $this->assertTrue($out['wireOptions']['auto_orient']);
         $this->assertSame('lossy', $out['wireOptions']['mode']);
         // Every shipped field is attributed to sdkDefault (wire names, sorted).
         $this->assertSame(
-            ['auto_orient', 'icc_profile', 'metadata', 'mode', 'output_format', 'progressive', 'quality'],
+            ['icc_profile', 'metadata', 'mode', 'output_format', 'progressive', 'quality'],
             $ro->sources->sdkDefault,
         );
         $this->assertSame([], $ro->sources->explicit);
@@ -205,11 +204,11 @@ final class PresetResolverTest extends TestCase
 
     public function testPresetConfigHashSortsKeysDeterministically(): void
     {
-        // autoOrient + quality, regardless of insertion order, hash to the
+        // progressive + quality, regardless of insertion order, hash to the
         // same value (recursive key-sort, camelCase record).
-        $out = PresetResolver::resolveCompress('image', null, null, ['quality' => 70, 'autoOrient' => true], null, []);
+        $out = PresetResolver::resolveCompress('image', null, null, ['quality' => 70, 'progressive' => true], null, []);
         $this->assertSame(
-            'sha256:1c312c5c010b9da62ccc1050776179b736dab241d839fe827f85e5f745abe9e4',
+            'sha256:26aa8ab195e269b4dde191a94f5018e50fc84493251074c2974f90e88b93e40b',
             $out['resolvedOptions']->presetConfigHash,
         );
     }

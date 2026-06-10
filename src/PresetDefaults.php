@@ -143,12 +143,8 @@ final class PresetDefaults
                 => new ImageCompressPresetOptions(
                     mode: $child->mode ?? $parent->mode,
                     quality: $child->quality ?? $parent->quality,
-                    width: $child->width ?? $parent->width,
-                    height: $child->height ?? $parent->height,
-                    fit: $child->fit ?? $parent->fit,
                     metadata: $child->metadata ?? $parent->metadata,
                     iccProfile: $child->iccProfile ?? $parent->iccProfile,
-                    autoOrient: $child->autoOrient ?? $parent->autoOrient,
                     progressive: $child->progressive ?? $parent->progressive,
                     outputFormat: $child->outputFormat ?? $parent->outputFormat,
                 ),

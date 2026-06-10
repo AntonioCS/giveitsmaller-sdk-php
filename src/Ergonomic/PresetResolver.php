@@ -94,7 +94,6 @@ final class PresetResolver
      */
     private const WIRE_ALIASES = [
         'iccProfile' => 'icc_profile',
-        'autoOrient' => 'auto_orient',
         'outputFormat' => 'output_format',
         'sampleRate' => 'sample_rate',
         'audioCodec' => 'audio_codec',
@@ -126,7 +125,7 @@ final class PresetResolver
      * @var array<string, list<string>>
      */
     private const MEDIA_FIELDS = [
-        'image' => ['mode', 'quality', 'width', 'height', 'fit', 'metadata', 'iccProfile', 'autoOrient', 'progressive', 'outputFormat'],
+        'image' => ['mode', 'quality', 'metadata', 'iccProfile', 'progressive', 'outputFormat'],
         'audio' => ['bitrate', 'channels', 'sampleRate', 'normalize'],
         'video' => ['codec', 'targetSize', 'crf', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audioCodec', 'audioBitrate'],
         'document_pdf' => ['profile', 'colorspace', 'flattenForms'],
@@ -142,7 +141,7 @@ final class PresetResolver
      * @var array<string, list<string>>
      */
     private const KNOWN_WIRE_FIELDS = [
-        'image' => ['mode', 'quality', 'width', 'height', 'fit', 'metadata', 'icc_profile', 'auto_orient', 'progressive', 'output_format'],
+        'image' => ['mode', 'quality', 'metadata', 'icc_profile', 'progressive', 'output_format'],
         'audio' => ['bitrate', 'channels', 'sample_rate', 'normalize', 'trim_start', 'trim_end'],
         'video' => ['codec', 'encoding_mode', 'crf', 'target_size_bytes', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audio_codec', 'audio_bitrate', 'trim_start', 'trim_end'],
         'document_pdf' => ['profile', 'colorspace', 'pages', 'flatten_forms'],

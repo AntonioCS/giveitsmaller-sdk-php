@@ -65,7 +65,7 @@ final class PresetCompressOptionsTest extends TestCase
     {
         $this->assertNull(PresetCellTranslator::enum([], 'mode', ImageMode::class));
         $this->assertNull(PresetCellTranslator::int([], 'quality'));
-        $this->assertNull(PresetCellTranslator::bool([], 'autoOrient'));
+        $this->assertNull(PresetCellTranslator::bool([], 'progressive'));
     }
 
     public function testEnumReaderThrowsOnNonStringCellValue(): void
@@ -86,7 +86,7 @@ final class PresetCompressOptionsTest extends TestCase
     public function testBoolReaderThrowsOnNonBool(): void
     {
         $this->expectException(\LogicException::class);
-        PresetCellTranslator::bool(['autoOrient' => 1], 'autoOrient');
+        PresetCellTranslator::bool(['progressive' => 1], 'progressive');
     }
 
     // -----------------------------------------------------------------
@@ -99,7 +99,7 @@ final class PresetCompressOptionsTest extends TestCase
         $this->assertSame(ImageMode::Lossy, $dto->mode);
         $this->assertSame(75, $dto->quality);
         // Unset fields stay null (sparse delta).
-        $this->assertNull($dto->width);
+        $this->assertNull($dto->metadata);
         $this->assertNull($dto->outputFormat);
     }
 
@@ -114,11 +114,7 @@ final class PresetCompressOptionsTest extends TestCase
         $this->assertSame(65, $dto->quality);
         $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
         $this->assertSame(IccProfilePolicy::Strip, $dto->iccProfile);
-        $this->assertTrue($dto->autoOrient);
         $this->assertSame(ImageFormat::Smallest, $dto->outputFormat);
-        // width/height/fit are sparse (absent from the cell) → null.
-        $this->assertNull($dto->width);
-        $this->assertNull($dto->fit);
     }
 
     public function testImageShippedDefaultsForQualityOmitsQuality(): void
@@ -213,8 +209,8 @@ final class PresetCompressOptionsTest extends TestCase
                 $this->assertSame($cell['outputFormat'], $dto->outputFormat->name);
             }
             // A field absent from the cell must be null on the DTO.
-            if (!\array_key_exists('width', $cell)) {
-                $this->assertNull($dto->width);
+            if (!\array_key_exists('quality', $cell)) {
+                $this->assertNull($dto->quality);
             }
         }
     }
