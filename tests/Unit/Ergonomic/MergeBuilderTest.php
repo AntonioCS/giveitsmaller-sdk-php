@@ -667,6 +667,35 @@ final class MergeBuilderTest extends TestCase
         $this->assertSame([], $captured, 'no uploads should fire before targetSize validation');
     }
 
+    public function test_garbage_target_size_string_is_ignored_on_non_video_merge(): void
+    {
+        // DCJUvvfA (codex #176 r3) — targetSize → target_size_bytes is video-only
+        // (wireMergeOptions drops it for image/audio). The pre-upload validation
+        // is gated to video, so a garbage targetSize on an image merge must NOT
+        // throw: the field never crosses the wire, so rejecting over its string
+        // form would fail the workflow on a value the SDK silently discards.
+        $pathA = self::writeTempFile('a');
+        $pathB = self::writeTempFile('b');
+
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000a1', 'a.png', 'image/png', 1),
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000b2', 'b.png', 'image/png', 1),
+            self::workflowCreatedResponse('01936fb2-0000-7000-8000-000000000a0f'),
+        ], $captured);
+        $client = self::makeClient($http);
+
+        $client->merge(
+            [$pathA, $pathB],
+            new MergeOptions(mediaKind: 'image', output: 'video', targetSize: 'garbage'),
+        )->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+
+        $body = self::decodeJson($captured[2]);
+        $opts = $this->assertMergeShapeAndReturnMergeJob($body, 2)['operations'][0]['options'];
+        $this->assertArrayNotHasKey('target_size_bytes', $opts);
+        $this->assertArrayNotHasKey('encoding_mode', $opts);
+    }
+
     public function test_two_handle_assets_with_same_file_id_dedupe(): void
     {
         // Twin of the PathAsset-identity test, for HandleAsset. Two

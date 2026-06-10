@@ -243,7 +243,15 @@ final class MergeBuilder
         // a93bd61d39a9 — parseSizeString used to fire from buildPayload()
         // AFTER uploadUniqueAssets, so a `targetSize: 'garbage'` typo would
         // burn N uploads before the throw.
-        if ($this->opOptions->targetSize !== null && \is_string($this->opOptions->targetSize)) {
+        //
+        // Gated to video (codex #176 r3 DCJUvvfA) — `target_size_bytes` only
+        // crosses the wire for video merges (see wireMergeOptions); for
+        // image/audio the field is silently dropped, so validating its string
+        // form would reject a merge over a value that never leaves the SDK.
+        if ($mediaKind === 'video'
+            && $this->opOptions->targetSize !== null
+            && \is_string($this->opOptions->targetSize)
+        ) {
             self::parseSizeString($this->opOptions->targetSize);
         }
 
