@@ -288,6 +288,35 @@ final class RunResult
     }
 
     /**
+     * True when a terminal status describes a fluent `files([...])->archive(...)`
+     * bundle — at least one job ref `archive` and every OTHER job ref is
+     * `src_{i}` (the ids the {@see \Gisl\Sdk\FileFirst\ArchivedRecipe} lowering
+     * assigns). Lets the {@see \Gisl\Sdk\Ergonomic\Handle} project ONLY the
+     * archive output (filtering the `src_*` passthrough plumbing) even after a
+     * `client->workflow(id)` reattach. Mirrors the TS `isArchiveStatus`.
+     */
+    public static function isArchiveStatus(WorkflowStatusResponse $finalStatus): bool
+    {
+        $jobs = $finalStatus->getJobs() ?? [];
+        if ($jobs === []) {
+            return false;
+        }
+        $hasArchive = false;
+        foreach ($jobs as $job) {
+            $ref = BuilderInternals::coerceString($job->getRef());
+            if ($ref === 'archive') {
+                $hasArchive = true;
+                continue;
+            }
+            if (\preg_match('/^src_\d+$/', $ref) !== 1) {
+                return false;
+            }
+        }
+
+        return $hasArchive;
+    }
+
+    /**
      * Address a succeeded input by the `key:` given to `file()`. Duplicate
      * keys are not valid input — the producer enforces key uniqueness (a
      * later ticket); the first match is returned.

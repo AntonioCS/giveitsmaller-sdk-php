@@ -198,6 +198,24 @@ final class Handle
             );
         }
 
+        // A fluent `files([...])->archive(...)` bundle — project ONLY the
+        // archive output, filtering the `src_*` passthrough plumbing (codex c1
+        // mirror for archive).
+        if (RunResult::isArchiveStatus($finalStatus)) {
+            $archiveDownloads = \array_values(\array_filter(
+                $jobDownloads,
+                static fn ($d): bool => BuilderInternals::coerceString($d->getRef()) === 'archive',
+            ));
+
+            return RunResult::fromTerminalDownloads(
+                workflowId: $this->workflowId,
+                finalStatus: $finalStatus,
+                jobDownloads: $archiveDownloads,
+                key: null,
+                downloader: $downloader,
+            );
+        }
+
         return RunResult::fromTerminalDownloads(
             workflowId: $this->workflowId,
             finalStatus: $finalStatus,
