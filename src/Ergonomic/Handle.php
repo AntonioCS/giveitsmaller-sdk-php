@@ -178,6 +178,26 @@ final class Handle
             );
         }
 
+        // A fluent `files([...])->merge(...)` combine — project ONLY the merged
+        // output, filtering the `src_*` passthrough plumbing (which re-exposes
+        // the raw inputs). Matches MergedRecipe::run()'s `ref === 'merge'` filter
+        // so a submitted/reattached merge handle never surfaces the input
+        // artifacts alongside the combined output (codex c1).
+        if (RunResult::isMergeStatus($finalStatus)) {
+            $mergeDownloads = \array_values(\array_filter(
+                $jobDownloads,
+                static fn ($d): bool => BuilderInternals::coerceString($d->getRef()) === 'merge',
+            ));
+
+            return RunResult::fromTerminalDownloads(
+                workflowId: $this->workflowId,
+                finalStatus: $finalStatus,
+                jobDownloads: $mergeDownloads,
+                key: null,
+                downloader: $downloader,
+            );
+        }
+
         return RunResult::fromTerminalDownloads(
             workflowId: $this->workflowId,
             finalStatus: $finalStatus,

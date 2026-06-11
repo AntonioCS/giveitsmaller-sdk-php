@@ -551,7 +551,14 @@ final class MergeBuilder
      * @param "video"|"audio"|"image" $mediaKind
      * @return array<string, mixed>
      */
-    private static function wireMergeOptions(MergeOptions $opts, string $mediaKind): array
+    /**
+     * @internal Shared with {@see \Gisl\Sdk\FileFirst\MergedRecipe} so the fluent
+     *           `files()->merge()` lowers merge-level options identically to the
+     *           operation-first `client->merge()`. Pure function — no state.
+     *
+     * @return array<string, mixed>
+     */
+    public static function wireMergeOptions(MergeOptions $opts, string $mediaKind): array
     {
         // Per-media wire allowlists (mirrors generated/typescript/operations/merge.ts):
         //   video: output_type, transition, crossfade_duration, normalize_audio,

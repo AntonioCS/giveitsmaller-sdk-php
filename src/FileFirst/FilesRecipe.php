@@ -8,6 +8,7 @@ use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
+use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Errors\GislConfigError;
@@ -93,6 +94,36 @@ final class FilesRecipe
     public function textWatermark(string $text): self
     {
         return $this->withRecipe($this->baseRecipe()->textWatermark($text));
+    }
+
+    /**
+     * Combine the inputs into ONE output (N→1), in array order (FF3b). Returns a
+     * single-output {@see MergedRecipe} you chain further ops on
+     * (`files([...])->merge()->compress()`). Reuses the operation-first
+     * {@see \Gisl\Sdk\Ergonomic\MergeOptions} for the merge-level options, so the
+     * wire shape matches `client->merge([...], $options)`.
+     *
+     * merge() must be the FIRST op on `files([...])` — per-file ops before a
+     * combine (compress-each-then-merge) are a separate follow-up.
+     */
+    public function merge(?MergeOptions $options = null): MergedRecipe
+    {
+        if ($this->steps !== []) {
+            throw new GislConfigError(
+                'merge() must be the first operation on files([...]); applying per-file ops before a combine '
+                . '(compress-each-then-merge) is not yet supported — call merge() directly, then chain ops on the merged output.',
+                reason: 'pre_merge_ops_unsupported',
+            );
+        }
+
+        return new MergedRecipe(
+            $this->inputs,
+            $options ?? new MergeOptions(),
+            [],
+            $this->presetDefaults,
+            $this->scopedPresetDefaults,
+            $this->client,
+        );
     }
 
     /** The number of inputs in this fan-out (introspection / tests). */

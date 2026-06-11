@@ -257,6 +257,37 @@ final class RunResult
     }
 
     /**
+     * True when a terminal status describes a fluent `files([...])->merge(...)`
+     * combine — at least one job ref `merge` and every OTHER job ref is
+     * `src_{i}` (the ids the {@see \Gisl\Sdk\FileFirst\MergedRecipe} lowering
+     * assigns). Lets the {@see \Gisl\Sdk\Ergonomic\Handle} project ONLY the
+     * merged output (filtering the `src_*` passthrough plumbing) even after a
+     * `client->workflow(id)` reattach. Mutually exclusive with
+     * {@see isFanoutStatus} (a fan-out's refs are all `file-{i}`). Mirrors the
+     * TS `isMergeStatus` in `file-first.ts`.
+     */
+    public static function isMergeStatus(WorkflowStatusResponse $finalStatus): bool
+    {
+        $jobs = $finalStatus->getJobs() ?? [];
+        if ($jobs === []) {
+            return false;
+        }
+        $hasMerge = false;
+        foreach ($jobs as $job) {
+            $ref = BuilderInternals::coerceString($job->getRef());
+            if ($ref === 'merge') {
+                $hasMerge = true;
+                continue;
+            }
+            if (\preg_match('/^src_\d+$/', $ref) !== 1) {
+                return false;
+            }
+        }
+
+        return $hasMerge;
+    }
+
+    /**
      * Address a succeeded input by the `key:` given to `file()`. Duplicate
      * keys are not valid input — the producer enforces key uniqueness (a
      * later ticket); the first match is returned.

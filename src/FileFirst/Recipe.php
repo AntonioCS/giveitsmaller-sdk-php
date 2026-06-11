@@ -438,7 +438,8 @@ final class Recipe
      * operation-first builder's coercion so a string value validates the same
      * way and fails early with the same {@see GislConfigError}.
      */
-    private static function coerceOptimize(OptimizeFor|string|null $raw): ?OptimizeFor
+    /** @internal Shared with {@see MergedRecipe} for post-combine `compress()`. */
+    public static function coerceOptimize(OptimizeFor|string|null $raw): ?OptimizeFor
     {
         if ($raw === null || $raw instanceof OptimizeFor) {
             return $raw;
