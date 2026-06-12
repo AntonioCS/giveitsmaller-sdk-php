@@ -194,7 +194,13 @@ class GislClient
         }
 
         $size = $source->size();
-        $fileName = $source->name();
+        // fFwaKsN5: an explicit UploadOptions filename (e.g. a file-first resource
+        // input's name hint) overrides the source-derived name — a nameless
+        // stream defaults to `upload.bin`, which carries no extension for the
+        // server's media inference. An empty string falls back to the source name.
+        $fileName = (\is_string($options?->filename) && $options->filename !== '')
+            ? $options->filename
+            : $source->name();
 
         if (\is_string($options?->resumeUploadId) && $options->resumeUploadId !== '') {
             // Resume re-walks a durable multipart session — it requires a
@@ -3155,6 +3161,33 @@ class GislClient
         }
     }
 
+    /**
+     * Reject a multipart-part filename that would break the Content-Disposition
+     * header OR violate the upload contract. Authoritative wire-assembly guard:
+     * {@see UploadOptions} validates `$filename` at construction, but the
+     * property is public + mutable, so this re-checks the actual value the
+     * moment it is written into the form-data header — bypass-proof regardless
+     * of post-construction mutation (fFwaKsN5, codex r2). Rejects `"`/CR/LF/NUL
+     * (header injection) PLUS path separators + over-255-bytes (the upload
+     * contract's `^[^/\\]+$`, max 255). A path input's basename is always bare
+     * and short, so only a hostile filename override is affected.
+     */
+    private function assertFilenameHeaderSafe(string $fileName): void
+    {
+        if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
+            throw new GislConfigError(
+                'Filename contains illegal characters for multipart Content-Disposition '
+                . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
+            );
+        }
+        if (\str_contains($fileName, '/') || \str_contains($fileName, '\\') || \strlen($fileName) > 255) {
+            throw new GislConfigError(
+                'Filename must be a bare name with no path separators (`/` or `\\`) '
+                . 'and at most 255 bytes: ' . \var_export($fileName, true),
+            );
+        }
+    }
+
     private function buildSingleShotMultipartBody(
         string $boundary,
         UploadSource $source,
@@ -3166,12 +3199,7 @@ class GislClient
         // would either break the header or inject body content. Reject
         // loudly rather than silently sanitising — bad filenames are bugs in
         // the caller's data pipeline that should surface clearly.
-        if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
-            throw new GislConfigError(
-                'Filename contains illegal characters for multipart Content-Disposition '
-                . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
-            );
-        }
+        $this->assertFilenameHeaderSafe($fileName);
         $this->assertContentTypeHeaderSafe($contentType);
 
         $contents = $source->readAll();
@@ -3210,12 +3238,7 @@ class GislClient
         ?\Gisl\Generated\OpenApi\Model\MultipartInitiateRequestMetadataHint $metadataHint,
         ?string $contentType = null,
     ): \Psr\Http\Message\StreamInterface {
-        if (\preg_match('/["\r\n\x00]/', $fileName) === 1) {
-            throw new GislConfigError(
-                'Filename contains illegal characters for multipart Content-Disposition '
-                . '(no `"`, CR, LF, or NUL allowed): ' . \var_export($fileName, true),
-            );
-        }
+        $this->assertFilenameHeaderSafe($fileName);
         $this->assertContentTypeHeaderSafe($contentType);
 
         $firstChunkBytes = $this->readChunk($source, 0, $firstChunkSize);

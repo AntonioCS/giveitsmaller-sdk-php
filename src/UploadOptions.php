@@ -55,6 +55,11 @@ final class UploadOptions
      *   null the SDK sends `application/octet-stream` (RFC 7578 §4.4
      *   unknown-binary fallback). Applies to both the single-shot upload and
      *   the multipart `/initiate` first-chunk part.
+     * @param string|null $filename
+     *   Caller-overridable filename for the multipart `file` part (fFwaKsN5).
+     *   When null the SDK derives it from the source (a path's basename, or
+     *   `upload.bin` for a nameless stream). Lets a file-first resource input
+     *   carry its name hint through to the upload.
      */
     public function __construct(
         public mixed $onProgress = null,
@@ -62,17 +67,55 @@ final class UploadOptions
         public ?string $resumeUploadId = null,
         public mixed $onCheckpoint = null,
         public ?string $contentType = null,
+        public ?string $filename = null,
     ) {
-        // The content type is concatenated verbatim into the raw multipart
-        // `Content-Type` header bytes in GislClient's body builders. Reject CR,
-        // LF, or NUL here — the single chokepoint for the value — to prevent
-        // header/body injection into the multipart wire form. Mirrors the
-        // filename guard in buildSingleShotMultipartBody/buildMultipartInitiateBody.
+        // Validate the wire-bound hints at construction (fail-fast). The same
+        // check is the pre-upload chokepoint for file-first resource inputs
+        // (Recipe/FilesRecipe/MergedRecipe/ArchivedRecipe call it BEFORE any
+        // upload so a bad hint on a later fan-out input can't waste earlier
+        // uploads), and the authoritative wire-assembly guards in GislClient's
+        // body builders re-check the actual value (bypass-proof vs. mutation).
+        self::assertHintsValid($contentType, $filename);
+    }
+
+    /**
+     * Validate the multipart `contentType` / `filename` hints (fFwaKsN5). Both
+     * are concatenated into raw multipart header bytes, so reject CR/LF/NUL
+     * (header/body injection); the filename additionally must be a BARE name —
+     * the upload contract's `^[^/\\]+$`, max 255 bytes — so reject path
+     * separators + over-length. An empty filename is the "no override" sentinel
+     * (uploadFile falls back to the source name), so it is not rejected.
+     *
+     * @internal Shared by the ctor + the file-first pre-upload preflights.
+     */
+    public static function assertHintsValid(?string $contentType, ?string $filename): void
+    {
         if ($contentType !== null && \preg_match('/[\r\n\x00]/', $contentType) === 1) {
             throw new GislConfigError(
                 'UploadOptions contentType contains illegal characters for a multipart '
                 . 'Content-Type header (no CR, LF, or NUL allowed): '
                 . \var_export($contentType, true),
+            );
+        }
+        // Reject `"` too (codex r3): the filename is written as a quoted-string
+        // in the multipart Content-Disposition header, so a `"` breaks it. This
+        // keeps the preflight in lock-step with the authoritative wire guard
+        // GislClient::assertFilenameHeaderSafe() — a `"`-bearing name must NOT
+        // pass the fan-out preflight only to fail at body assembly after earlier
+        // inputs have already uploaded.
+        if ($filename !== null && \preg_match('/["\r\n\x00]/', $filename) === 1) {
+            throw new GislConfigError(
+                'UploadOptions filename contains illegal characters for a multipart '
+                . 'Content-Disposition header (no `"`, CR, LF, or NUL allowed): '
+                . \var_export($filename, true),
+            );
+        }
+        if ($filename !== null && $filename !== ''
+            && (\str_contains($filename, '/') || \str_contains($filename, '\\') || \strlen($filename) > 255)
+        ) {
+            throw new GislConfigError(
+                'UploadOptions filename must be a bare filename with no path separators '
+                . "('/' or '\\') and at most 255 bytes: " . \var_export($filename, true),
             );
         }
     }

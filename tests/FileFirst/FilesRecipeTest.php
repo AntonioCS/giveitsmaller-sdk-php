@@ -405,6 +405,32 @@ final class FilesRecipeTest extends TestCase
     }
 
     #[Test]
+    public function run_bad_resource_filename_hint_after_a_valid_input_fails_before_any_upload(): void
+    {
+        // fFwaKsN5 (codex r2): a resource's filename/contentType hints are
+        // validated in the pre-upload preflight, so a bad hint listed AFTER a
+        // valid input does NOT upload the earlier input first.
+        $good = \fopen('php://temp', 'r+b');
+        $bad = \fopen('php://temp', 'r+b');
+        self::assertIsResource($good);
+        self::assertIsResource($bad);
+        $http = $this->stubClient([]);   // empty — any request means an input uploaded
+        $client = $this->makeClient($http);
+        try {
+            $client->files([
+                FileInput::resource($good, filename: 'ok.jpg'),
+                FileInput::resource($bad, filename: 'dir/evil.jpg'),   // path separator → invalid
+            ])->compress()->run();
+            self::fail('expected GislConfigError before any upload');
+        } catch (GislConfigError $e) {
+            self::assertStringContainsString('bare filename', $e->getMessage());
+        } finally {
+            \fclose($good);
+            \fclose($bad);
+        }
+    }
+
+    #[Test]
     public function file_input_resource_rejects_non_resource(): void
     {
         // FileInput::resource() validates its argument (mirrors Merge::resource())

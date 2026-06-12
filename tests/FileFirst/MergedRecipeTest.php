@@ -87,6 +87,38 @@ final class MergedRecipeTest extends TestCase
         self::assertSame('https://example.com/cb', $payload->callbackUrl);
     }
 
+    public function test_merge_infers_audio_media_from_a_resource_content_type_hint(): void
+    {
+        // fFwaKsN5 (codex r1): merge media inference honours a resource's
+        // contentType hint (MIME-first), so gap_duration (AUDIO-only on the wire)
+        // survives wireMergeOptions instead of being dropped under the default
+        // video kind. Mirrors the TS Blob branch of MergedRecipe.inferMediaKind.
+        $s0 = \fopen('php://temp', 'r+b');
+        $s1 = \fopen('php://temp', 'r+b');
+        self::assertIsResource($s0);
+        self::assertIsResource($s1);
+        try {
+            $merged = new MergedRecipe(
+                [
+                    FileInput::resource($s0, contentType: 'audio/mpeg'),
+                    FileInput::resource($s1, contentType: 'audio/mpeg'),
+                ],
+                new MergeOptions(gapDuration: 1.5),
+            );
+            $payload = $merged->toWorkflowPayload(['f0', 'f1'], null);
+            $opts = $payload->jobs[2]->operations[0]->options;
+            self::assertNotNull($opts);
+            self::assertSame(
+                1.5,
+                $opts['gap_duration'] ?? null,
+                'audio inferred from the contentType hint → the audio-only gap_duration is kept',
+            );
+        } finally {
+            \fclose($s0);
+            \fclose($s1);
+        }
+    }
+
     public function test_merge_must_be_the_first_op_on_files(): void
     {
         // files([...])->compress()->merge() is rejected — per-file ops before a

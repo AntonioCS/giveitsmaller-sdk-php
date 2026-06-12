@@ -236,6 +236,44 @@ final class RecipeRunTest extends TestCase
     }
 
     #[Test]
+    public function a_resource_input_carries_its_filename_and_content_type_to_the_upload(): void
+    {
+        // fFwaKsN5: a file-first resource input's filename/contentType hints flow
+        // into the multipart upload — the server receives a real name + Content-
+        // Type (a nameless stream would otherwise upload as `upload.bin`), and
+        // compress(optimize:) resolves the image preset from the hint instead of
+        // failing media_unknown.
+        $captured = [];
+        $http = $this->stubClient([
+            $this->uploadResponse(),
+            $this->createResponse(),
+            $this->sseResponse(self::TERMINAL_SSE),
+            $this->statusResponse('completed'),
+            $this->downloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        \fwrite($stream, \str_repeat('x', 2048));
+        \rewind($stream);
+        try {
+            $result = $this->recipe($client, FileInput::resource($stream, filename: 'photo.jpg', contentType: 'image/jpeg'))
+                ->compress(OptimizeFor::Balanced)
+                ->run();
+        } finally {
+            \fclose($stream);
+        }
+
+        self::assertSame('completed', $result->state);
+        // The upload is the FIRST captured request — assert the multipart `file`
+        // part carries the hinted filename + Content-Type.
+        $uploadBody = (string) $captured[0]->getBody();
+        self::assertStringContainsString('filename="photo.jpg"', $uploadBody);
+        self::assertStringContainsString('Content-Type: image/jpeg', $uploadBody);
+    }
+
+    #[Test]
     public function upload_id_arm_makes_no_upload_call_and_uses_the_id_verbatim(): void
     {
         $captured = [];

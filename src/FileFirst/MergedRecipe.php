@@ -202,6 +202,9 @@ final class MergedRecipe
         foreach ($this->inputs as $input) {
             if ($input->kind === FileInput::KIND_RESOURCE) {
                 UploadSource::assertUploadableStream($input->resource);
+                // fFwaKsN5 (codex r2): validate the resource hints up front so a
+                // bad hint on a later input fails before earlier inputs upload.
+                UploadOptions::assertHintsValid($input->contentType, $input->filename);
             } elseif ($input->kind === FileInput::KIND_PATH) {
                 UploadSource::fromPath(BuilderInternals::coerceString($input->path));
             }
@@ -217,17 +220,23 @@ final class MergedRecipe
                 $fileIds[] = BuilderInternals::coerceString($input->fileId);
                 continue;
             }
-            $uploadOpts = $onProgressClosure !== null
-                ? new UploadOptions(
-                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                        $onProgressClosure(new UploadProgressEvent($u, $t));
-                    },
-                )
+            $onProgressUpload = $onProgressClosure !== null
+                ? static function (int $u, int $t) use ($onProgressClosure): void {
+                    $onProgressClosure(new UploadProgressEvent($u, $t));
+                }
                 : null;
             $uploadTarget = BuilderInternals::coerceString($input->path);
+            $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
             if ($input->kind === FileInput::KIND_RESOURCE) {
                 \assert(\is_resource($input->resource));
                 $uploadTarget = $input->resource;
+                // fFwaKsN5 (codex r1): carry the resource's filename/contentType
+                // hints into the merge input upload too.
+                $uploadOpts = new UploadOptions(
+                    onProgress: $onProgressUpload,
+                    contentType: $input->contentType,
+                    filename: $input->filename,
+                );
             }
             $resp = $client->uploadFile($uploadTarget, $uploadOpts);
             $fileIds[] = $resp->getFileId() ?? '';
@@ -333,8 +342,11 @@ final class MergedRecipe
 
     /**
      * The merged-output media. Honours an explicit
-     * {@see MergeOptions::$mediaKind}; otherwise infers from the first PATH
-     * input's extension (mirrors {@see MergeBuilder}); defaults to video.
+     * {@see MergeOptions::$mediaKind}; otherwise infers from the first input
+     * carrying a media SIGNAL — a path extension, or a resource's `contentType`
+     * (MIME-first) / `filename` hints (fFwaKsN5, mirrors the TS Blob branch);
+     * a hint-less resource / bare upload id carries no signal and is skipped.
+     * Defaults to video.
      *
      * @return "video"|"audio"|"image"
      */
@@ -345,15 +357,45 @@ final class MergedRecipe
         }
         foreach ($this->inputs as $input) {
             if ($input->kind === FileInput::KIND_PATH && \is_string($input->path)) {
-                $lower = \strtolower($input->path);
-                if (\preg_match('/\.(jpe?g|png|webp|avif|gif|heic|tiff?)$/', $lower) === 1) {
-                    return 'image';
-                }
-                if (\preg_match('/\.(mp3|wav|flac|aac|ogg|m4a)$/', $lower) === 1) {
-                    return 'audio';
-                }
-                return 'video';
+                return $this->mergeMediaFromExtension(\strtolower($input->path));
             }
+            if ($input->kind === FileInput::KIND_RESOURCE) {
+                // MIME is canonical (mirrors the TS Blob branch), then the
+                // filename extension. A hint-less resource has no signal — skip
+                // it and keep looking (next input / default video).
+                if ($input->contentType !== null) {
+                    if (\str_starts_with($input->contentType, 'image/')) {
+                        return 'image';
+                    }
+                    if (\str_starts_with($input->contentType, 'audio/')) {
+                        return 'audio';
+                    }
+                    if (\str_starts_with($input->contentType, 'video/')) {
+                        return 'video';
+                    }
+                }
+                if ($input->filename !== null) {
+                    return $this->mergeMediaFromExtension(\strtolower($input->filename));
+                }
+            }
+        }
+        return 'video';
+    }
+
+    /**
+     * Classify a merge input's media (video/audio/image only) from a lowercased
+     * path/filename extension. Shared by the path + resource-filename arms of
+     * {@see inferMediaKind()}.
+     *
+     * @return "video"|"audio"|"image"
+     */
+    private function mergeMediaFromExtension(string $lower): string
+    {
+        if (\preg_match('/\.(jpe?g|png|webp|avif|gif|heic|tiff?)$/', $lower) === 1) {
+            return 'image';
+        }
+        if (\preg_match('/\.(mp3|wav|flac|aac|ogg|m4a)$/', $lower) === 1) {
+            return 'audio';
         }
         return 'video';
     }

@@ -335,17 +335,25 @@ final class Recipe
         if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
             $fileId = BuilderInternals::coerceString($this->input->fileId);
         } else {
-            $uploadOpts = $onProgressClosure !== null
-                ? new UploadOptions(
-                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                        $onProgressClosure(new UploadProgressEvent($u, $t));
-                    },
-                )
+            $onProgressUpload = $onProgressClosure !== null
+                ? static function (int $u, int $t) use ($onProgressClosure): void {
+                    $onProgressClosure(new UploadProgressEvent($u, $t));
+                }
                 : null;
             $uploadTarget = BuilderInternals::coerceString($this->input->path);
+            $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
             if ($this->input->kind === FileInput::KIND_RESOURCE) {
                 \assert(\is_resource($this->input->resource));
                 $uploadTarget = $this->input->resource;
+                // fFwaKsN5: carry the resource's filename/contentType hints to the
+                // upload so a nameless stream uploads with a real name + MIME
+                // (the server's media inference reads them), matching a browser
+                // Blob's .name/.type.
+                $uploadOpts = new UploadOptions(
+                    onProgress: $onProgressUpload,
+                    contentType: $this->input->contentType,
+                    filename: $this->input->filename,
+                );
             }
             $uploadResp = $this->client?->uploadFile($uploadTarget, $uploadOpts);
             $fileId = $uploadResp?->getFileId() ?? '';

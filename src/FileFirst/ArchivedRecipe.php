@@ -162,6 +162,9 @@ final class ArchivedRecipe
         foreach ($this->inputs as $input) {
             if ($input->kind === FileInput::KIND_RESOURCE) {
                 UploadSource::assertUploadableStream($input->resource);
+                // fFwaKsN5 (codex r2): validate the resource hints up front so a
+                // bad hint on a later input fails before earlier inputs upload.
+                UploadOptions::assertHintsValid($input->contentType, $input->filename);
             } elseif ($input->kind === FileInput::KIND_PATH) {
                 UploadSource::fromPath(BuilderInternals::coerceString($input->path));
             }
@@ -177,17 +180,23 @@ final class ArchivedRecipe
                 $fileIds[] = BuilderInternals::coerceString($input->fileId);
                 continue;
             }
-            $uploadOpts = $onProgressClosure !== null
-                ? new UploadOptions(
-                    onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                        $onProgressClosure(new UploadProgressEvent($u, $t));
-                    },
-                )
+            $onProgressUpload = $onProgressClosure !== null
+                ? static function (int $u, int $t) use ($onProgressClosure): void {
+                    $onProgressClosure(new UploadProgressEvent($u, $t));
+                }
                 : null;
             $uploadTarget = BuilderInternals::coerceString($input->path);
+            $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
             if ($input->kind === FileInput::KIND_RESOURCE) {
                 \assert(\is_resource($input->resource));
                 $uploadTarget = $input->resource;
+                // fFwaKsN5 (codex r1): carry the resource's filename/contentType
+                // hints so the bundled file gets a real name (not `upload.bin`).
+                $uploadOpts = new UploadOptions(
+                    onProgress: $onProgressUpload,
+                    contentType: $input->contentType,
+                    filename: $input->filename,
+                );
             }
             $resp = $client->uploadFile($uploadTarget, $uploadOpts);
             $fileIds[] = $resp->getFileId() ?? '';

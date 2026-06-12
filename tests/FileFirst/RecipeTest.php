@@ -250,6 +250,91 @@ final class RecipeTest extends TestCase
         $this->recipe('photo')->compress(OptimizeFor::Size)->toWorkflowPayload(self::FILE_ID);
     }
 
+    /**
+     * @param 'image'|'audio'|'video'|'document_pdf'|'document_office'|'document_odf'|'document_epub' $media
+     * @return array<string, mixed>
+     */
+    private function expectedCompressWire(string $media, OptimizeFor $optimize): array
+    {
+        return PresetResolver::resolveCompress(
+            media: $media,
+            presetDefaults: null,
+            scopedDefaults: null,
+            presetOverrides: null,
+            optimize: $optimize,
+            explicitOptions: [],
+        )['wireOptions'];
+    }
+
+    #[Test]
+    public function compress_with_optimize_on_a_resource_content_type_resolves_the_preset(): void
+    {
+        // fFwaKsN5: a resource carrying a contentType hint infers media (image),
+        // so compress(optimize:) resolves the preset instead of failing
+        // media_unknown — the ergonomic file-first path now works for in-memory
+        // media without dropping to uploadFile() + FileInput::uploadId().
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        try {
+            $ops = $this->operations(
+                (new Recipe(FileInput::resource($stream, contentType: 'image/jpeg')))->compress(OptimizeFor::Size),
+            );
+            self::assertSame('compress', $ops[0]['type']);
+            self::assertSame($this->expectedCompressWire('image', OptimizeFor::Size), $ops[0]['options']);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function compress_with_optimize_on_a_resource_filename_resolves_via_extension(): void
+    {
+        // No contentType → fall back to the filename hint's extension (video).
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        try {
+            $ops = $this->operations(
+                (new Recipe(FileInput::resource($stream, filename: 'clip.mov')))->compress(OptimizeFor::Size),
+            );
+            self::assertSame($this->expectedCompressWire('video', OptimizeFor::Size), $ops[0]['options']);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function compress_on_a_resource_prefers_content_type_over_the_filename(): void
+    {
+        // MIME is canonical (mirrors the TS Blob branch): an audio/* contentType
+        // wins over a .mp4 (video) filename.
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        try {
+            $ops = $this->operations(
+                (new Recipe(FileInput::resource($stream, filename: 'track.mp4', contentType: 'audio/mpeg')))
+                    ->compress(OptimizeFor::Size),
+            );
+            self::assertSame($this->expectedCompressWire('audio', OptimizeFor::Size), $ops[0]['options']);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
+    public function compress_with_optimize_on_a_hintless_resource_still_fails_fast(): void
+    {
+        // The existing media_unknown contract is PRESERVED for resources that
+        // carry no filename/contentType — fail before any upload.
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        try {
+            $this->expectException(GislConfigError::class);
+            (new Recipe(FileInput::resource($stream)))->compress(OptimizeFor::Size)->toWorkflowPayload(self::FILE_ID);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
     #[Test]
     public function compress_uses_client_preset_defaults_via_file(): void
     {

@@ -264,6 +264,44 @@ final class GislClientUploadContentTypeTest extends TestCase
         new UploadOptions(contentType: "text/plain\x00");
     }
 
+    public function testRejectsFilenameWithCrlfInjection(): void
+    {
+        // fFwaKsN5: the filename is concatenated into the multipart
+        // Content-Disposition header; CR/LF/NUL is rejected at construction.
+        $this->expectException(GislConfigError::class);
+        new UploadOptions(filename: "photo.jpg\r\nX-Injected: 1");
+    }
+
+    public function testRejectsFilenameWithPathSeparator(): void
+    {
+        // fFwaKsN5 (codex r1): the upload contract requires a BARE filename
+        // (^[^/\\]+$) — a path separator would be rejected server-side, so fail
+        // locally with an actionable error.
+        $this->expectException(GislConfigError::class);
+        new UploadOptions(filename: 'dir/photo.jpg');
+    }
+
+    public function testRejectsFilenameWithBackslashSeparator(): void
+    {
+        $this->expectException(GislConfigError::class);
+        new UploadOptions(filename: 'dir\\photo.jpg');
+    }
+
+    public function testRejectsFilenameLongerThan255Bytes(): void
+    {
+        $this->expectException(GislConfigError::class);
+        new UploadOptions(filename: \str_repeat('a', 256) . '.jpg');
+    }
+
+    public function testRejectsFilenameWithDoubleQuote(): void
+    {
+        // codex r3: a `"` breaks the quoted-string Content-Disposition filename;
+        // the preflight guard rejects it in lock-step with the body builder so a
+        // bad name can't slip past a fan-out preflight and fail at wire time.
+        $this->expectException(GislConfigError::class);
+        new UploadOptions(filename: 'bad"name.jpg');
+    }
+
     public function testRejectsContentTypeMutatedAfterConstructionAtUploadTime(): void
     {
         // contentType is a public mutable property, so the ctor guard can be
@@ -281,6 +319,29 @@ final class GislClientUploadContentTypeTest extends TestCase
 
         $options = new UploadOptions();
         $options->contentType = "text/plain\r\nX-Injected: 1";
+
+        $this->expectException(GislConfigError::class);
+        $client->uploadFile($filePath, $options);
+    }
+
+    public function testRejectsFilenameMutatedToAPathSeparatorAtUploadTime(): void
+    {
+        // fFwaKsN5 (codex r2): filename is a public mutable property, so the ctor
+        // guard can be bypassed by reassigning it post-construction. The
+        // authoritative wire-assembly guard in the body builder must still reject
+        // a path-separator filename at upload time, before any bytes reach the
+        // header (matches the contentType mutation-bypass invariant).
+        $http = new class implements ClientInterface {
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                throw new \LogicException('HTTP must not be reached: the filename guard should fire first');
+            }
+        };
+        $client = $this->makeClient($http);
+        $filePath = $this->writeSmallFile('hello');
+
+        $options = new UploadOptions();
+        $options->filename = '../../etc/passwd';
 
         $this->expectException(GislConfigError::class);
         $client->uploadFile($filePath, $options);

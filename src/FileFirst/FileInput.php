@@ -31,16 +31,22 @@ final class FileInput
     public const KIND_UPLOAD_ID = 'upload_id';
 
     /**
-     * @param self::KIND_*  $kind     Which arm of the union is populated.
-     * @param string|null   $path     Filesystem path when `$kind === KIND_PATH`.
-     * @param resource|null $resource Open stream when `$kind === KIND_RESOURCE`.
-     * @param string|null   $fileId   Pre-uploaded id when `$kind === KIND_UPLOAD_ID`.
+     * @param self::KIND_*  $kind        Which arm of the union is populated.
+     * @param string|null   $path        Filesystem path when `$kind === KIND_PATH`.
+     * @param resource|null $resource    Open stream when `$kind === KIND_RESOURCE`.
+     * @param string|null   $fileId      Pre-uploaded id when `$kind === KIND_UPLOAD_ID`.
+     * @param string|null   $filename    Optional name hint for a resource input
+     *        (extension drives local media inference + the upload's multipart filename).
+     * @param string|null   $contentType Optional MIME hint for a resource input
+     *        (canonical media signal, mirrors a browser `Blob.type`).
      */
     private function __construct(
         public readonly string $kind,
         public readonly ?string $path = null,
         public readonly mixed $resource = null,
         public readonly ?string $fileId = null,
+        public readonly ?string $filename = null,
+        public readonly ?string $contentType = null,
     ) {
     }
 
@@ -57,16 +63,27 @@ final class FileInput
      * path first. The caller owns the stream's lifecycle (the SDK never closes
      * it).
      *
-     * @param resource $resource
+     * A stream carries no filename/MIME of its own, so a media-dependent op
+     * (`compress(optimize: ...)`) cannot infer a preset and would fail before
+     * upload. Pass `$filename` and/or `$contentType` (fFwaKsN5) so in-memory
+     * media works through the ergonomic file-first path without dropping to
+     * the low-level `uploadFile()` + `FileInput::uploadId()` plumbing — the PHP
+     * analogue of a browser `Blob`/`File` carrying `.name`/`.type`.
+     *
+     * @param resource    $resource
+     * @param string|null $filename    Name hint — its extension drives media inference
+     *        and becomes the upload's multipart filename (e.g. `'photo.jpg'`).
+     * @param string|null $contentType MIME hint — the canonical media signal,
+     *        preferred over the filename extension (e.g. `'image/jpeg'`).
      */
-    public static function resource(mixed $resource): self
+    public static function resource(mixed $resource, ?string $filename = null, ?string $contentType = null): self
     {
         if (!\is_resource($resource)) {
             throw new GislConfigError(
                 'FileInput::resource() expected an open stream resource; got ' . \get_debug_type($resource) . '.',
             );
         }
-        return new self(self::KIND_RESOURCE, resource: $resource);
+        return new self(self::KIND_RESOURCE, resource: $resource, filename: $filename, contentType: $contentType);
     }
 
     /**
@@ -89,18 +106,33 @@ final class FileInput
 
     /**
      * The compress media class for preset resolution, derived from the input's
-     * filename extension — or null when the media cannot be inferred locally
-     * (a resource handle or a bare upload id carries no extension). Reuses the
-     * same extension classifier the operation-first builder uses so a file-first
-     * `compress()` lowers to the identical wire options as `client->compress()`.
+     * filename extension (path inputs) or the `contentType`/`filename` hints
+     * (resource inputs, fFwaKsN5) — or null when the media cannot be inferred
+     * locally (a hint-less resource or a bare upload id). Reuses the same
+     * classifiers the operation-first builder uses so a file-first `compress()`
+     * lowers to the identical wire options as `client->compress()`.
+     *
+     * For a resource the MIME hint is canonical (preferred), then the filename
+     * extension — mirroring the TS `_detectCompressMedia` Blob branch (MIME-first).
      *
      * @return 'image'|'audio'|'video'|'document_pdf'|'document_office'|'document_odf'|'document_epub'|null
      */
     public function compressMediaHint(): ?string
     {
-        if ($this->kind !== self::KIND_PATH || $this->path === null) {
-            return null;
+        if ($this->kind === self::KIND_PATH && $this->path !== null) {
+            return OperationBuilder::detectCompressMedia($this->path);
         }
-        return OperationBuilder::detectCompressMedia($this->path);
+        if ($this->kind === self::KIND_RESOURCE) {
+            if ($this->contentType !== null) {
+                $fromMime = OperationBuilder::detectCompressMediaFromMime($this->contentType);
+                if ($fromMime !== null) {
+                    return $fromMime;
+                }
+            }
+            if ($this->filename !== null) {
+                return OperationBuilder::detectCompressMedia($this->filename);
+            }
+        }
+        return null;
     }
 }

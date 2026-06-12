@@ -358,6 +358,10 @@ final class FilesRecipe
         foreach ($this->inputs as $input) {
             if ($input->kind === FileInput::KIND_RESOURCE) {
                 UploadSource::assertUploadableStream($input->resource);
+                // fFwaKsN5 (codex r2): validate the resource's filename/contentType
+                // hints up front so a bad hint on a LATER fan-out input fails
+                // before any earlier input has already uploaded.
+                UploadOptions::assertHintsValid($input->contentType, $input->filename);
             } elseif ($input->kind === FileInput::KIND_PATH) {
                 // Validate existence/readability now (codex VOxtu0RZ-B4 r3) so a
                 // missing path later in the list does not leave earlier inputs
@@ -385,17 +389,24 @@ final class FilesRecipe
             if ($input->kind === FileInput::KIND_UPLOAD_ID) {
                 $fileIds[] = BuilderInternals::coerceString($input->fileId);
             } else {
-                $uploadOpts = $onProgressClosure !== null
-                    ? new UploadOptions(
-                        onProgress: static function (int $u, int $t) use ($onProgressClosure): void {
-                            $onProgressClosure(new UploadProgressEvent($u, $t));
-                        },
-                    )
+                $onProgressUpload = $onProgressClosure !== null
+                    ? static function (int $u, int $t) use ($onProgressClosure): void {
+                        $onProgressClosure(new UploadProgressEvent($u, $t));
+                    }
                     : null;
                 $uploadTarget = BuilderInternals::coerceString($input->path);
+                $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
                 if ($input->kind === FileInput::KIND_RESOURCE) {
                     \assert(\is_resource($input->resource));
                     $uploadTarget = $input->resource;
+                    // fFwaKsN5 (codex r1): carry the resource's filename/contentType
+                    // hints into the fan-out upload too — same as the single-file
+                    // file() path, so files([resource(...)]) is consistent.
+                    $uploadOpts = new UploadOptions(
+                        onProgress: $onProgressUpload,
+                        contentType: $input->contentType,
+                        filename: $input->filename,
+                    );
                 }
                 $uploadResp = $this->client->uploadFile($uploadTarget, $uploadOpts);
                 $fileIds[] = $uploadResp->getFileId() ?? '';

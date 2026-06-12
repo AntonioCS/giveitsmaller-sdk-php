@@ -171,6 +171,53 @@ final class OperationBuilder
         return null;
     }
 
+    /**
+     * Detect the compress media class from a MIME type (fFwaKsN5). The canonical
+     * media signal for a resource input carrying a `contentType` hint — preferred
+     * over the filename extension. Mirrors the MIME branch of the TS
+     * `_detectCompressMedia` (`builder.ts`). Returns null for unrecognised MIMEs.
+     *
+     * @internal Exposed for {@see \Gisl\Sdk\FileFirst\FileInput::compressMediaHint()} + unit tests.
+     *
+     * @return 'image'|'audio'|'video'|'document_pdf'|'document_office'|'document_odf'|'document_epub'|null
+     */
+    public static function detectCompressMediaFromMime(string $mime): ?string
+    {
+        if (\str_starts_with($mime, 'image/')) {
+            return 'image';
+        }
+        if (\str_starts_with($mime, 'audio/')) {
+            return 'audio';
+        }
+        if (\str_starts_with($mime, 'video/')) {
+            return 'video';
+        }
+        if ($mime === 'application/pdf') {
+            return 'document_pdf';
+        }
+        if ($mime === 'application/epub+zip') {
+            return 'document_epub';
+        }
+        if (\in_array($mime, [
+            'application/vnd.oasis.opendocument.text',
+            'application/vnd.oasis.opendocument.spreadsheet',
+            'application/vnd.oasis.opendocument.presentation',
+        ], true)) {
+            return 'document_odf';
+        }
+        if (\in_array($mime, [
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'application/msword',
+            'application/vnd.ms-excel',
+            'application/vnd.ms-powerpoint',
+        ], true)) {
+            return 'document_office';
+        }
+        return null;
+    }
+
     private static function coerceOptimize(mixed $raw): ?OptimizeFor
     {
         if ($raw === null) {
