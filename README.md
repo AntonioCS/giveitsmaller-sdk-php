@@ -18,21 +18,29 @@ Requires **PHP ^8.1**.
 
 ## Quickstart
 
+The SDK is **file-first**: you always start from a file (`->file($path)` for one,
+`->files([$paths])` for many) and call operations *on* it.
+
 ```php
 <?php
 require 'vendor/autoload.php';
 
 use Gisl\Sdk\Gisl;
-use Gisl\Sdk\Ergonomic\RunOptions;
+use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 
 $client = Gisl::create(apiKey: 'sk_...'); // or rely on GISL_API_KEY / ~/.gisl/credentials
 
 $result = $client
-    ->compress('./photo.jpg', ['quality' => 80])
-    ->run(new RunOptions(maxWait: '5m'));
+    ->file('./photo.jpg')
+    ->compress(optimize: OptimizeFor::Balanced)
+    ->run(maxWait: '5m');
 
 echo $result->url; // pre-signed download URL
 ```
+
+> **Operation-first also ships.** A lower-level `$client->compress($path, [...])->run(new RunOptions(...))`
+> form (and `thumbnail` / `convert`) is available as an escape hatch, but file-first is the
+> recommended direction the [examples](../../examples/php/) build on.
 
 ## Documentation
 
