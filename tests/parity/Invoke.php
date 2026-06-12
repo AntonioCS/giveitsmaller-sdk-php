@@ -16,6 +16,7 @@ use Gisl\Sdk\Ergonomic\SubmitOptions;
 use Gisl\Sdk\Errors\NotYetImplementedDispatch;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\FilesRecipe;
+use Gisl\Sdk\FileFirst\MergedRecipe;
 use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
@@ -335,19 +336,43 @@ final class Invoke
             );
         }
 
-        $recipe = new FilesRecipe(self::buildFileInputs($spec));
-        /** @var list<array<string, mixed>> $operations */
-        $operations = $spec['operations'];
-        foreach ($operations as $op) {
-            $recipe = self::applyFilesOp($recipe, $op);
-        }
-
         /** @var list<string> $resolvedFileIds */
         $resolvedFileIds = [];
         /** @var list<mixed> $rawIds */
         $rawIds = $spec['resolvedFileIds'];
         foreach ($rawIds as $id) {
             $resolvedFileIds[] = (string) $id;
+        }
+
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $spec['operations'];
+
+        // aQMm5khm — merge-combine lowering. `files([...])->merge($opts)`
+        // collapses the N inputs into ONE MergedRecipe; the fixture's
+        // `operations` then lower as POST-COMBINE ops on the merged output. The
+        // merge-level options reuse the operation-first MergeOptions shape (same
+        // camelCase keys), so a fluent merge lowers identically to
+        // `client->merge($assets, $options)`. Mirrors the TS runner.
+        //
+        // toWorkflowPayload() is called directly, BYPASSING the run/submit-time
+        // merge preflight (2-10 inputs, image-needs-output_type) — BY DESIGN and
+        // consistent with the FF2a single-file + FF3a fan-out lowering paths.
+        // Lowering mode is a pure, network-free WIRE-SHAPE pin; merge preflight
+        // is covered by the unit suite + (future) local_validation_error fixtures.
+        if (\array_key_exists('merge', $spec)) {
+            /** @var array<string, mixed> $mergeBlock */
+            $mergeBlock = \is_array($spec['merge']) ? $spec['merge'] : [];
+            $mergeOptions = self::buildMergeOptions($mergeBlock['options'] ?? null, $fixture->name);
+            $merged = (new FilesRecipe(self::buildFileInputs($spec)))->merge($mergeOptions);
+            foreach ($operations as $op) {
+                $merged = self::applyMergedOp($merged, $op);
+            }
+            return $merged->toWorkflowPayload($resolvedFileIds)->toWire();
+        }
+
+        $recipe = new FilesRecipe(self::buildFileInputs($spec));
+        foreach ($operations as $op) {
+            $recipe = self::applyFilesOp($recipe, $op);
         }
 
         return $recipe->toWorkflowPayload($resolvedFileIds)->toWire();
@@ -496,6 +521,28 @@ final class Invoke
             'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
             'text_watermark' => $recipe->textWatermark((string) $op['text']),
             default => throw new \RuntimeException("Unknown files op '" . \var_export($op['op'] ?? null, true) . "'"),
+        };
+    }
+
+    /**
+     * aQMm5khm — apply a post-combine op to a {@see MergedRecipe}. The merged
+     * output exposes the single-file chain ops MINUS `text_watermark` (no merged
+     * equivalent); the loader rejects `text_watermark` as a post-merge op, so
+     * the default branch is defence-in-depth. Mirrors TS `applyMergedOp`.
+     *
+     * @param array<string, mixed> $op
+     */
+    private static function applyMergedOp(MergedRecipe $recipe, array $op): MergedRecipe
+    {
+        return match ($op['op']) {
+            'compress' => $recipe->compress(
+                isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
+            ),
+            'convert' => $recipe->convert((string) $op['format']),
+            'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
+            default => throw new \RuntimeException(
+                "Unsupported post-combine op '" . \var_export($op['op'] ?? null, true) . "'",
+            ),
         };
     }
 

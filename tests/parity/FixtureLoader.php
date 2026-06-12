@@ -115,7 +115,34 @@ final class FixtureLoader
     // FF3a (u0hBt6fl) — files block keys: an ordered files[] input list +
     // operations + (lowering variant) resolvedFileIds + (run variant) maxWait /
     // pollIntervalMs.
-    private const FILES_KEYS = ['files', 'resolvedFileIds', 'operations', 'maxWait', 'pollIntervalMs', 'webhook'];
+    // aQMm5khm — `merge` adds the merge-combine sub-block to the files block.
+    private const FILES_KEYS = ['files', 'resolvedFileIds', 'operations', 'merge', 'maxWait', 'pollIntervalMs', 'webhook'];
+    // aQMm5khm — keys allowed inside a `files.merge` sub-block.
+    private const FILES_MERGE_KEYS = ['options'];
+    // aQMm5khm — allowed `files.merge.options` keys (the camelCase MergeOptions
+    // fields both runners read). Rejecting unknowns at load time stops a typo'd
+    // or snake_case key from being silently dropped by wireMergeOptions, which
+    // would leave the fixture passing with the wrong wire shape. Keep in sync
+    // with the TS loader's FILES_MERGE_OPTION_KEYS + the MergeOptions VO.
+    private const FILES_MERGE_OPTION_KEYS = [
+        'transition',
+        'crossfadeDuration',
+        'gapDuration',
+        'normalizeAudio',
+        'codec',
+        'crf',
+        'preset',
+        'targetSize',
+        'transitionDuration',
+        'fps',
+        'durationPerImage',
+        'loopCount',
+        'output',
+        'videoFormat',
+        'outputType',
+        'mediaKind',
+        'allowUnusedAssets',
+    ];
 
     private const ALLOWED_SCHEMA_VERSIONS = [
         Fixture::SCHEMA_VERSION_V1,
@@ -297,6 +324,16 @@ final class FixtureLoader
                 throw new \RuntimeException("[{$base}] mode=files requires a files block");
             }
             $filesBlock = \is_array($raw['files']) ? $raw['files'] : [];
+            // aQMm5khm — the merge-combine path is LOWERING-ONLY (run/submit
+            // merge is out of scope). Reject files.merge on any non-lowering
+            // variant (run = expected_run_result, submit = files.webhook) so a
+            // misplaced merge block can't silently no-op — runFiles/submitFiles
+            // build a plain FilesRecipe and would ignore the merge block.
+            if (\array_key_exists('merge', $filesBlock) && !\array_key_exists('expected_payload', $raw)) {
+                throw new \RuntimeException(
+                    "[{$base}] files.merge is only supported in the lowering variant (expected_payload); a run/submit mode=files fixture cannot carry a merge block",
+                );
+            }
             $isFilesSubmit = \array_key_exists('webhook', $filesBlock);
             if (!$isFilesSubmit && \count($requests) !== 0) {
                 throw new \RuntimeException(
@@ -634,9 +671,39 @@ final class FixtureLoader
             }
         }
 
+        // aQMm5khm — a `merge` sub-block switches the lowering variant to the
+        // merge-combine path; `operations` then carry the POST-COMBINE ops and
+        // MAY be empty (a bare merge). Without it, `operations` are the shared
+        // fan-out chain and stay non-empty (FF3a). Mirrors the TS loader.
+        $hasMerge = \array_key_exists('merge', $raw);
+        if ($hasMerge) {
+            $mergeBlock = $raw['merge'];
+            if (!\is_array($mergeBlock) || \array_is_list($mergeBlock)) {
+                throw new \RuntimeException("[{$base}] files.merge must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($mergeBlock, self::FILES_MERGE_KEYS, "{$base} files.merge");
+            if (\array_key_exists('options', $mergeBlock)) {
+                if (!\is_array($mergeBlock['options']) || \array_is_list($mergeBlock['options'])) {
+                    throw new \RuntimeException("[{$base}] files.merge.options must be a mapping");
+                }
+                self::rejectUnknownLoweringKeys(
+                    $mergeBlock['options'],
+                    self::FILES_MERGE_OPTION_KEYS,
+                    "{$base} files.merge.options",
+                );
+            }
+            // NOTE: the merge-combine path is LOWERING-ONLY (run/submit merge is
+            // out of scope). The "merge requires the expected_payload lowering
+            // variant" guard lives in the mode=files discriminator (validate()),
+            // where expected_payload / expected_run_result / webhook are all
+            // visible — here in validateFiles only the files block is in scope.
+        }
+
         $ops = $raw['operations'] ?? null;
-        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
-            throw new \RuntimeException("[{$base}] files.operations must be a non-empty sequence");
+        if (!\is_array($ops) || !\array_is_list($ops) || (!$hasMerge && \count($ops) === 0)) {
+            throw new \RuntimeException(
+                "[{$base}] files.operations must be " . ($hasMerge ? 'a sequence (may be empty for a bare merge)' : 'a non-empty sequence'),
+            );
         }
         foreach ($ops as $i => $op) {
             if (!\is_array($op) || \array_is_list($op)) {
@@ -647,6 +714,14 @@ final class FixtureLoader
             if (!\is_string($opName) || !\in_array($opName, self::LOWERING_OPS, true)) {
                 throw new \RuntimeException(
                     "[{$base}] files.operations[{$i}].op must be one of " . \implode('|', self::LOWERING_OPS),
+                );
+            }
+            // text_watermark has no MergedRecipe equivalent (the merged output
+            // exposes compress/convert/thumbnail only) — reject it as a
+            // post-combine op at load time. Mirrors the TS loader.
+            if ($hasMerge && $opName === 'text_watermark') {
+                throw new \RuntimeException(
+                    "[{$base}] files.operations[{$i}].op 'text_watermark' is not a valid post-merge op (MergedRecipe exposes compress/convert/thumbnail only)",
                 );
             }
             self::validateLoweringOpParams($opName, $op, "{$base} files.operations[{$i}]");
