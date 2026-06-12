@@ -240,6 +240,14 @@ final class Recipe
             );
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
+        // TDqmkWpX: the maxWait deadline also covers the downloads fetch itself —
+        // re-check AFTER the call so a slow getWorkflowDownloads cannot return a
+        // success past the advertised whole-run deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Workflow {$workflowId} downloads fetch completed after maxWait elapsed.",
+            );
+        }
 
         // Download URLs from getWorkflowDownloads are pre-signed and require no
         // SDK auth, so the downloader issues a plain unauthenticated stream.

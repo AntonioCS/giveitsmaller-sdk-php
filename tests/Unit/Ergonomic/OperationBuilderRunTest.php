@@ -142,6 +142,52 @@ final class OperationBuilderRunTest extends TestCase
         $builder->run(new RunOptions(maxWait: 50, useSSE: false, pollIntervalMs: 10));
     }
 
+    public function test_run_slow_downloads_after_deadline_throws_timeout(): void
+    {
+        // TDqmkWpX: the deadline-AFTER-downloads re-check fires when the
+        // downloads request itself runs long. Terminal arrives within the 50ms
+        // deadline; the downloads response sleeps PAST it, so the post-fetch
+        // re-check must time out rather than returning a late success.
+        $slowHttp = new class implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            public array $queue;
+            /** @var list<RequestInterface> */
+            public array $captured = [];
+
+            public function __construct()
+            {
+                $this->queue = [
+                    OperationBuilderRunTest::jsonResponseStatic(200, OperationBuilderRunTest::uploadOkStatic()),
+                    OperationBuilderRunTest::jsonResponseStatic(201, OperationBuilderRunTest::createOkStatic()),
+                    OperationBuilderRunTest::jsonResponseStatic(200, OperationBuilderRunTest::statusCompletedStatic()),
+                    OperationBuilderRunTest::jsonResponseStatic(200, OperationBuilderRunTest::downloadsEmptyStatic()),
+                ];
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->captured[] = $request;
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub queue exhausted.');
+                }
+                // Sleep on the downloads request itself so the deadline lapses
+                // DURING the fetch — the re-check AFTER the call must trip.
+                if (\str_contains((string) $request->getUri(), '/downloads')) {
+                    \usleep(80 * 1_000); // 80ms > 50ms deadline
+                }
+                return $next;
+            }
+        };
+
+        $client = self::makeClient($slowHttp);
+        $builder = $client->compress(self::writeTempFile('x'), ['quality' => 80]);
+
+        $this->expectException(GislTimeoutError::class);
+        $this->expectExceptionMessage('downloads fetch completed after maxWait elapsed');
+        $builder->run(new RunOptions(maxWait: 50, useSSE: false, pollIntervalMs: 10));
+    }
+
     public function test_run_invalid_maxwait_string_throws_invalid_argument(): void
     {
         $tempPath = self::writeTempFile('x');
@@ -205,6 +251,14 @@ final class OperationBuilderRunTest extends TestCase
     public static function jsonResponseStatic(int $status, array $body): ResponseInterface
     {
         return self::jsonResponse($status, $body);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public static function downloadsEmptyStatic(): array
+    {
+        return self::downloadsEmpty();
     }
 
     /**

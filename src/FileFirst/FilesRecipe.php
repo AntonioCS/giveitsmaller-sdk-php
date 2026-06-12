@@ -265,6 +265,14 @@ final class FilesRecipe
             );
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
+        // TDqmkWpX: the maxWait deadline also covers the downloads fetch itself —
+        // re-check AFTER the call so a slow getWorkflowDownloads cannot return a
+        // success past the advertised whole-run deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Workflow {$workflowId} downloads fetch completed after maxWait elapsed.",
+            );
+        }
 
         // keyByRef maps each job ref ("file-{i}") to the partition key. Today the
         // key is just the index string; the map seam leaves room for a keyed

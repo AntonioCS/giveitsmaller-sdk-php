@@ -1601,7 +1601,19 @@ class GislClient
         $dataLines = [];
 
         while (!$body->eof()) {
-            $chunk = $body->read(self::SSE_READ_CHUNK_BYTES);
+            try {
+                $chunk = $body->read(self::SSE_READ_CHUNK_BYTES);
+            } catch (\RuntimeException $e) {
+                // TDqmkWpX: a mid-stream transport read failure (PSR-7 read()
+                // throws \RuntimeException on failure) must surface as a typed
+                // GislNetworkError so BuilderInternals::awaitTerminal poll-falls-
+                // back on it — it polls ONLY on GislNetworkError /
+                // SseStreamEndedWithoutTerminal, so a raw \RuntimeException here
+                // would bypass the intended genuine-transport-error fallback.
+                throw new GislNetworkError(
+                    "SSE stream read failed mid-stream: {$e->getMessage()}",
+                );
+            }
             if ($chunk === '') {
                 // Some PSR-7 streams return '' before EOF on slow
                 // network reads. Don't busy-loop: if we're not at EOF,

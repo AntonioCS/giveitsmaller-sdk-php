@@ -89,6 +89,14 @@ final class ArchivedRecipe
             );
         }
         $downloads = $client->getWorkflowDownloads($workflowId);
+        // TDqmkWpX: the maxWait deadline also covers the downloads fetch itself —
+        // re-check AFTER the call so a slow getWorkflowDownloads cannot return a
+        // success past the advertised whole-run deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Workflow {$workflowId} downloads fetch completed after maxWait elapsed.",
+            );
+        }
 
         // Project ONLY the archive job's output — the `src_*` passthrough jobs
         // re-expose the raw uploads, which are plumbing, not the deliverable.

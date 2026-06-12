@@ -139,6 +139,14 @@ final class MergeBuilder
             );
         }
         $downloads = $this->client->getWorkflowDownloads($workflowId);
+        // TDqmkWpX: the maxWait deadline also covers the downloads fetch itself —
+        // re-check AFTER the call so a slow getWorkflowDownloads cannot return a
+        // success past the advertised whole-run deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Merge workflow {$workflowId} downloads fetch completed after maxWait elapsed.",
+            );
+        }
 
         // p0SuJEeK — project ONLY the merge job's output. getWorkflowDownloads
         // returns a download group per terminal job, which now INCLUDES the

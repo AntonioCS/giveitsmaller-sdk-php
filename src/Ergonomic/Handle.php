@@ -122,6 +122,14 @@ final class Handle
             );
         }
         $downloads = $client->getWorkflowDownloads($this->workflowId);
+        // TDqmkWpX: the maxWait deadline also covers the downloads fetch itself —
+        // re-check AFTER the call so a slow getWorkflowDownloads cannot return a
+        // success past the advertised whole-run deadline.
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                "Workflow {$this->workflowId} downloads fetch completed after maxWait elapsed.",
+            );
+        }
 
         return $this->project($finalStatus, \array_values($downloads->getDownloads() ?? []));
     }
