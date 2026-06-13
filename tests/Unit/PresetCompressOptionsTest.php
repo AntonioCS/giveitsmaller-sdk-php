@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Sdk\Generated\SdkSpec\Enums\AudioBitrate;
-use Gisl\Sdk\Generated\SdkSpec\Enums\AudioCodec;
 use Gisl\Sdk\Generated\SdkSpec\Enums\AudioSampleRate;
 use Gisl\Sdk\Generated\SdkSpec\Enums\IccProfilePolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
@@ -14,7 +13,6 @@ use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\PdfColorspace;
 use Gisl\Sdk\Generated\SdkSpec\Enums\PdfProfile;
-use Gisl\Sdk\Generated\SdkSpec\Enums\VideoCodec;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoPreset;
 use Gisl\Sdk\Generated\SdkSpec\Presets;
 use Gisl\Sdk\Preset\AudioCompressPresetOptions;
@@ -142,12 +140,15 @@ final class PresetCompressOptionsTest extends TestCase
         // (audioBitrate '_96') through the enum() reader against a live cell
         // — this exercises that name->case wiring end-to-end.
         $dto = VideoCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(VideoCodec::H265, $dto->codec);
         $this->assertSame(30, $dto->crf);
         $this->assertSame(VideoPreset::Slow, $dto->preset);
-        $this->assertTrue($dto->faststart);
-        $this->assertSame(AudioCodec::Aac, $dto->audioCodec);
         $this->assertSame(AudioBitrate::_96, $dto->audioBitrate);
+        // v2.66.0 (contracts ADR-0020): presets no longer bake codec /
+        // audioCodec / faststart — the server container-resolves those so a
+        // WebM target cannot 422 on a baked MP4-oriented codec.
+        $this->assertNull($dto->codec);
+        $this->assertNull($dto->faststart);
+        $this->assertNull($dto->audioCodec);
         // Per-call / sparse knobs absent from the cell stay null.
         $this->assertNull($dto->targetSize);
         $this->assertNull($dto->width);

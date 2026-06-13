@@ -68,27 +68,18 @@ final class Presets
         ],
         'video_compress' => [
             'Size' => [
-                'codec' => 'H265',
                 'crf' => 30,
                 'preset' => 'Slow',
-                'faststart' => true,
-                'audioCodec' => 'Aac',
                 'audioBitrate' => '_96',
             ],
             'Balanced' => [
-                'codec' => 'H264',
                 'crf' => 23,
                 'preset' => 'Medium',
-                'faststart' => true,
-                'audioCodec' => 'Aac',
                 'audioBitrate' => '_128',
             ],
             'Quality' => [
-                'codec' => 'H264',
                 'crf' => 18,
                 'preset' => 'Slow',
-                'faststart' => true,
-                'audioCodec' => 'Aac',
                 'audioBitrate' => '_192',
             ],
         ],

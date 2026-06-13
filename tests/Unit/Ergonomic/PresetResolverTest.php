@@ -348,10 +348,13 @@ final class PresetResolverTest extends TestCase
     public function testVideoShippedDefaultsResolveThroughLeaf(): void
     {
         $out = PresetResolver::resolveCompress('video', null, null, null, OptimizeFor::Balanced, []);
-        // video_compress/Balanced cell: codec H264, crf 23, etc.
-        $this->assertSame('h264', $out['wireOptions']['codec']);
+        // video_compress/Balanced cell: crf 23, preset medium, audio_bitrate.
+        // v2.66.0 (ADR-0020): the cell no longer bakes codec (server
+        // container-resolves it), so it is absent from the wire + sdkDefault.
         $this->assertSame(23, $out['wireOptions']['crf']);
-        $this->assertContains('codec', $out['resolvedOptions']->sources->sdkDefault);
+        $this->assertArrayNotHasKey('codec', $out['wireOptions']);
+        $this->assertContains('crf', $out['resolvedOptions']->sources->sdkDefault);
+        $this->assertNotContains('codec', $out['resolvedOptions']->sources->sdkDefault);
     }
 
     public function testVideoPresetOverrideAsLeafDto(): void
