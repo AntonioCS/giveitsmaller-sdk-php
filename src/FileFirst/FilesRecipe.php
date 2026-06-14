@@ -69,32 +69,43 @@ final class FilesRecipe
      * {@see Recipe}'s coercion/validation, so a bad value throws the same
      * {@see GislConfigError}.
      */
-    public function compress(OptimizeFor|string|null $optimize = null): self
+    /**
+     * @param array<string, mixed> $options
+     */
+    public function compress(OptimizeFor|string|null $optimize = null, array $options = []): self
     {
-        return $this->withRecipe($this->baseRecipe()->compress($optimize));
+        return $this->withRecipe($this->baseRecipe()->compress($optimize, $options));
     }
 
-    /** Change every input's format. `$format` lowers verbatim to the `format` option. */
-    public function convert(string $format): self
+    /**
+     * Change every input's format. `$format` lowers verbatim to the `format` option.
+     *
+     * @param array<string, mixed> $options
+     */
+    public function convert(string $format, array $options = []): self
     {
-        return $this->withRecipe($this->baseRecipe()->convert($format));
+        return $this->withRecipe($this->baseRecipe()->convert($format, $options));
     }
 
     /**
      * Generate a preview of every input. Omitted dimensions are dropped from
      * the wire options. Options shape mirrors {@see Recipe::thumbnail()}.
      *
-     * @param array{width?: int, height?: int} $options
+     * @param array<string, mixed> $options
      */
     public function thumbnail(array $options = []): self
     {
         return $this->withRecipe($this->baseRecipe()->thumbnail($options));
     }
 
-    /** Apply the same text watermark to every input. */
-    public function textWatermark(string $text): self
+    /**
+     * Apply the same text watermark to every input.
+     *
+     * @param array<string, mixed> $options
+     */
+    public function textWatermark(string $text, array $options = []): self
     {
-        return $this->withRecipe($this->baseRecipe()->textWatermark($text));
+        return $this->withRecipe($this->baseRecipe()->textWatermark($text, $options));
     }
 
     /**

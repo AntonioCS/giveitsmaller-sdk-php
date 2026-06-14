@@ -58,16 +58,29 @@ final class MergedRecipe
     ) {
     }
 
-    /** Reduce the merged output's size. See {@see Recipe::compress()}. */
-    public function compress(OptimizeFor|string|null $optimize = null): self
+    /**
+     * Reduce the merged output's size. See {@see Recipe::compress()}. The
+     * explicit `$optimize` param wins over any `optimize` key in `$options`.
+     *
+     * @param array<string, mixed> $options
+     */
+    public function compress(OptimizeFor|string|null $optimize = null, array $options = []): self
     {
-        return $this->withStep(new RecipeStep('compress', ['optimize' => Recipe::coerceOptimize($optimize)]));
+        // Shorthand $optimize wins; otherwise preserve a bag-supplied `optimize`
+        // (mirrors Recipe::compress / op-first — omitting it must not null a preset).
+        $options['optimize'] = Recipe::coerceOptimize($optimize ?? ($options['optimize'] ?? null));
+        return $this->withStep(new RecipeStep('compress', $options));
     }
 
-    /** Change the merged output's format. See {@see Recipe::convert()}. */
-    public function convert(string $format): self
+    /**
+     * Change the merged output's format. See {@see Recipe::convert()}.
+     *
+     * @param array<string, mixed> $options
+     */
+    public function convert(string $format, array $options = []): self
     {
-        return $this->withStep(new RecipeStep('convert', ['format' => $format]));
+        // Spread options FIRST so the explicit `$format` argument is authoritative.
+        return $this->withStep(new RecipeStep('convert', [...$options, 'format' => $format]));
     }
 
     /**
@@ -77,7 +90,13 @@ final class MergedRecipe
      */
     public function thumbnail(array $options = []): self
     {
-        return $this->withStep(new RecipeStep('thumbnail', $options));
+        $wire = [];
+        foreach ($options as $key => $value) {
+            if ($value !== null) {
+                $wire[$key] = $value;
+            }
+        }
+        return $this->withStep(new RecipeStep('thumbnail', $wire));
     }
 
     private function withStep(RecipeStep $step): self

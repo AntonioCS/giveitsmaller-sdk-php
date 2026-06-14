@@ -302,7 +302,7 @@ final class OperationBuilder
     /**
      * @return object|array<string, mixed>|null
      */
-    private static function normalisePresetOverrides(mixed $raw): object|array|null
+    public static function normalisePresetOverrides(mixed $raw): object|array|null
     {
         if ($raw === null || \is_object($raw)) {
             return $raw;

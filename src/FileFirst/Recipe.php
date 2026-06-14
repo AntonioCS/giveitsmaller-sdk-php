@@ -8,6 +8,7 @@ use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
+use Gisl\Sdk\Ergonomic\OperationBuilder;
 use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Cancellation;
@@ -64,38 +65,51 @@ final class Recipe
     /**
      * Reduce file size. `optimize` selects a per-media preset (resolved to
      * concrete wire fields at lower-time, exactly as `client->compress()` does)
-     * — pass an {@see OptimizeFor} case or its string value.
+     * — pass an {@see OptimizeFor} case or its string value. `$options` carries
+     * the full per-op options bag (mirrors `client->compress($input, $options)`);
+     * the explicit `$optimize` param wins over any `optimize` key in the bag.
+     *
+     * @param array<string, mixed> $options
      */
-    public function compress(OptimizeFor|string|null $optimize = null): self
+    public function compress(OptimizeFor|string|null $optimize = null, array $options = []): self
     {
-        return $this->withStep(new RecipeStep('compress', ['optimize' => self::coerceOptimize($optimize)]));
+        // The shorthand $optimize wins; otherwise preserve any `optimize` the
+        // caller put in the bag (mirrors op-first, where optimize lives in the
+        // bag) — omitting the shorthand must NOT null out a bag-supplied preset.
+        $options['optimize'] = self::coerceOptimize($optimize ?? ($options['optimize'] ?? null));
+        return $this->withStep(new RecipeStep('compress', $options));
     }
 
     /**
      * Change format. `$format` is the target container/codec family
      * (e.g. `'mp4'`, `'webp'`) — lowered verbatim to the `format` wire option.
+     * `$options` carries any additional per-op convert options.
+     *
+     * @param array<string, mixed> $options
      */
-    public function convert(string $format): self
+    public function convert(string $format, array $options = []): self
     {
-        return $this->withStep(new RecipeStep('convert', ['format' => $format]));
+        // Spread options FIRST so the explicit `$format` argument is authoritative —
+        // a `format` key in the bag must NOT silently override the call's format.
+        return $this->withStep(new RecipeStep('convert', [...$options, 'format' => $format]));
     }
 
     /**
-     * Generate a preview. Width and/or height in pixels; an omitted dimension
-     * is dropped from the wire options (not sent as null). Takes an options
-     * shape to mirror the TS `thumbnail({ width?, height? })` and the
-     * operation-first `GislErgonomicClient::thumbnail($input, $options)`.
+     * Generate a preview. Width and/or height in pixels; any additional per-op
+     * thumbnail options pass through. A null value is dropped from the wire
+     * options (not sent as null). Takes an options shape to mirror the TS
+     * `thumbnail({ width?, height? })` and the operation-first
+     * `GislErgonomicClient::thumbnail($input, $options)`.
      *
-     * @param array{width?: int, height?: int} $options
+     * @param array<string, mixed> $options
      */
     public function thumbnail(array $options = []): self
     {
         $wire = [];
-        if (isset($options['width'])) {
-            $wire['width'] = $options['width'];
-        }
-        if (isset($options['height'])) {
-            $wire['height'] = $options['height'];
+        foreach ($options as $key => $value) {
+            if ($value !== null) {
+                $wire[$key] = $value;
+            }
         }
         return $this->withStep(new RecipeStep('thumbnail', $wire));
     }
@@ -103,10 +117,14 @@ final class Recipe
     /**
      * Apply a text watermark. Single-input (the text is an option, not a
      * secondary file) — lowers to the `text_watermark` op with a `text` option.
+     * `$options` carries any additional per-op watermark options.
+     *
+     * @param array<string, mixed> $options
      */
-    public function textWatermark(string $text): self
+    public function textWatermark(string $text, array $options = []): self
     {
-        return $this->withStep(new RecipeStep('text_watermark', ['text' => $text]));
+        // Spread options FIRST so the explicit `$text` argument is authoritative.
+        return $this->withStep(new RecipeStep('text_watermark', [...$options, 'text' => $text]));
     }
 
     /**
@@ -416,15 +434,25 @@ final class Recipe
      */
     private function lowerCompressOptions(array $options): array
     {
-        $optimize = $options['optimize'] ?? null;
+        // Mirror the op-first resolver precedence
+        // ({@see \Gisl\Sdk\Ergonomic\OperationBuilder::resolve()}): optimize =
+        // preset layer, presetOverrides = callPresetOverride layer, the rest =
+        // explicit layer.
+        $explicit = $options;
+        $optimize = $explicit['optimize'] ?? null;
+        unset($explicit['optimize']);
         \assert($optimize === null || $optimize instanceof OptimizeFor);
+        $presetOverrides = $explicit['presetOverrides'] ?? null;
+        unset($explicit['presetOverrides']);
 
         $media = $this->input->compressMediaHint();
         if ($media === null) {
             // Cannot infer a media class (a resource handle or bare upload id
             // carries no extension) → preset resolution is impossible. Fail
             // FAST rather than silently dropping an explicit `optimize` choice;
-            // a bare `compress()` is still fine (server applies defaults).
+            // a bare `compress()` is still fine (server applies defaults). When
+            // no optimize is set, pass any explicit options through verbatim
+            // (mirrors the op-first media-undefined passthrough).
             if ($optimize !== null) {
                 throw new GislConfigError(
                     "compress(optimize: {$optimize->value}) needs a media type to resolve the preset, but the "
@@ -434,16 +462,27 @@ final class Recipe
                     conflictingFields: ['optimize'],
                 );
             }
-            return [];
+            // presetOverrides override a resolved preset; with no media there is
+            // no preset to override, so fail fast rather than silently dropping.
+            if ($presetOverrides !== null) {
+                throw new GislConfigError(
+                    'compress(presetOverrides) needs a media type to resolve the preset to override, but the '
+                    . 'input has no inferable media (a pre-uploaded file id or stream carries no extension). '
+                    . 'Use a path with a file extension.',
+                    reason: 'media_unknown',
+                    conflictingFields: ['presetOverrides'],
+                );
+            }
+            return $explicit;
         }
 
         $resolved = PresetResolver::resolveCompress(
             media: $media,
             presetDefaults: $this->presetDefaults,
             scopedDefaults: $this->scopedPresetDefaults,
-            presetOverrides: null,
+            presetOverrides: OperationBuilder::normalisePresetOverrides($presetOverrides),
             optimize: $optimize,
-            explicitOptions: [],
+            explicitOptions: $explicit,
             audioLossless: $media === 'audio' ? $this->input->compressAudioLosslessHint() : null,
         );
 
