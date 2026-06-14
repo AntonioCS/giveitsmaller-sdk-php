@@ -135,4 +135,28 @@ final class FileInput
         }
         return null;
     }
+
+    /**
+     * Best-effort LOSSLESS-audio classification (flac/wav) for the preset
+     * resolver, derived from the same hints as {@see compressMediaHint()}: the
+     * filename extension (path inputs) or the `contentType`/`filename` hints
+     * (resource inputs). MIME-first for resources, mirroring the TS
+     * `_detectAudioLossless` Blob branch. Returns false when the input carries
+     * no inferable signal — the worker stays authoritative on the bitrate.
+     */
+    public function compressAudioLosslessHint(): bool
+    {
+        if ($this->kind === self::KIND_PATH && $this->path !== null) {
+            return OperationBuilder::detectAudioLossless($this->path);
+        }
+        if ($this->kind === self::KIND_RESOURCE) {
+            if ($this->contentType !== null && \str_starts_with($this->contentType, 'audio/')) {
+                return OperationBuilder::detectAudioLosslessFromMime($this->contentType);
+            }
+            if ($this->filename !== null) {
+                return OperationBuilder::detectAudioLossless($this->filename);
+            }
+        }
+        return false;
+    }
 }

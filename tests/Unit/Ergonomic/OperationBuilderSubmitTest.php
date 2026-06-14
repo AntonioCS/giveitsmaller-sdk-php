@@ -7,6 +7,7 @@ namespace Gisl\Sdk\Tests\Unit\Ergonomic;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
 use Gisl\Sdk\Ergonomic\SubmitOptions;
+use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\GislErgonomicClient;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -148,13 +149,115 @@ final class OperationBuilderSubmitTest extends TestCase
         );
     }
 
-    private static function writeTempFile(string $bytes): string
+    /**
+     * 0Vcogefw — operation-first end-to-end audio bitrate drop (the
+     * second call-site). `client->compress(<*.flac>, ['optimize' => Size])`
+     * must lower to a wire payload WITHOUT `bitrate` (the worker rejects it
+     * on lossless flac/wav), while `sample_rate` + `normalize` from the same
+     * audio Size preset cell survive. Proves OperationBuilder.php:125 wires
+     * `detectAudioLossless` into the resolver — a regression severing that
+     * line (null, or dropping the `$media === 'audio'` guard) would keep the
+     * baked bitrate and fail HERE. Mirrors the TS both-call-sites block
+     * (builder.test.ts).
+     */
+    public function test_operation_first_flac_compress_drops_bitrate_on_the_wire(): void
+    {
+        $tempPath = self::writeTempFile('lossless audio bytes', 'track.flac');
+
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000f1'),
+            self::workflowCreateResponse('01936fb2-0000-7000-8000-0000000000f1'),
+        ], $captured);
+
+        $client = self::makeClient($http);
+        $client->compress($tempPath, ['optimize' => OptimizeFor::Size])
+            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+
+        $options = self::capturedCompressOptions($captured);
+        $this->assertArrayNotHasKey('bitrate', $options, 'lossless flac drops the shipped-preset bitrate');
+        $this->assertSame(44100, $options['sample_rate'], 'the rest of the audio Size cell survives');
+        $this->assertArrayHasKey('normalize', $options);
+    }
+
+    public function test_operation_first_mp3_compress_keeps_bitrate_on_the_wire(): void
+    {
+        $tempPath = self::writeTempFile('lossy audio bytes', 'song.mp3');
+
+        $captured = [];
+        $http = self::stubClient([
+            self::uploadResponse('01936fb1-7bb3-7000-8000-0000000000f2'),
+            self::workflowCreateResponse('01936fb2-0000-7000-8000-0000000000f2'),
+        ], $captured);
+
+        $client = self::makeClient($http);
+        $client->compress($tempPath, ['optimize' => OptimizeFor::Size])
+            ->submit(new SubmitOptions(webhook: 'https://example.com/cb'));
+
+        $options = self::capturedCompressOptions($captured);
+        $this->assertSame(96, $options['bitrate'], 'lossy mp3 keeps the shipped-preset bitrate');
+        $this->assertSame(44100, $options['sample_rate']);
+    }
+
+    /**
+     * Pull the lowered compress `options` out of the captured workflow-create
+     * request (the second outbound request: upload then create).
+     *
+     * @param list<RequestInterface> $captured
+     * @return array<string, mixed>
+     */
+    private static function capturedCompressOptions(array $captured): array
+    {
+        self::assertCount(2, $captured);
+        $body = \json_decode((string) $captured[1]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        $options = $body['jobs'][0]['operations'][0]['options'];
+        self::assertIsArray($options);
+
+        return $options;
+    }
+
+    private static function writeTempFile(string $bytes, string $filename = 'fixture.bin'): string
     {
         $dir = \sys_get_temp_dir() . '/gisl-ergo-test-' . \bin2hex(\random_bytes(6));
         \mkdir($dir, 0700, true);
-        $path = $dir . '/fixture.bin';
+        $path = $dir . '/' . $filename;
         \file_put_contents($path, $bytes);
         return $path;
+    }
+
+    private static function uploadResponse(string $fileId): ResponseInterface
+    {
+        return self::jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'file_id' => $fileId,
+                'original_name' => 'fixture.bin',
+                'mime_type' => 'application/octet-stream',
+                'size_bytes' => 20,
+            ],
+        ]);
+    }
+
+    private static function workflowCreateResponse(string $workflowId): ResponseInterface
+    {
+        return self::jsonResponse(201, [
+            'success' => true,
+            'data' => [
+                'workflow_id' => $workflowId,
+                'status' => 'pending',
+                'created_at' => '2026-05-27T11:00:00Z',
+                'jobs' => [],
+                'delivery_plan' => [
+                    'mode' => 'individual',
+                    'selection_type' => 'terminal',
+                    'outputs' => [],
+                    'hidden_outputs' => [],
+                ],
+                'processing_plan' => ['jobs' => []],
+                'warnings' => [],
+            ],
+        ]);
     }
 
     private static function makeClient(ClientInterface $http): GislErgonomicClient

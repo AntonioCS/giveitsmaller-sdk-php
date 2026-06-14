@@ -122,6 +122,7 @@ final class OperationBuilder
             presetOverrides: self::normalisePresetOverrides($presetOverridesRaw),
             optimize: self::coerceOptimize($optimizeRaw),
             explicitOptions: $explicit,
+            audioLossless: $media === 'audio' ? self::detectAudioLossless($this->input) : null,
         );
 
         return ['wireOptions' => $resolved['wireOptions'], 'resolvedOptions' => $resolved['resolvedOptions']];
@@ -216,6 +217,58 @@ final class OperationBuilder
             return 'document_office';
         }
         return null;
+    }
+
+    /**
+     * Best-effort classification of whether an audio path is LOSSLESS
+     * (flac/wav) vs lossy, by filename extension. The worker rejects
+     * `bitrate` on lossless audio (compress.yaml / contracts iakhSy3E), so
+     * the preset resolver uses this to drop the shipped-preset bitrate for
+     * clear-cut lossless inputs.
+     *
+     * Detection is filename-only — it CANNOT probe the actual codec, so any
+     * ambiguous or unknown input classifies as lossy (keep bitrate). The
+     * worker stays authoritative: a user-supplied bitrate on a lossless file
+     * still reaches the wire and earns a deliberate 422. Filename-only PHP
+     * analogue of `_detectAudioLossless` (`builder.ts`); the MIME branch is
+     * {@see detectAudioLosslessFromMime()}.
+     *
+     * @internal Exposed for {@see \Gisl\Sdk\FileFirst\FileInput} + unit tests.
+     */
+    public static function detectAudioLossless(string $input): bool
+    {
+        $dot = \strrpos($input, '.');
+        if ($dot === false) {
+            return false;
+        }
+        $ext = \strtolower(\substr($input, $dot + 1));
+        if ($ext === '') {
+            return false;
+        }
+        return \in_array($ext, ['flac', 'wav'], true);
+    }
+
+    /**
+     * Best-effort LOSSLESS-audio classification from a MIME type (the
+     * canonical signal for a resource input carrying a `contentType` hint —
+     * preferred over the filename extension). Mirrors the MIME branch of the
+     * TS `_detectAudioLossless` (`builder.ts`). Returns true only for the five
+     * lossless audio MIMEs; everything else (including non-audio) is false.
+     *
+     * @internal Exposed for {@see \Gisl\Sdk\FileFirst\FileInput} + unit tests.
+     */
+    public static function detectAudioLosslessFromMime(string $mime): bool
+    {
+        // Strip MIME parameters (`audio/flac; codecs=flac`) before the exact-set
+        // lookup so a parameterised type still classifies (codex 18b6b684).
+        $bareMime = \strtolower(\trim(\explode(';', $mime, 2)[0]));
+        return \in_array($bareMime, [
+            'audio/flac',
+            'audio/x-flac',
+            'audio/wav',
+            'audio/x-wav',
+            'audio/wave',
+        ], true);
     }
 
     private static function coerceOptimize(mixed $raw): ?OptimizeFor

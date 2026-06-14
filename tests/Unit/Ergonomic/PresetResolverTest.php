@@ -7,15 +7,18 @@ namespace Gisl\Sdk\Tests\Unit\Ergonomic;
 use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\ResolvedOptions;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Generated\SdkSpec\Enums\AudioBitrate;
 use Gisl\Sdk\Generated\SdkSpec\Enums\IccProfilePolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoCodec;
+use Gisl\Sdk\Preset\AudioCompressPresetOptions;
 use Gisl\Sdk\Preset\ImageCompressPresetOptions;
 use Gisl\Sdk\Preset\VideoCompressPresetOptions;
 use Gisl\Sdk\PresetDefaults;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 #[CoversClass(PresetResolver::class)]
@@ -540,5 +543,105 @@ final class PresetResolverTest extends TestCase
         $out = PresetResolver::resolveCompress('image', null, null, null, null, ['quality' => null]);
         $this->assertArrayHasKey('quality', $out['wireOptions']);
         $this->assertNull($out['wireOptions']['quality']);
+    }
+
+    // -----------------------------------------------------------------
+    // 0Vcogefw — audio_compress lossless bitrate drop. Mirrors the TS
+    // `resolveCompressOptions — audio lossless bitrate drop` block.
+    // -----------------------------------------------------------------
+
+    /**
+     * @return array<string, array{OptimizeFor, int, int}>
+     */
+    public static function audioLevels(): array
+    {
+        return [
+            'Size' => [OptimizeFor::Size, 96, 44100],
+            'Balanced' => [OptimizeFor::Balanced, 192, 44100],
+            'Quality' => [OptimizeFor::Quality, 320, 48000],
+        ];
+    }
+
+    #[DataProvider('audioLevels')]
+    public function testLossyAudioKeepsShippedBitrate(OptimizeFor $optimize, int $expectedBitrate, int $expectedSampleRate): void
+    {
+        $out = PresetResolver::resolveCompress('audio', null, null, null, $optimize, [], audioLossless: false);
+        $wire = $out['wireOptions'];
+
+        $this->assertSame($expectedBitrate, $wire['bitrate']);
+        $this->assertSame($expectedSampleRate, $wire['sample_rate']);
+        $this->assertArrayHasKey('normalize', $wire);
+        $this->assertContains('bitrate', $out['resolvedOptions']->sources->sdkDefault);
+    }
+
+    #[DataProvider('audioLevels')]
+    public function testLosslessAudioDropsShippedBitrateButKeepsRest(OptimizeFor $optimize, int $unusedBitrate, int $expectedSampleRate): void
+    {
+        $out = PresetResolver::resolveCompress('audio', null, null, null, $optimize, [], audioLossless: true);
+        $wire = $out['wireOptions'];
+
+        $this->assertArrayNotHasKey('bitrate', $wire);
+        $this->assertSame($expectedSampleRate, $wire['sample_rate']);
+        $this->assertArrayHasKey('normalize', $wire);
+        // No layer is credited with a bitrate after the drop.
+        $this->assertNotContains('bitrate', $out['resolvedOptions']->sources->sdkDefault);
+        $this->assertArrayNotHasKey('bitrate', $out['resolvedOptions']->applied);
+    }
+
+    public function testLosslessAudioOptimizeUnsetDoesNotCrash(): void
+    {
+        // No optimize ⇒ no sdkDefault layer ⇒ no bitrate to drop.
+        $out = PresetResolver::resolveCompress('audio', null, null, null, null, [], audioLossless: true);
+        $this->assertSame([], $out['wireOptions']);
+    }
+
+    public function testLosslessAudioKeepsExplicitBitrate(): void
+    {
+        // Worker-authoritative: a user-supplied (explicit) bitrate is NEVER
+        // dropped — it reaches the wire so the worker's 422 surfaces.
+        $out = PresetResolver::resolveCompress(
+            'audio',
+            null,
+            null,
+            null,
+            OptimizeFor::Size,
+            ['bitrate' => AudioBitrate::_320],
+            audioLossless: true,
+        );
+        $this->assertSame(320, $out['wireOptions']['bitrate']);
+        $this->assertContains('bitrate', $out['resolvedOptions']->sources->explicit);
+    }
+
+    public function testLosslessAudioKeepsPresetOverrideBitrate(): void
+    {
+        $out = PresetResolver::resolveCompress(
+            'audio',
+            null,
+            null,
+            ['bitrate' => AudioBitrate::_192],
+            OptimizeFor::Size,
+            [],
+            audioLossless: true,
+        );
+        $this->assertSame(192, $out['wireOptions']['bitrate']);
+        $this->assertContains('bitrate', $out['resolvedOptions']->sources->callPresetOverride);
+    }
+
+    public function testLosslessAudioKeepsClientDefaultBitrate(): void
+    {
+        $defaults = PresetDefaults::create()
+            ->audioCompress(OptimizeFor::Size, new AudioCompressPresetOptions(bitrate: AudioBitrate::_320));
+        $out = PresetResolver::resolveCompress('audio', $defaults, null, null, OptimizeFor::Size, [], audioLossless: true);
+
+        $this->assertSame(320, $out['wireOptions']['bitrate']);
+        $this->assertContains('bitrate', $out['resolvedOptions']->sources->clientDefault);
+    }
+
+    public function testAudioLosslessFlagInertForNonAudioMedia(): void
+    {
+        // Defensive: the flag does nothing for image (no bitrate concept).
+        $out = PresetResolver::resolveCompress('image', null, null, null, OptimizeFor::Size, [], audioLossless: true);
+        $this->assertSame('lossy', $out['wireOptions']['mode']);
+        $this->assertArrayNotHasKey('bitrate', $out['wireOptions']);
     }
 }

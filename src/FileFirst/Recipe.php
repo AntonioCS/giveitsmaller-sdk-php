@@ -444,6 +444,7 @@ final class Recipe
             presetOverrides: null,
             optimize: $optimize,
             explicitOptions: [],
+            audioLossless: $media === 'audio' ? $this->input->compressAudioLosslessHint() : null,
         );
 
         return $resolved['wireOptions'];

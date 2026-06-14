@@ -363,6 +363,53 @@ final class RecipeTest extends TestCase
     }
 
     #[Test]
+    public function compress_on_a_flac_path_lowers_without_bitrate(): void
+    {
+        // 0Vcogefw: a file-first compress on a lossless *.flac input drops the
+        // shipped-preset bitrate (worker rejects it on flac/wav) while keeping
+        // the rest of the audio Size cell. Proves the FILE-FIRST call-site is
+        // wired — a regression here = only the operation-first site got fixed.
+        $ops = $this->operations($this->recipe('track.flac')->compress(OptimizeFor::Size));
+        self::assertSame('compress', $ops[0]['type']);
+        $options = $ops[0]['options'];
+        self::assertIsArray($options);
+        self::assertArrayNotHasKey('bitrate', $options);
+        self::assertSame(44100, $options['sample_rate']);
+        self::assertArrayHasKey('normalize', $options);
+    }
+
+    #[Test]
+    public function compress_on_an_mp3_path_keeps_the_bitrate(): void
+    {
+        // Lossy audio (mp3) keeps the shipped bitrate.
+        $ops = $this->operations($this->recipe('song.mp3')->compress(OptimizeFor::Size));
+        $options = $ops[0]['options'];
+        self::assertIsArray($options);
+        self::assertSame(96, $options['bitrate']);
+        self::assertSame(44100, $options['sample_rate']);
+    }
+
+    #[Test]
+    public function compress_on_a_flac_resource_content_type_lowers_without_bitrate(): void
+    {
+        // A resource whose contentType hint is a lossless audio MIME also
+        // drops the bitrate (MIME-first, mirrors the TS Blob branch).
+        $stream = \fopen('php://temp', 'r+b');
+        self::assertIsResource($stream);
+        try {
+            $ops = $this->operations(
+                (new Recipe(FileInput::resource($stream, contentType: 'audio/flac')))->compress(OptimizeFor::Size),
+            );
+            $options = $ops[0]['options'];
+            self::assertIsArray($options);
+            self::assertArrayNotHasKey('bitrate', $options);
+            self::assertSame(44100, $options['sample_rate']);
+        } finally {
+            \fclose($stream);
+        }
+    }
+
+    #[Test]
     public function lowering_serialises_to_a_byte_stable_json_string(): void
     {
         // Cross-language byte parity: this MUST equal the literal string the TS
