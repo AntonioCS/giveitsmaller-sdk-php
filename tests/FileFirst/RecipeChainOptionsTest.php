@@ -77,16 +77,16 @@ final class RecipeChainOptionsTest extends TestCase
     // --- 1. Explicit options reach the wire ---------------------------------
 
     #[Test]
-    public function convert_merges_the_options_bag_after_format(): void
+    public function convert_lowers_shorthand_to_output_format_and_merges_the_bag(): void
     {
         $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['codec' => 'h265', 'quality' => 90]));
-        // The explicit $format is spread LAST (authoritative), so it trails the
-        // bag keys in PHP insertion order. Assert membership order-independently
-        // so this does not couple to insertion order, then pin the key/values.
+        // The shorthand $format lowers to the `output_format` wire key (contract:
+        // convert.yaml) and is spread LAST (authoritative). Assert membership
+        // order-independently so this does not couple to insertion order.
         self::assertCount(1, $ops);
         self::assertSame('convert', $ops[0]['type']);
         self::assertEqualsCanonicalizing(
-            ['format' => 'mp4', 'codec' => 'h265', 'quality' => 90],
+            ['output_format' => 'mp4', 'codec' => 'h265', 'quality' => 90],
             $ops[0]['options'],
         );
     }
@@ -133,14 +133,24 @@ final class RecipeChainOptionsTest extends TestCase
     // --- 1b. Explicit shorthand arg is AUTHORITATIVE over a bag key (codex r2) ---
 
     #[Test]
-    public function convert_explicit_format_arg_wins_over_a_bag_format_key(): void
+    public function convert_explicit_format_arg_wins_over_a_bag_output_format_key(): void
     {
-        // Codex r2 bug 1: $options is spread FIRST then the explicit $format, so a
-        // `format` key in the bag CANNOT override the call's explicit argument.
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['format' => 'webm']));
+        // The shorthand lowers to output_format and is spread LAST, so an
+        // `output_format` key in the bag CANNOT override the call's explicit arg.
+        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['output_format' => 'webm']));
         self::assertCount(1, $ops);
         self::assertSame('convert', $ops[0]['type']);
-        self::assertSame('mp4', $ops[0]['options']['format'], 'the explicit format arg wins; the bag format is overridden');
+        self::assertSame('mp4', $ops[0]['options']['output_format'], 'the explicit format arg wins; the bag output_format is overridden');
+    }
+
+    #[Test]
+    public function convert_drops_a_stray_legacy_format_bag_key(): void
+    {
+        // A `format` key in the bag is the OLD (wrong) wire key — the shorthand
+        // now owns output_format, so the stray `format` must NOT leak onto the wire.
+        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['format' => 'legacy', 'codec' => 'h264']));
+        self::assertEqualsCanonicalizing(['output_format' => 'mp4', 'codec' => 'h264'], $ops[0]['options']);
+        self::assertArrayNotHasKey('format', $ops[0]['options']);
     }
 
     #[Test]
@@ -160,14 +170,14 @@ final class RecipeChainOptionsTest extends TestCase
             [FileInput::path('a.mp4'), FileInput::path('b.mp4')],
             new MergeOptions(mediaKind: 'video'),
         ))
-            ->convert('mp4', ['format' => 'webm'])
+            ->convert('mp4', ['output_format' => 'webm'])
             ->toWorkflowPayload(['f0', 'f1'], null);
 
         $mergeJob = $payload->jobs[2]; // 2 src jobs + the merge job
         self::assertSame('convert', $mergeJob->operations[1]->type);
         $options = $mergeJob->operations[1]->options;
         self::assertIsArray($options);
-        self::assertSame('mp4', $options['format'], 'the explicit format arg wins on the merge job convert');
+        self::assertSame('mp4', $options['output_format'], 'the explicit format arg wins on the merge job convert');
     }
 
     // --- 2. compress precedence mirrors the op-first resolver ----------------
@@ -379,10 +389,10 @@ final class RecipeChainOptionsTest extends TestCase
     }
 
     #[Test]
-    public function convert_with_no_bag_carries_only_the_format(): void
+    public function convert_with_no_bag_carries_only_output_format(): void
     {
         self::assertSame(
-            [['type' => 'convert', 'options' => ['format' => 'png']]],
+            [['type' => 'convert', 'options' => ['output_format' => 'png']]],
             $this->operations($this->recipe('clip.mov')->convert('png')),
         );
     }
@@ -424,7 +434,7 @@ final class RecipeChainOptionsTest extends TestCase
             self::assertSame('convert', $job['operations'][0]['type']);
             // $format is spread LAST (authoritative); assert order-independently.
             self::assertEqualsCanonicalizing(
-                ['format' => 'mp4', 'codec' => 'h265'],
+                ['output_format' => 'mp4', 'codec' => 'h265'],
                 $job['operations'][0]['options'],
             );
         }
@@ -504,7 +514,7 @@ final class RecipeChainOptionsTest extends TestCase
         $mergeJob = $payload->jobs[2];
         self::assertSame('convert', $mergeJob->operations[1]->type);
         // $format is spread LAST (authoritative); assert order-independently.
-        self::assertEqualsCanonicalizing(['format' => 'webm', 'codec' => 'vp9'], $mergeJob->operations[1]->options);
+        self::assertEqualsCanonicalizing(['output_format' => 'webm', 'codec' => 'vp9'], $mergeJob->operations[1]->options);
     }
 
     #[Test]

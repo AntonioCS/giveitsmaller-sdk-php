@@ -148,10 +148,10 @@ final class RecipeTest extends TestCase
     // --- Single-op lowering -------------------------------------------------
 
     #[Test]
-    public function convert_lowers_to_a_format_option(): void
+    public function convert_lowers_to_an_output_format_option(): void
     {
         $ops = $this->operations($this->recipe('clip.mov')->convert('mp4'));
-        self::assertSame([['type' => 'convert', 'options' => ['format' => 'mp4']]], $ops);
+        self::assertSame([['type' => 'convert', 'options' => ['output_format' => 'mp4']]], $ops);
     }
 
     #[Test]
@@ -416,7 +416,7 @@ final class RecipeTest extends TestCase
         // test pins (file-first-recipe.test.ts) — same FILE_ID, same chain.
         $json = \json_encode($this->recipe('clip.mov')->convert('mp4')->toWorkflowPayload(self::FILE_ID)->toWire());
         self::assertSame(
-            '{"jobs":[{"source":{"type":"upload","file_id":"file_0001"},"operations":[{"type":"convert","options":{"format":"mp4"}}]}]}',
+            '{"jobs":[{"source":{"type":"upload","file_id":"file_0001"},"operations":[{"type":"convert","options":{"output_format":"mp4"}}]}]}',
             $json,
         );
     }
@@ -439,7 +439,7 @@ final class RecipeTest extends TestCase
         );
 
         self::assertSame(['convert', 'compress'], array_column($ops, 'type'));
-        self::assertSame(['format' => 'mp4'], $ops[0]['options']);
+        self::assertSame(['output_format' => 'mp4'], $ops[0]['options']);
         self::assertSame($expectedCompress, $ops[1]['options']);
     }
 

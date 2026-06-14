@@ -89,9 +89,13 @@ final class Recipe
      */
     public function convert(string $format, array $options = []): self
     {
-        // Spread options FIRST so the explicit `$format` argument is authoritative —
-        // a `format` key in the bag must NOT silently override the call's format.
-        return $this->withStep(new RecipeStep('convert', [...$options, 'format' => $format]));
+        // The convert op's wire key is `output_format` (contract: convert.yaml,
+        // required, all media), NOT `format`. Spread options FIRST so the explicit
+        // shorthand wins over an `output_format` key in the bag.
+        // The shorthand owns the format → a stray legacy `format` key in the bag
+        // is not a valid convert option; drop it so the wire never carries both.
+        unset($options['format']);
+        return $this->withStep(new RecipeStep('convert', [...$options, 'output_format' => $format]));
     }
 
     /**

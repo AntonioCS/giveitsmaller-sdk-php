@@ -108,7 +108,7 @@ final class FilesRecipeTest extends TestCase
         foreach ($jobs as $i => $job) {
             self::assertSame(['type' => 'upload', 'file_id' => "file_{$i}"], $job['source']);
             // Every input gets the SAME lowered operations[].
-            self::assertSame([['type' => 'convert', 'options' => ['format' => 'webp']]], $job['operations']);
+            self::assertSame([['type' => 'convert', 'options' => ['output_format' => 'webp']]], $job['operations']);
             // Wire key order (id, source, operations) for cross-language JSON parity.
             self::assertSame(['id', 'source', 'operations'], array_keys($job));
         }
@@ -164,7 +164,7 @@ final class FilesRecipeTest extends TestCase
             $this->filesRecipe(['a.jpg'])->convert('webp')->toWorkflowPayload(['file_0'])->toWire(),
         );
         self::assertSame(
-            '{"jobs":[{"id":"file-0","source":{"type":"upload","file_id":"file_0"},"operations":[{"type":"convert","options":{"format":"webp"}}]}]}',
+            '{"jobs":[{"id":"file-0","source":{"type":"upload","file_id":"file_0"},"operations":[{"type":"convert","options":{"output_format":"webp"}}]}]}',
             $json,
         );
     }
