@@ -138,9 +138,13 @@ final class PresetResolver
      * snake_case wire-field surface per media — used by {@see validateMerged()}
      * unknown-field defence. Verbatim from `preset_resolver.ts:423-431`.
      *
+     * Public so the wire-key conformance guard (WireKeyConformanceTest) can pin
+     * this hand-maintained allowlist to the generated contract metadata: every
+     * field the resolver may emit MUST be a real `compress` contract option key.
+     *
      * @var array<string, list<string>>
      */
-    private const KNOWN_WIRE_FIELDS = [
+    public const KNOWN_WIRE_FIELDS = [
         'image' => ['mode', 'quality', 'metadata', 'icc_profile', 'progressive', 'output_format'],
         'audio' => ['bitrate', 'channels', 'sample_rate', 'normalize', 'trim_start', 'trim_end'],
         'video' => ['codec', 'encoding_mode', 'crf', 'target_size_bytes', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audio_codec', 'audio_bitrate', 'trim_start', 'trim_end'],

@@ -12,7 +12,7 @@ namespace Gisl\Sdk\FileFirst;
  *
  * Immutable value object. The `$options` shape is per-op:
  *  - `compress`       — `['optimize' => OptimizeFor|null]` (resolved at lower-time).
- *  - `convert`        — `['format' => string]`.
+ *  - `convert`        — `['output_format' => string]` (the contract convert key; the `format` shorthand is lowered to it).
  *  - `thumbnail`      — `['width'? => int, 'height'? => int]` (nulls already dropped).
  *  - `text_watermark` — `['text' => string]`.
  */

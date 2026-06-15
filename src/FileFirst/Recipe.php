@@ -82,7 +82,8 @@ final class Recipe
 
     /**
      * Change format. `$format` is the target container/codec family
-     * (e.g. `'mp4'`, `'webp'`) — lowered verbatim to the `format` wire option.
+     * (e.g. `'mp4'`, `'webp'`) — lowered to the `output_format` wire option
+     * (the contract's required convert key, see convert.yaml), NOT `format`.
      * `$options` carries any additional per-op convert options.
      *
      * @param array<string, mixed> $options
