@@ -220,12 +220,17 @@ final class Recipe
      * @param Cancellation|null $cancellation Cooperative cancellation token —
      *        cancel it to abort the run early (between steps) with a
      *        {@see \Gisl\Sdk\Errors\GislAbortError}.
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for a
+     *        VIDEO upload that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Overall timeout (ms) for the probe wait.
      */
     public function run(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
         ?int $pollIntervalMs = null,
         ?Cancellation $cancellation = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): RunResult {
         if ($this->client === null) {
             throw new GislConfigError(
@@ -239,7 +244,14 @@ final class Recipe
 
         // 1+2. Upload (when required) + create the workflow. Shared with
         // submit() (which passes a webhook → callback_url). run() passes none.
-        $created = $this->uploadAndCreate(null, $deadlineMs, $onProgressClosure, $cancellation);
+        $created = $this->uploadAndCreate(
+            null,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+        );
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -298,9 +310,15 @@ final class Recipe
      *
      * @param string|null $webhook Absolute callback URL the server POSTs
      *                             lifecycle events to.
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for a
+     *        VIDEO upload that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Overall timeout (ms) for the probe wait.
      */
-    public function submit(?string $webhook = null): Handle
-    {
+    public function submit(
+        ?string $webhook = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
+    ): Handle {
         if ($this->client === null) {
             throw new GislConfigError(
                 'Recipe::submit() requires a client; build the recipe via Gisl::create()->file(...) rather than constructing Recipe directly.',
@@ -314,7 +332,7 @@ final class Recipe
         // null so the post-upload deadline check is skipped: a 300s cap here
         // would throw on a slow-but-successful big upload before createWorkflow
         // (codex).
-        $created = $this->uploadAndCreate($webhook, null, null);
+        $created = $this->uploadAndCreate($webhook, null, null, null, $probeBeforeCreate, $probeTimeoutMs);
 
         return new Handle(
             workflowId: $created->getWorkflowId() ?? '',
@@ -341,6 +359,8 @@ final class Recipe
         ?int $deadlineMs,
         ?\Closure $onProgressClosure,
         ?Cancellation $cancellation = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): WorkflowCreateResponse {
         // 0. Honour an already-cancelled token before spending the upload.
         BuilderInternals::throwIfCancelled($cancellation, 'upload');
@@ -355,6 +375,10 @@ final class Recipe
         // a path or a seekable stream resource (VOxtu0RZ-B4) is uploaded now,
         // emitting UploadProgressEvent from the byte counter. A non-seekable
         // stream is rejected by uploadFile().
+        //
+        // A pre-uploaded id carries no local mime/size, so the video probe-gate
+        // is skipped for it (no $uploadResp to read getSizeBytes() from).
+        $uploadSizeBytes = null;
         if ($this->input->kind === FileInput::KIND_UPLOAD_ID) {
             $fileId = BuilderInternals::coerceString($this->input->fileId);
         } else {
@@ -380,6 +404,7 @@ final class Recipe
             }
             $uploadResp = $this->client?->uploadFile($uploadTarget, $uploadOpts);
             $fileId = $uploadResp?->getFileId() ?? '';
+            $uploadSizeBytes = $uploadResp?->getSizeBytes();
         }
 
         // Codex TS r2 medium 9a117f04eb59 — run() passes a whole-run deadline so
@@ -388,6 +413,29 @@ final class Recipe
         BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
         if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError('Upload completed but maxWait elapsed before workflow could be created.');
+        }
+
+        // Best-effort probe-before-create: for a VIDEO upload that went
+        // multipart, let the server see the codec + duration before
+        // createWorkflow so it admits the parallel split. Never-bounce — a
+        // give-up just proceeds. The wait is CAPPED to the remaining maxWait
+        // budget so a slow probe cannot push createWorkflow past the deadline.
+        \assert($this->client !== null);
+        $this->client->maybeWaitForVideoProbe(
+            $fileId,
+            $probeBeforeCreate ?? true,
+            $this->input->compressMediaHint() === 'video',
+            $uploadSizeBytes,
+            BuilderInternals::cappedProbeTimeoutMs($probeTimeoutMs, $deadlineMs),
+            $cancellation,
+        );
+        // A cancel arriving during the FINAL successful probe request must not
+        // still create the workflow (maybeWaitForVideoProbe returns landed
+        // without a final cancel re-check), so check here BEFORE createWorkflow.
+        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
+        // RE-CHECK the deadline AFTER the probe wait (it consumes time).
+        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before workflow could be created.');
         }
 
         // 2. Create the workflow from the lowered payload (callback_url built

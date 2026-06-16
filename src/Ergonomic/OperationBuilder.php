@@ -360,6 +360,28 @@ final class OperationBuilder
             );
         }
 
+        // Best-effort probe-before-create for a multipart video upload
+        // (never-bounce). Capped to the remaining maxWait budget so a slow probe
+        // cannot push createWorkflow past the caller's deadline.
+        $this->client->maybeWaitForVideoProbe(
+            $uploadResp->getFileId() ?? '',
+            $options->probeBeforeCreate ?? true,
+            self::detectCompressMedia($this->input) === 'video',
+            $uploadResp->getSizeBytes(),
+            BuilderInternals::cappedProbeTimeoutMs($options->probeTimeoutMs, $deadlineMs),
+            $options->cancellation,
+        );
+        // A cancel arriving during the FINAL successful probe request must not
+        // still create the workflow (maybeWaitForVideoProbe returns landed
+        // without a final cancel re-check), so check here BEFORE createWorkflow.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'workflow creation');
+        // RE-CHECK the deadline AFTER the probe wait (it consumes time).
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                'Probe wait completed but maxWait elapsed before workflow could be created.',
+            );
+        }
+
         // 2. Build + create the workflow with the resolved wire options.
         $job = new JobDefinitionPayload(
             operations: [new OperationDef(type: $this->opType, options: $resolved['wireOptions'])],
@@ -426,6 +448,22 @@ final class OperationBuilder
         // A cancel that arrived DURING the upload must not still create a
         // workflow (parity with run() + MergeBuilder::submit()).
         BuilderInternals::throwIfCancelled($options->cancellation, 'workflow creation');
+
+        // Best-effort probe-before-create for a multipart video upload (never-bounce).
+        $this->client->maybeWaitForVideoProbe(
+            $uploadResp->getFileId() ?? '',
+            $options->probeBeforeCreate ?? true,
+            self::detectCompressMedia($this->input) === 'video',
+            $uploadResp->getSizeBytes(),
+            $options->probeTimeoutMs,
+            $options->cancellation,
+        );
+
+        // A cancel during the final probe wait must not still create (parity
+        // with run() — maybeWaitForVideoProbe returns landed without a final
+        // cancel re-check).
+        BuilderInternals::throwIfCancelled($options->cancellation, 'workflow creation');
+
         $job = new JobDefinitionPayload(
             operations: [new OperationDef(type: $this->opType, options: $resolved['wireOptions'])],
             id: 'op',

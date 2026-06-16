@@ -2304,7 +2304,11 @@ class GislClient
     public function waitForProbe(string $fileId, ?ProbeWaitOptions $options = null): ProbeWaitResult
     {
         $opts = $options ?? new ProbeWaitOptions();
-        $timeoutMs = ($opts->timeoutMs !== null && $opts->timeoutMs >= 0) ? $opts->timeoutMs : 30_000;
+        // A null timeoutMs uses the 30s default; a NEGATIVE value clamps to 0
+        // (NOT the default) so a sub-zero budget fires zero probe requests
+        // (with the pre-request deadline check below). Mirrors the TS
+        // sanitiseBaseMs negative-clamp.
+        $timeoutMs = $opts->timeoutMs === null ? 30_000 : \max(0, $opts->timeoutMs);
         $cancellation = $opts->cancellation;
         $onPoll = $opts->onPoll;
 
@@ -2320,6 +2324,12 @@ class GislClient
         while (true) {
             if ($cancellation?->isCancelled() === true) {
                 throw new GislAbortError('Cancelled during probe wait.');
+            }
+            // Pre-request deadline check (mirrors the TS `remainingBeforeAttempt
+            // <= 0` guard): a timeoutMs<=0 must give up BEFORE issuing any probe
+            // HTTP call, so a 0-budget wait fires zero requests.
+            if (\hrtime(true) >= $deadlineNs) {
+                return new ProbeWaitResult(landed: false, reason: 'timeout');
             }
             ++$attempt;
             if (\is_callable($onPoll)) {
@@ -2368,6 +2378,34 @@ class GislClient
                 return new ProbeWaitResult(landed: false, reason: 'timeout');
             }
         }
+    }
+
+    /**
+     * Best-effort probe-before-create for a VIDEO upload that went multipart.
+     * No-op unless enabled AND `$isVideo` AND the upload exceeded the multipart
+     * threshold (i.e. it was a multipart upload — small single-shot videos skip
+     * the wait). Delegates to {@see waitForProbe()} (never-bounce): a give-up
+     * just returns; genuine failures / a cancelled token propagate. The caller
+     * passes `$isVideo` so the low-level client never imports ergonomic media
+     * detection.
+     *
+     * Mirrors `packages/typescript/src/client.ts::maybeWaitForVideoProbe`.
+     */
+    public function maybeWaitForVideoProbe(
+        string $fileId,
+        bool $enabled,
+        bool $isVideo,
+        ?int $sizeBytes,
+        ?int $timeoutMs = null,
+        ?Cancellation $cancellation = null,
+    ): void {
+        if (!$enabled || !$isVideo) {
+            return;
+        }
+        if ($sizeBytes === null || $sizeBytes <= $this->config->multipartThresholdBytes) {
+            return;
+        }
+        $this->waitForProbe($fileId, new ProbeWaitOptions(timeoutMs: $timeoutMs, cancellation: $cancellation));
     }
 
     /**

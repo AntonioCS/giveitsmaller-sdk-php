@@ -58,18 +58,30 @@ final class ArchivedRecipe
      * output into a {@see RunResult}. Throws {@see GislTimeoutError} on `$maxWait`.
      *
      * @param (callable(\Gisl\Sdk\Ergonomic\ProgressEvent): void)|null $onProgress
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for the
+     *        VIDEO inputs that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Aggregate timeout (ms) for the probe waits.
      */
     public function run(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
         ?int $pollIntervalMs = null,
         ?Cancellation $cancellation = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): RunResult {
         $client = $this->requireClient();
         $deadlineMs = BuilderInternals::nowMs() + MaxWait::parse($maxWait ?? 300_000);
         $onProgressClosure = BuilderInternals::callableOrNull($onProgress, 'ArchivedRecipe::run() $onProgress');
 
-        $created = $this->uploadAllAndCreate(null, $deadlineMs, $onProgressClosure, $cancellation);
+        $created = $this->uploadAllAndCreate(
+            null,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+        );
         $workflowId = $created->getWorkflowId() ?? '';
 
         $finalStatus = BuilderInternals::awaitTerminal(
@@ -118,11 +130,18 @@ final class ArchivedRecipe
      * Fire-and-forget: upload + create the archive workflow (wiring `$webhook`
      * into `callback_url` when given), return a client-bound {@see Handle}.
      * Mirrors {@see Recipe::submit()}.
+     *
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for the
+     *        VIDEO inputs that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Aggregate timeout (ms) for the probe waits.
      */
-    public function submit(?string $webhook = null): Handle
-    {
+    public function submit(
+        ?string $webhook = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
+    ): Handle {
         $this->requireClient();
-        $created = $this->uploadAllAndCreate($webhook, null, null, null);
+        $created = $this->uploadAllAndCreate($webhook, null, null, null, $probeBeforeCreate, $probeTimeoutMs);
 
         return new Handle(
             workflowId: $created->getWorkflowId() ?? '',
@@ -154,6 +173,8 @@ final class ArchivedRecipe
         ?int $deadlineMs,
         ?\Closure $onProgressClosure,
         ?Cancellation $cancellation,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): WorkflowCreateResponse {
         $client = $this->requireClient();
         $this->validatePreUpload();
@@ -171,6 +192,11 @@ final class ArchivedRecipe
         }
 
         $fileIds = [];
+        // Archive is media-agnostic (no inference) — detect per input via
+        // compressMediaHint() so only video uploads are probed. A pre-uploaded
+        // id carries no local mime/size, so it is never probed.
+        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
+        $probeTargets = [];
         foreach ($this->inputs as $input) {
             BuilderInternals::throwIfCancelled($cancellation, 'archive upload');
             if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
@@ -200,11 +226,31 @@ final class ArchivedRecipe
             }
             $resp = $client->uploadFile($uploadTarget, $uploadOpts);
             $fileIds[] = $resp->getFileId() ?? '';
+            $probeTargets[] = [
+                'fileId' => $resp->getFileId() ?? '',
+                'isVideo' => $input->compressMediaHint() === 'video',
+                'sizeBytes' => $resp->getSizeBytes(),
+            ];
         }
 
         BuilderInternals::throwIfCancelled($cancellation, 'archive workflow creation');
         if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError('Uploads completed but maxWait elapsed before the archive workflow could be created.');
+        }
+
+        // Best-effort probe-before-create for the multipart-video inputs
+        // (sequential with a shared budget; never-bounce). The total budget is
+        // capped to the remaining maxWait (run() passes $deadlineMs; submit()
+        // passes null → uncapped) so the waits cannot push createWorkflow past
+        // the caller's deadline.
+        BuilderInternals::waitForVideoProbes($client, $probeTargets, $probeBeforeCreate, $probeTimeoutMs, $cancellation, $deadlineMs);
+        // A cancel arriving during a FINAL successful probe request must not
+        // still create the workflow (the probe waits return landed without a
+        // final cancel re-check), so check here BEFORE createWorkflow.
+        BuilderInternals::throwIfCancelled($cancellation, 'archive workflow creation');
+        // RE-CHECK the deadline AFTER the probe waits (they consume time).
+        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before the archive workflow could be created.');
         }
 
         return $client->createWorkflow($this->toWorkflowPayload($fileIds, $webhook));

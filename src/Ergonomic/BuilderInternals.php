@@ -43,6 +43,87 @@ final class BuilderInternals
     }
 
     /**
+     * Best-effort probe-before-create for the multipart-video inputs of a
+     * multi-input recipe (fan-out / merge / archive). PHP is sequential (no
+     * Promise.all), so to keep the aggregate wall-clock bounded by the TOTAL
+     * budget rather than N×timeout, a shared budget is tracked: each
+     * {@see GislClient::maybeWaitForVideoProbe()} call gets a per-call
+     * `timeoutMs = max(0, total - elapsed)`. Never-bounce — a give-up just
+     * proceeds; genuine failures / a cancelled token propagate.
+     *
+     * The TOTAL budget is CAPPED to the remaining `$deadlineMs` (maxWait) budget
+     * when a deadline is set (the `run()` path), so the waits cannot push
+     * createWorkflow past the caller's deadline: an UNSET `$probeTimeoutMs`
+     * under a deadline becomes the remaining budget (never the 30000 default),
+     * and a set value is clamped to it. When `$deadlineMs` is null (the
+     * `submit()` fire-and-forget path), the total is `$probeTimeoutMs` (default
+     * 30000), uncapped.
+     *
+     * Mirrors the TS reference's concurrent `Promise.all` of per-file waits
+     * (each bounded by the same capped timeout, so wall-clock stays ~timeout).
+     *
+     * @param list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets
+     */
+    public static function waitForVideoProbes(
+        GislClient $client,
+        array $probeTargets,
+        ?bool $probeBeforeCreate,
+        ?int $probeTimeoutMs,
+        ?Cancellation $cancellation,
+        ?int $deadlineMs = null,
+    ): void {
+        if ($probeTargets === []) {
+            return;
+        }
+        if ($deadlineMs !== null) {
+            // Cap the total budget to the remaining maxWait. An UNSET (null)
+            // probeTimeoutMs becomes the remaining budget (never the 30s
+            // default); a NEGATIVE value clamps to 0 (fires zero probes), not
+            // the default — distinct from null.
+            $remainingDeadlineMs = \max(0, $deadlineMs - self::nowMs());
+            $totalMs = $probeTimeoutMs === null
+                ? $remainingDeadlineMs
+                : \min(\max(0, $probeTimeoutMs), $remainingDeadlineMs);
+        } else {
+            $totalMs = $probeTimeoutMs === null ? 30_000 : \max(0, $probeTimeoutMs);
+        }
+        $startMs = self::nowMs();
+        foreach ($probeTargets as $target) {
+            $remainingMs = \max(0, $totalMs - (self::nowMs() - $startMs));
+            // Budget exhausted — skip the remaining probes entirely (a 0-budget
+            // wait would just return immediately after the pre-request check).
+            if ($remainingMs <= 0) {
+                break;
+            }
+            $client->maybeWaitForVideoProbe(
+                $target['fileId'],
+                $probeBeforeCreate ?? true,
+                $target['isVideo'],
+                $target['sizeBytes'],
+                $remainingMs,
+                $cancellation,
+            );
+        }
+    }
+
+    /**
+     * Cap a best-effort probe-before-create timeout to the remaining `maxWait`
+     * budget so the probe wait can never push createWorkflow past the caller's
+     * deadline. Mirrors the TS `_cappedProbeTimeoutMs`. Under a deadline an
+     * UNSET `$probeTimeoutMs` becomes the remaining budget (never the 30000
+     * waitForProbe default); a set value is clamped to it. With no deadline (the
+     * `submit()` path) `$probeTimeoutMs` passes through unchanged.
+     */
+    public static function cappedProbeTimeoutMs(?int $probeTimeoutMs, ?int $deadlineMs): ?int
+    {
+        if ($deadlineMs === null) {
+            return $probeTimeoutMs;
+        }
+        $remainingMs = \max(0, $deadlineMs - self::nowMs());
+        return $probeTimeoutMs !== null ? \min($probeTimeoutMs, $remainingMs) : $remainingMs;
+    }
+
+    /**
      * Cooperative-cancellation checkpoint. Throws {@see GislAbortError} when the
      * caller's {@see Cancellation} token has been cancelled. A null token (the
      * default) is a no-op. Call this at the same boundaries the `maxWait`

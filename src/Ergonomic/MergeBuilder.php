@@ -106,12 +106,30 @@ final class MergeBuilder
         // 2. Upload each unique asset exactly ONCE. Pass the deadline + the
         // cancellation token so the upload loop can abort mid-batch on a slow
         // connection or a caller cancel.
-        $uploadedByAssetId = $this->uploadUniqueAssets($plan, $onProgress, $deadlineMs, $options->cancellation);
+        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
+        $probeTargets = [];
+        $uploadedByAssetId = $this->uploadUniqueAssets($plan, $onProgress, $deadlineMs, $options->cancellation, $probeTargets);
 
         BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
         if (BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError(
                 'Upload(s) completed but maxWait elapsed before merge workflow could be created.',
+            );
+        }
+
+        // Best-effort probe-before-create for the multipart-video inputs
+        // (sequential with a shared budget; never-bounce). The total budget is
+        // capped to the remaining maxWait so the waits cannot push
+        // createWorkflow past the caller's deadline.
+        BuilderInternals::waitForVideoProbes($this->client, $probeTargets, $options->probeBeforeCreate, $options->probeTimeoutMs, $options->cancellation, $deadlineMs);
+        // A cancel arriving during a FINAL successful probe request must not
+        // still create the workflow (the probe waits return landed without a
+        // final cancel re-check), so check here BEFORE createWorkflow.
+        BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
+        // RE-CHECK the deadline AFTER the probe waits (they consume time).
+        if (BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError(
+                'Probe wait completed but maxWait elapsed before merge workflow could be created.',
             );
         }
 
@@ -169,9 +187,20 @@ final class MergeBuilder
     public function submit(SubmitOptions $options): Handle
     {
         $plan = $this->planSequence();
-        $uploadedByAssetId = $this->uploadUniqueAssets($plan, onProgress: null, deadlineMs: null, cancellation: $options->cancellation);
+        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
+        $probeTargets = [];
+        $uploadedByAssetId = $this->uploadUniqueAssets($plan, onProgress: null, deadlineMs: null, cancellation: $options->cancellation, probeTargets: $probeTargets);
 
         BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
+
+        // Best-effort probe-before-create for the multipart-video inputs
+        // (sequential with a shared budget; never-bounce).
+        BuilderInternals::waitForVideoProbes($this->client, $probeTargets, $options->probeBeforeCreate, $options->probeTimeoutMs, $options->cancellation);
+
+        // A cancel during the final probe wait must not still create (parity
+        // with run()).
+        BuilderInternals::throwIfCancelled($options->cancellation, 'merge workflow creation');
+
         $payload = $this->buildPayload($plan, $uploadedByAssetId, callbackUrl: $options->webhook);
         $created = $this->client->createWorkflow($payload);
 
@@ -328,6 +357,12 @@ final class MergeBuilder
      * uploads when supplied (TS R1 medium 797b4113431f).
      *
      * @param \Closure(ProgressEvent): void|null $onProgress
+     * @param list<array{fileId: string, isVideo: bool, sizeBytes: int|null}>|null $probeTargets
+     *        Out-parameter: each freshly-uploaded asset records its probe-gate
+     *        inputs here. Per-asset video detection — merge's inferMediaKind is
+     *        the OUTPUT media, not each input's. A HandleAsset carries no local
+     *        mime/size, so it is never probed; a ResourceAsset carries no
+     *        filename/contentType signal, so it is treated as non-video.
      * @return array<string, string>  Asset-id → uploaded `file_id`.
      */
     private function uploadUniqueAssets(
@@ -335,6 +370,7 @@ final class MergeBuilder
         ?\Closure $onProgress,
         ?int $deadlineMs,
         ?Cancellation $cancellation = null,
+        ?array &$probeTargets = null,
     ): array {
         $uploaded = [];
         $total = \count($plan->uniqueAssets);
@@ -363,12 +399,23 @@ final class MergeBuilder
             if ($asset instanceof ResourceAsset) {
                 \assert(\is_resource($asset->resource));
                 $uploadTarget = $asset->resource;
+                // A ResourceAsset carries no filename/contentType signal, so the
+                // media class cannot be inferred — treat it as non-video (skip).
+                $isVideo = false;
             } else {
                 /** @var PathAsset $asset */
                 $uploadTarget = $asset->path;
+                $isVideo = OperationBuilder::detectCompressMedia($asset->path) === 'video';
             }
             $resp = $this->client->uploadFile($uploadTarget, $uploadOpts);
             $uploaded[$id] = $resp->getFileId() ?? '';
+            if ($probeTargets !== null) {
+                $probeTargets[] = [
+                    'fileId' => $resp->getFileId() ?? '',
+                    'isVideo' => $isVideo,
+                    'sizeBytes' => $resp->getSizeBytes(),
+                ];
+            }
             $done++;
         }
         return $uploaded;

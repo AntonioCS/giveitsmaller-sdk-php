@@ -64,6 +64,8 @@ final class MapEachBuilder
             useSSE: $options->useSSE,
             pollIntervalMs: $options->pollIntervalMs,
             cancellation: $options->cancellation,
+            probeBeforeCreate: $options->probeBeforeCreate,
+            probeTimeoutMs: $options->probeTimeoutMs,
         ));
 
         // 2. Fan out the fn over each artifact, sequentially.
@@ -93,6 +95,8 @@ final class MapEachBuilder
                 useSSE: $options->useSSE,
                 pollIntervalMs: $options->pollIntervalMs,
                 cancellation: $options->cancellation,
+                probeBeforeCreate: $options->probeBeforeCreate,
+                probeTimeoutMs: $options->probeTimeoutMs,
             ));
             foreach ($childResult->artifacts as $a) {
                 $collectedArtifacts[] = $a;

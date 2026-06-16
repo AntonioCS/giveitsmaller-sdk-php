@@ -25,9 +25,15 @@ use Gisl\Sdk\Cancellation;
  */
 final class SubmitOptions
 {
+    /**
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for a VIDEO upload that went multipart (default true). Pass false to skip.
+     * @param int|null  $probeTimeoutMs    Overall timeout (ms) for the probe-before-create wait.
+     */
     public function __construct(
         public readonly string $webhook,
         public readonly ?Cancellation $cancellation = null,
+        public readonly ?bool $probeBeforeCreate = null,
+        public readonly ?int $probeTimeoutMs = null,
     ) {
     }
 }

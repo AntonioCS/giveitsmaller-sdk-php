@@ -234,12 +234,17 @@ final class FilesRecipe
      * @param Cancellation|null $cancellation Cooperative cancellation token —
      *        cancel it to abort the fan-out early (between uploads / wait frames)
      *        with a {@see \Gisl\Sdk\Errors\GislAbortError}.
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for the
+     *        VIDEO inputs that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Aggregate timeout (ms) for the probe waits.
      */
     public function run(
         string|int|null $maxWait = null,
         ?callable $onProgress = null,
         ?int $pollIntervalMs = null,
         ?Cancellation $cancellation = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): RunResult {
         if ($this->client === null) {
             throw new GislConfigError(
@@ -253,7 +258,14 @@ final class FilesRecipe
 
         // 1+2. Upload EVERY input + create ONE multi-job workflow. Shared with
         // submit() (which passes a webhook → callback_url and a null deadline).
-        $created = $this->uploadAllAndCreate(null, $deadlineMs, $onProgressClosure, $cancellation);
+        $created = $this->uploadAllAndCreate(
+            null,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+        );
         $workflowId = $created->getWorkflowId() ?? '';
 
         // 3. Wait to terminal status — SSE first, poll on a genuine SSE error.
@@ -319,9 +331,15 @@ final class FilesRecipe
      *
      * @param string|null $webhook Absolute callback URL the server POSTs
      *                             lifecycle events to.
+     * @param bool|null $probeBeforeCreate Best-effort probe-before-create for the
+     *        VIDEO inputs that went multipart (default true). Pass false to skip.
+     * @param int|null $probeTimeoutMs Aggregate timeout (ms) for the probe waits.
      */
-    public function submit(?string $webhook = null): Handle
-    {
+    public function submit(
+        ?string $webhook = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
+    ): Handle {
         if ($this->client === null) {
             throw new GislConfigError(
                 'FilesRecipe::submit() requires a client; build the fan-out via Gisl::create()->files(...) rather than constructing FilesRecipe directly.',
@@ -331,7 +349,7 @@ final class FilesRecipe
 
         // Fire-and-forget — null deadline so a slow-but-successful big upload is
         // not capped before createWorkflow (mirrors Recipe::submit()).
-        $created = $this->uploadAllAndCreate($webhook, null, null);
+        $created = $this->uploadAllAndCreate($webhook, null, null, null, $probeBeforeCreate, $probeTimeoutMs);
 
         return new Handle(
             workflowId: $created->getWorkflowId() ?? '',
@@ -359,6 +377,8 @@ final class FilesRecipe
         ?int $deadlineMs,
         ?\Closure $onProgressClosure,
         ?Cancellation $cancellation = null,
+        ?bool $probeBeforeCreate = null,
+        ?int $probeTimeoutMs = null,
     ): WorkflowCreateResponse {
         \assert($this->client !== null);
 
@@ -389,6 +409,10 @@ final class FilesRecipe
         // seekable stream resource (VOxtu0RZ-B4) otherwise, via the byte-counter
         // progress closure.
         $fileIds = [];
+        // Per-input probe-gate inputs for freshly-uploaded inputs only (a
+        // pre-uploaded id carries no local mime/size, so it is never probed).
+        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
+        $probeTargets = [];
         foreach ($this->inputs as $input) {
             // Fail fast between uploads — a deadline that elapses or a caller
             // cancel mid-batch should not force every remaining input to upload
@@ -421,12 +445,32 @@ final class FilesRecipe
                 }
                 $uploadResp = $this->client->uploadFile($uploadTarget, $uploadOpts);
                 $fileIds[] = $uploadResp->getFileId() ?? '';
+                $probeTargets[] = [
+                    'fileId' => $uploadResp->getFileId() ?? '',
+                    'isVideo' => $input->compressMediaHint() === 'video',
+                    'sizeBytes' => $uploadResp->getSizeBytes(),
+                ];
             }
         }
 
         BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
         if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
             throw new GislTimeoutError('Uploads completed but maxWait elapsed before workflow could be created.');
+        }
+
+        // Best-effort probe-before-create for the multipart-video inputs
+        // (sequential with a shared budget; never-bounce). The total budget is
+        // capped to the remaining maxWait (run() passes $deadlineMs; submit()
+        // passes null → uncapped) so the waits cannot push createWorkflow past
+        // the caller's deadline.
+        BuilderInternals::waitForVideoProbes($this->client, $probeTargets, $probeBeforeCreate, $probeTimeoutMs, $cancellation, $deadlineMs);
+        // A cancel arriving during a FINAL successful probe request must not
+        // still create the workflow (the probe waits return landed without a
+        // final cancel re-check), so check here BEFORE createWorkflow.
+        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
+        // RE-CHECK the deadline AFTER the probe waits (they consume time).
+        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
+            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before workflow could be created.');
         }
 
         // 2. Create ONE multi-job workflow (callback_url built in when webhook given).
