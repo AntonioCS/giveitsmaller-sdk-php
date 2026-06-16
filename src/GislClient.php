@@ -40,6 +40,7 @@ use Gisl\Generated\OpenApi\Model\WorkflowResumeResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowSummary;
 use Gisl\Generated\OpenApi\ObjectSerializer;
+use Gisl\Sdk\Errors\GislAbortError;
 use Gisl\Sdk\Errors\GislApiError;
 use Gisl\Sdk\Errors\GislAuthError;
 use Gisl\Sdk\Errors\GislAuthRejectionError;
@@ -2240,10 +2241,16 @@ class GislClient
      * would route the file to. Designed for the long-form merge edge case
      * where a single bad input would fail the whole workflow.
      *
-     * Currently `availability: planned` — calls return
-     * {@see GislFeatureNotAvailableError} (422) until the cross-repo Lambda
-     * support ships. Idempotent: probing the same `fileId` twice returns
-     * the cached result.
+     * Endpoint availability is `stable`. The probe runs asynchronously after
+     * upload: until the result has landed this returns `422`
+     * `feature_not_available` (surfaced as {@see GislFeatureNotAvailableError})
+     * — i.e. that 422 means "probe not landed yet", NOT "not implemented".
+     * Once landed it returns a `200` with any `probe_status`. For video uploads
+     * the landed probe carries the codec + duration the server needs to admit
+     * the parallel split, so calling this (or {@see waitForProbe()}) before
+     * workflow-create is the structural unlock for the fast video path on the
+     * multipart flow. Idempotent: probing the same `fileId` twice returns the
+     * cached result.
      *
      * Mirrors `packages/typescript/src/client.ts::probeUpload`.
      */
@@ -2258,6 +2265,153 @@ class GislClient
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
         return $this->hydrate(UploadProbeResponse::class, $data);
+    }
+
+    /**
+     * Bounded poll of {@see probeUpload()} until the probe lands — the helper
+     * frontends call between upload-complete and workflow-create so the server
+     * sees the video's codec + duration and admits the ~3× parallel split.
+     *
+     * Loop (per the API wire contract):
+     * - `422 feature_not_available` → probe not landed yet → keep polling
+     *   (exponential full-jitter backoff, honouring a `Retry-After` header when
+     *   present, clamped to the remaining budget).
+     * - any `200` → STOP. Returns `landed: true` regardless of `probe_status`
+     *   (ok / corrupt / unsupported_codec / missing_metadata) — the server +
+     *   fan-out gate decide split-vs-single from the landed metadata; the SDK
+     *   does not interpret it.
+     * - `5xx` (prober crash) → retry a couple of times, then give up.
+     * - timeout → give up.
+     *
+     * **Never bounces:** on give-up (timeout / repeated 5xx / transport) it
+     * returns `landed: false` with a `reason` rather than throwing, so the
+     * caller proceeds to create the workflow anyway (the server's size
+     * heuristic routes it; worst case = today's single-task behaviour). Genuine
+     * failures — `404 upload_not_found`, auth errors, or a cancelled token — DO
+     * throw (they are not "probe not ready"), so a real problem is never
+     * swallowed.
+     *
+     * `timeoutMs` bounds the OVERALL poll, checked BETWEEN completed attempts.
+     * PSR-18 has no mid-request cancellation primitive, so a single in-flight
+     * probe request is bounded only by the injected HTTP client's own timeout
+     * (e.g. Guzzle's `timeout`/`connect_timeout`) — set that to keep one slow
+     * probe from running past the wait budget. Cancellation is likewise
+     * cooperative + between-polls (SDK convention): a cancelled token throws
+     * {@see GislAbortError} at the next loop top.
+     *
+     * Mirrors `packages/typescript/src/client.ts::waitForProbe`.
+     */
+    public function waitForProbe(string $fileId, ?ProbeWaitOptions $options = null): ProbeWaitResult
+    {
+        $opts = $options ?? new ProbeWaitOptions();
+        $timeoutMs = ($opts->timeoutMs !== null && $opts->timeoutMs >= 0) ? $opts->timeoutMs : 30_000;
+        $cancellation = $opts->cancellation;
+        $onPoll = $opts->onPoll;
+
+        $startNs = \hrtime(true);
+        $deadlineNs = $startNs + ($timeoutMs * 1_000_000);
+        $baseBackoffMs = 250;
+        $maxProberRetries = 2;
+
+        $attempt = 0;
+        // Counts transient probe-call failures (5xx + transport) — repeated
+        // transients give up so the caller creates anyway (never-bounce).
+        $transientFailures = 0;
+        while (true) {
+            if ($cancellation?->isCancelled() === true) {
+                throw new GislAbortError('Cancelled during probe wait.');
+            }
+            ++$attempt;
+            if (\is_callable($onPoll)) {
+                $elapsedMs = (int) ((\hrtime(true) - $startNs) / 1_000_000);
+                $onPoll(['attempt' => $attempt, 'elapsedMs' => $elapsedMs]);
+            }
+
+            $retryAfterMs = null;
+            try {
+                $probe = $this->probeUpload($fileId);
+                return new ProbeWaitResult(landed: true, probe: $probe);
+            } catch (GislFeatureNotAvailableError $e) {
+                // Not landed yet — keep polling.
+                $retryAfterMs = self::parseRetryAfterMs($e->responseHeaders['retry-after'] ?? null);
+            } catch (GislNetworkError $e) {
+                // Transport failure (transient) → retry a couple of times then
+                // give up; the caller creates anyway (never-bounce).
+                ++$transientFailures;
+                if ($transientFailures > $maxProberRetries) {
+                    return new ProbeWaitResult(landed: false, reason: 'prober_error');
+                }
+            } catch (GislApiError $e) {
+                if ($e->statusCode >= 500) {
+                    ++$transientFailures;
+                    if ($transientFailures > $maxProberRetries) {
+                        return new ProbeWaitResult(landed: false, reason: 'prober_error');
+                    }
+                    $retryAfterMs = self::parseRetryAfterMs($e->responseHeaders['retry-after'] ?? null);
+                } else {
+                    // 404 upload_not_found, auth, or any other typed error is a
+                    // real failure, not "probe not ready" — propagate.
+                    throw $e;
+                }
+            }
+
+            $remainingMs = (int) (($deadlineNs - \hrtime(true)) / 1_000_000);
+            if ($remainingMs <= 0) {
+                return new ProbeWaitResult(landed: false, reason: 'timeout');
+            }
+            $backoffMs = $retryAfterMs ?? self::fullJitterMs($baseBackoffMs, $attempt - 1);
+            $sleepMs = \min($backoffMs, $remainingMs);
+            if ($sleepMs > 0) {
+                \usleep($sleepMs * 1000);
+            }
+            if (\hrtime(true) >= $deadlineNs) {
+                return new ProbeWaitResult(landed: false, reason: 'timeout');
+            }
+        }
+    }
+
+    /**
+     * Parse an HTTP `Retry-After` header into milliseconds. Accepts the two
+     * RFC 9110 forms: delta-seconds (e.g. "5") or an HTTP-date. Returns null
+     * for an absent / unparseable value (caller falls back to its own
+     * backoff). A past HTTP-date clamps to 0.
+     */
+    private static function parseRetryAfterMs(?string $headerValue): ?int
+    {
+        if ($headerValue === null) {
+            return null;
+        }
+        $trimmed = \trim($headerValue);
+        if ($trimmed === '') {
+            return null;
+        }
+        if (\preg_match('/^\d+$/', $trimmed) === 1) {
+            $ms = ((int) $trimmed) * 1000;
+        } else {
+            $whenSec = \strtotime($trimmed);
+            if ($whenSec === false) {
+                return null;
+            }
+            $ms = ($whenSec - \time()) * 1000;
+        }
+
+        // A non-positive Retry-After (e.g. "0" or a past HTTP-date) must NOT
+        // short-circuit the backoff to zero — treat it as absent so the caller
+        // falls back to jitter and the loop can't busy-poll until timeout.
+        return $ms > 0 ? $ms : null;
+    }
+
+    /**
+     * Full-jitter exponential backoff: random(0, base * 2^attemptIndex) ms.
+     * Mirrors the TS `fullJitterDelay`.
+     */
+    private static function fullJitterMs(int $baseMs, int $attemptIndex): int
+    {
+        if ($baseMs <= 0) {
+            return 0;
+        }
+        $ceiling = $baseMs * (2 ** $attemptIndex);
+        return \random_int(0, (int) $ceiling);
     }
 
     /**
