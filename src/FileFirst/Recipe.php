@@ -133,6 +133,43 @@ final class Recipe
     }
 
     /**
+     * Composite an image OVERLAY onto this file (a multi-input op). `$overlay` is
+     * a secondary file-NODE (a {@see Recipe} — e.g. `$client->file('logo.png')`),
+     * itself optionally processed first. Routes by THIS file's effective media:
+     * image base → `image_watermark` (stable), video base → `video_watermark`
+     * (beta). Audio/document/animated-GIF/unsupported-subtype/undetectable bases
+     * throw locally BEFORE any upload (the planned-op gate). `$options` carries
+     * the wire watermark options (`anchor`, `opacity`, `margin_x`, `margin_y`,
+     * `overlay_width`). Returns a {@see WatermarkedRecipe} (chain post-watermark
+     * `compress`/`convert`/`thumbnail`, then `run`/`submit`). Distinct from
+     * {@see textWatermark()} (single-input text overlay). Mirrors the TS
+     * `Recipe::watermark`.
+     *
+     * @param array<string, mixed> $options
+     */
+    public function watermark(Recipe $overlay, array $options = []): WatermarkedRecipe
+    {
+        // Eager gate when the base media is KNOWN (unit-testable pre-upload); an
+        // undetectable base is DEFERRED — re-checked pre-upload in run()/submit().
+        [$media, $mime] = WatermarkGate::effectiveBase($this->input, $this->steps);
+        if ($media !== null) {
+            WatermarkGate::resolveWireOp($media, $mime);
+        }
+        WatermarkGate::validateOverlay($overlay);
+
+        return new WatermarkedRecipe(
+            $this->input,
+            $this->steps,
+            $overlay,
+            $options,
+            [],
+            $this->presetDefaults,
+            $this->scopedPresetDefaults,
+            $this->client,
+        );
+    }
+
+    /**
      * Lower this recipe to a workflow-create payload against a resolved upload
      * id. Single-input chain → ONE job, `source: upload($fileId)`, ordered
      * `operations[]`; the job `id` is omitted (a single job referenced by
@@ -198,6 +235,18 @@ final class Recipe
     public function recipeSteps(): array
     {
         return $this->steps;
+    }
+
+    /**
+     * The primary input this recipe operates on. Read by {@see WatermarkedRecipe}
+     * to lift an overlay Recipe's input (for upload + media inference + src-job
+     * lowering) without exposing the constructor field publicly.
+     *
+     * @internal
+     */
+    public function recipeInput(): FileInput
+    {
+        return $this->input;
     }
 
     /**

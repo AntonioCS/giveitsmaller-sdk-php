@@ -18,6 +18,7 @@ use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\FilesRecipe;
 use Gisl\Sdk\FileFirst\MergedRecipe;
 use Gisl\Sdk\FileFirst\Recipe;
+use Gisl\Sdk\FileFirst\WatermarkedRecipe;
 use Gisl\Sdk\GetSchemaOptions;
 use Gisl\Sdk\GislClient;
 use Gisl\Sdk\GislClientConfig;
@@ -198,6 +199,41 @@ final class Invoke
         $operations = $spec['operations'];
         foreach ($operations as $op) {
             $recipe = self::applyLoweringOp($recipe, $op);
+        }
+
+        // FF4a (Z7zTr789) — a `watermark` block lowers `file(base)->watermark(
+        // overlay, opts)` -> WatermarkedRecipe. The base recipe above carries the
+        // base's preceding steps; build the overlay file-node + its own steps,
+        // then lower against [baseId, overlayId]. Mirrors TS `lowerFixture`.
+        if (isset($spec['watermark']) && \is_array($spec['watermark'])) {
+            $wm = $spec['watermark'];
+            /** @var array<string, mixed> $ov */
+            $ov = $wm['overlay'];
+            /** @var array<string, mixed> $ovFile */
+            $ovFile = $ov['file'];
+            $ovKey = isset($ovFile['key']) && \is_string($ovFile['key']) ? $ovFile['key'] : null;
+            $overlayInput = ($ovFile['kind'] ?? null) === 'upload_id'
+                ? FileInput::uploadId((string) $ovFile['uploadId'])
+                : FileInput::path((string) $ovFile['path']);
+            $overlay = new Recipe($overlayInput, $ovKey);
+            /** @var list<array<string, mixed>> $ovOps */
+            $ovOps = $ov['operations'] ?? [];
+            foreach ($ovOps as $op) {
+                $overlay = self::applyLoweringOp($overlay, $op);
+            }
+            /** @var array<string, mixed> $options */
+            $options = $wm['options'] ?? [];
+            $wr = $recipe->watermark($overlay, $options);
+            /** @var list<array<string, mixed>> $post */
+            $post = $wm['post'] ?? [];
+            foreach ($post as $op) {
+                $wr = self::applyWatermarkedOp($wr, $op);
+            }
+
+            return $wr->toWorkflowPayload([
+                (string) $spec['resolvedFileId'],
+                (string) $ov['resolvedFileId'],
+            ])->toWire();
         }
 
         return $recipe->toWorkflowPayload((string) $spec['resolvedFileId'])->toWire();
@@ -542,6 +578,27 @@ final class Invoke
             'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
             default => throw new \RuntimeException(
                 "Unsupported post-combine op '" . \var_export($op['op'] ?? null, true) . "'",
+            ),
+        };
+    }
+
+    /**
+     * FF4a (Z7zTr789) — apply a post-watermark op to a {@see WatermarkedRecipe}.
+     * compress/convert/thumbnail ONLY (no text_watermark). Mirrors TS
+     * `applyWatermarkedOp`.
+     *
+     * @param array<string, mixed> $op
+     */
+    private static function applyWatermarkedOp(WatermarkedRecipe $recipe, array $op): WatermarkedRecipe
+    {
+        return match ($op['op']) {
+            'compress' => $recipe->compress(
+                isset($op['optimize']) && \is_string($op['optimize']) ? $op['optimize'] : null,
+            ),
+            'convert' => $recipe->convert((string) $op['format']),
+            'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
+            default => throw new \RuntimeException(
+                "Unsupported post-watermark op '" . \var_export($op['op'] ?? null, true) . "'",
             ),
         };
     }

@@ -103,9 +103,13 @@ final class FixtureLoader
     ];
 
     private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark'];
-    private const LOWERING_KEYS = ['file', 'resolvedFileId', 'operations'];
+    private const LOWERING_KEYS = ['file', 'resolvedFileId', 'operations', 'watermark'];
     private const LOWERING_FILE_KEYS = ['kind', 'path', 'uploadId', 'key'];
     private const LOWERING_OP_KEYS = ['op', 'optimize', 'format', 'width', 'height', 'text'];
+    // FF4a (Z7zTr789) — watermark sub-block keys + post-op grammar (no text_watermark).
+    private const WATERMARK_KEYS = ['overlay', 'options', 'post'];
+    private const WATERMARK_OVERLAY_KEYS = ['file', 'resolvedFileId', 'operations'];
+    private const WATERMARK_POST_OPS = ['compress', 'convert', 'thumbnail'];
     // FF2b (tywwynmN) — run-mode block keys: lowering's file + operations
     // plus the run-only maxWait / pollIntervalMs.
     private const RUN_KEYS = ['file', 'operations', 'maxWait', 'pollIntervalMs'];
@@ -885,8 +889,11 @@ final class FixtureLoader
                 "[{$base}] lowering.resolvedFileId must equal lowering.file.uploadId for kind=upload_id",
             );
         }
+        // FF4a — a `watermark` block makes `operations` the BASE preceding steps,
+        // which MAY be empty; a plain chain lowering still requires non-empty ops.
+        $hasWatermark = isset($raw['watermark']);
         $ops = $raw['operations'] ?? null;
-        if (!\is_array($ops) || !\array_is_list($ops) || \count($ops) === 0) {
+        if (!\is_array($ops) || !\array_is_list($ops) || (\count($ops) === 0 && !$hasWatermark)) {
             throw new \RuntimeException("[{$base}] lowering.operations must be a non-empty sequence");
         }
         foreach ($ops as $i => $op) {
@@ -902,8 +909,83 @@ final class FixtureLoader
             }
             self::validateLoweringOpParams($opName, $op, "{$base} lowering.operations[{$i}]");
         }
+        if ($hasWatermark) {
+            self::validateWatermark($raw['watermark'], "{$base} lowering.watermark");
+        }
         /** @var array<string, mixed> $raw */
         return $raw;
+    }
+
+    /**
+     * FF4a (Z7zTr789) — validate the `lowering.watermark` sub-block: the overlay
+     * file-node (file + resolvedFileId + optional own ops), the wire options bag,
+     * and the post-watermark ops (compress/convert/thumbnail ONLY). Mirrors the TS
+     * `validateWatermark`.
+     */
+    private static function validateWatermark(mixed $raw, string $ctx): void
+    {
+        if (!\is_array($raw) || \array_is_list($raw)) {
+            throw new \RuntimeException("[{$ctx}] must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($raw, self::WATERMARK_KEYS, $ctx);
+
+        $overlay = $raw['overlay'] ?? null;
+        if (!\is_array($overlay) || \array_is_list($overlay)) {
+            throw new \RuntimeException("[{$ctx}] overlay must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($overlay, self::WATERMARK_OVERLAY_KEYS, "{$ctx} overlay");
+        $file = $overlay['file'] ?? null;
+        if (!\is_array($file) || \array_is_list($file)) {
+            throw new \RuntimeException("[{$ctx}] overlay.file must be a mapping");
+        }
+        self::rejectUnknownLoweringKeys($file, self::LOWERING_FILE_KEYS, "{$ctx} overlay.file");
+        $kind = $file['kind'] ?? null;
+        if ($kind !== 'path' && $kind !== 'upload_id') {
+            throw new \RuntimeException("[{$ctx}] overlay.file.kind must be 'path' or 'upload_id'");
+        }
+        if ($kind === 'path' && (!isset($file['path']) || !\is_string($file['path']) || $file['path'] === '')) {
+            throw new \RuntimeException("[{$ctx}] overlay.file.path must be a non-empty string when kind=path");
+        }
+        if ($kind === 'upload_id' && (!isset($file['uploadId']) || !\is_string($file['uploadId']) || $file['uploadId'] === '')) {
+            throw new \RuntimeException("[{$ctx}] overlay.file.uploadId must be a non-empty string when kind=upload_id");
+        }
+        $overlayResolved = self::requireString($overlay, 'resolvedFileId', $ctx . ' overlay');
+        if ($kind === 'upload_id' && isset($file['uploadId']) && $file['uploadId'] !== $overlayResolved) {
+            throw new \RuntimeException("[{$ctx}] overlay.resolvedFileId must equal overlay.file.uploadId for kind=upload_id");
+        }
+
+        self::validateWatermarkOps($overlay['operations'] ?? null, self::LOWERING_OPS, "{$ctx} overlay.operations");
+        self::validateWatermarkOps($raw['post'] ?? null, self::WATERMARK_POST_OPS, "{$ctx} post");
+
+        if (isset($raw['options']) && (!\is_array($raw['options']) || \array_is_list($raw['options']))) {
+            throw new \RuntimeException("[{$ctx}] options must be a mapping");
+        }
+    }
+
+    /**
+     * Validate an optional watermark op array against an allowed-op set.
+     *
+     * @param list<string> $allowed
+     */
+    private static function validateWatermarkOps(mixed $ops, array $allowed, string $ctx): void
+    {
+        if ($ops === null) {
+            return;
+        }
+        if (!\is_array($ops) || !\array_is_list($ops)) {
+            throw new \RuntimeException("[{$ctx}] must be a sequence");
+        }
+        foreach ($ops as $i => $op) {
+            if (!\is_array($op) || \array_is_list($op)) {
+                throw new \RuntimeException("[{$ctx}][{$i}] must be a mapping");
+            }
+            self::rejectUnknownLoweringKeys($op, self::LOWERING_OP_KEYS, "{$ctx}[{$i}]");
+            $opName = $op['op'] ?? null;
+            if (!\is_string($opName) || !\in_array($opName, $allowed, true)) {
+                throw new \RuntimeException("[{$ctx}][{$i}].op must be one of " . \implode('|', $allowed));
+            }
+            self::validateLoweringOpParams($opName, $op, "{$ctx}[{$i}]");
+        }
     }
 
     /**

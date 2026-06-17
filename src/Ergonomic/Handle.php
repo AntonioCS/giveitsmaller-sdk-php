@@ -224,6 +224,24 @@ final class Handle
             );
         }
 
+        // A fluent `file(...)->watermark(overlay)` — project ONLY the watermark
+        // output, filtering the `src_*` (base/overlay) passthrough plumbing.
+        // Matches WatermarkedRecipe::run()'s `ref === 'watermark'` filter.
+        if (RunResult::isWatermarkStatus($finalStatus)) {
+            $watermarkDownloads = \array_values(\array_filter(
+                $jobDownloads,
+                static fn ($d): bool => BuilderInternals::coerceString($d->getRef()) === 'watermark',
+            ));
+
+            return RunResult::fromTerminalDownloads(
+                workflowId: $this->workflowId,
+                finalStatus: $finalStatus,
+                jobDownloads: $watermarkDownloads,
+                key: null,
+                downloader: $downloader,
+            );
+        }
+
         return RunResult::fromTerminalDownloads(
             workflowId: $this->workflowId,
             finalStatus: $finalStatus,
