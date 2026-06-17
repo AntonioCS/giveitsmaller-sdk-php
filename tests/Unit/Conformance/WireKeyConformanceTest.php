@@ -146,6 +146,73 @@ final class WireKeyConformanceTest extends TestCase
         $this->assertKeysConform('compress', array_keys($declared), $contract);
     }
 
+    /**
+     * Contract compress options the ergonomic resolver deliberately does NOT
+     * expose. `output_format` on compress is the planned API-side "compress +
+     * change format" facade surface (contracts VcPeRWdD / ADR-0021) —
+     * canonicalized to a `convert` op server-side, all non-`original` values
+     * `per_value_availability: planned`. NOT an ergonomic compress option, so
+     * audio's contract `output_format` is an allowed omission. (Image keeps
+     * `output_format` in KNOWN_WIRE_FIELDS — its preset emits the stable
+     * `original` value — so it is NOT listed here.)
+     *
+     * @var array<string, list<string>>
+     */
+    private const INTENTIONALLY_OMITTED = [
+        'audio' => ['output_format'],
+    ];
+
+    /**
+     * Reverse direction (7dUpPmDZ): the forward check only catches a contract key
+     * REMOVED/renamed out from under KNOWN_WIRE_FIELDS. It does NOT catch a contract
+     * key ADDED that KNOWN_WIRE_FIELDS lacks — the ergonomic resolver would throw
+     * `unknown_field` on a field the wire accepts, silently lagging the contract.
+     * Pin the reverse PER MEDIA so a new compress option fails CI until it is either
+     * exposed (added to KNOWN_WIRE_FIELDS) or documented as intentionally omitted.
+     */
+    #[Test]
+    public function every_compress_contract_option_per_media_is_known_or_documented_omission(): void
+    {
+        foreach (PresetResolver::KNOWN_WIRE_FIELDS as $media => $fields) {
+            // mediaGroupOptionKeys asserts the mime group exists → a renamed/dropped
+            // PresetMedia<->mime_group mapping fails loudly, not silently skipped.
+            $contractForMedia = $this->mediaGroupOptionKeys(CompressMetadata::instance(), $media);
+            $allowed = [];
+            foreach ($fields as $field) {
+                $allowed[$field] = true;
+            }
+            foreach (self::INTENTIONALLY_OMITTED[$media] ?? [] as $omitted) {
+                $allowed[$omitted] = true;
+            }
+            $this->assertKeysConform("compress[{$media}]", array_keys($contractForMedia), $allowed);
+        }
+    }
+
+    /**
+     * Whole-media-group coverage (closes the blind spot one level up): the per-media
+     * reverse check iterates KNOWN_WIRE_FIELDS keys, so a contract mime_group ABSENT
+     * from KNOWN_WIRE_FIELDS would be skipped silently — the resolver would
+     * unknown_field-throw on every option for that media while CI stays green.
+     */
+    #[Test]
+    public function every_compress_contract_mime_group_is_covered_by_known_wire_fields(): void
+    {
+        $known = PresetResolver::KNOWN_WIRE_FIELDS;
+        $uncovered = array_values(array_filter(
+            array_keys(CompressMetadata::instance()->mime_groups),
+            static fn (string $m): bool => !isset($known[$m]),
+        ));
+        self::assertSame(
+            [],
+            $uncovered,
+            \sprintf(
+                'contract compress mime_group(s) %s have no KNOWN_WIRE_FIELDS entry — the per-media '
+                . 'reverse check silently skips them. Add the media to KNOWN_WIRE_FIELDS.',
+                \json_encode($uncovered),
+            ),
+        );
+    }
+
     // --- convert ------------------------------------------------------------
 
     #[Test]
