@@ -531,4 +531,130 @@ final class RecipeChainOptionsTest extends TestCase
         self::assertSame('thumbnail', $mergeJob->operations[1]->type);
         self::assertSame(['width' => 320, 'format' => 'jpeg'], $mergeJob->operations[1]->options);
     }
+
+    // --- chain media inference from prior step output (56N4chXY / N8eESzQN) ------
+    // A chained compress() resolves its preset against the media a preceding
+    // convert() produced, not the original input. The fold is context-aware: a
+    // video->ogg convert keeps video (an OGG video container; `ogg` otherwise lands
+    // in the audio extension list and would mis-resolve to audio). Mirrors the TS
+    // suite in file-first-chain-options.test.ts.
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function compressOptions(Recipe $recipe): array
+    {
+        foreach ($this->operations($recipe) as $op) {
+            if (($op['type'] ?? null) === 'compress') {
+                $opts = $op['options'] ?? [];
+                self::assertIsArray($opts);
+
+                return $opts;
+            }
+        }
+        self::fail('expected a compress op in the lowered payload');
+    }
+
+    #[Test]
+    public function chain_mp3_convert_flac_compress_resolves_lossless_drops_bitrate(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->convert('flac')->compress(OptimizeFor::Size),
+        );
+        self::assertArrayNotHasKey('bitrate', $opts); // lossless flac: bitrate dropped (worker 422s it)
+        self::assertSame(44100, $opts['sample_rate']);
+        self::assertTrue($opts['normalize']);
+    }
+
+    #[Test]
+    public function chain_mp3_convert_aac_compress_stays_lossy_keeps_bitrate(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->convert('aac')->compress(OptimizeFor::Size),
+        );
+        self::assertSame(96, $opts['bitrate']);
+    }
+
+    #[Test]
+    public function chain_video_convert_ogg_compress_stays_video_not_audio(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('clip.mp4')->convert('ogg')->compress(OptimizeFor::Size),
+        );
+        self::assertSame(30, $opts['crf']); // video Size preset (the ogg guard)
+        self::assertSame('crf', $opts['encoding_mode']);
+        self::assertArrayNotHasKey('bitrate', $opts);
+    }
+
+    #[Test]
+    public function chain_video_convert_gif_compress_resolves_image(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('clip.mp4')->convert('gif')->compress(OptimizeFor::Size),
+        );
+        self::assertSame(65, $opts['quality']); // image Size preset
+        self::assertArrayNotHasKey('crf', $opts);
+    }
+
+    #[Test]
+    public function chain_no_convert_resolves_against_original_input(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->compress(OptimizeFor::Size),
+        );
+        self::assertSame(96, $opts['bitrate']); // mp3 lossy — original behaviour
+    }
+
+    #[Test]
+    public function merge_then_convert_flac_then_compress_resolves_lossless(): void
+    {
+        $payload = (new MergedRecipe(
+            [FileInput::path('a.mp3'), FileInput::path('b.mp3')],
+            new MergeOptions(mediaKind: 'audio'),
+        ))
+            ->convert('flac')
+            ->compress(OptimizeFor::Size)
+            ->toWorkflowPayload(['f0', 'f1'], null);
+
+        $mergeJob = $payload->jobs[count($payload->jobs) - 1];
+        $compress = null;
+        foreach ($mergeJob->operations as $op) {
+            if ($op->type === 'compress') {
+                $compress = $op;
+                break;
+            }
+        }
+        self::assertNotNull($compress);
+        self::assertIsArray($compress->options);
+        self::assertArrayNotHasKey('bitrate', $compress->options); // post-merge flac output
+    }
+
+    // Multi-convert: the MOST RECENT preceding convert wins (the fold loop runs >once).
+    #[Test]
+    public function chain_mp3_flac_then_aac_compress_most_recent_aac_wins_keeps_bitrate(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->convert('flac')->convert('aac')->compress(OptimizeFor::Size),
+        );
+        self::assertSame(96, $opts['bitrate']);
+    }
+
+    #[Test]
+    public function chain_mp3_aac_then_flac_compress_most_recent_flac_wins_drops_bitrate(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->convert('aac')->convert('flac')->compress(OptimizeFor::Size),
+        );
+        self::assertArrayNotHasKey('bitrate', $opts);
+    }
+
+    #[Test]
+    public function chain_mp3_convert_wav_compress_is_lossless_drops_bitrate(): void
+    {
+        $opts = $this->compressOptions(
+            $this->recipe('song.mp3')->convert('wav')->compress(OptimizeFor::Size),
+        );
+        self::assertArrayNotHasKey('bitrate', $opts);
+        self::assertSame(44100, $opts['sample_rate']);
+    }
 }

@@ -150,8 +150,8 @@ final class Recipe
     public function toWorkflowPayload(string $fileId, ?string $callbackUrl = null): WorkflowCreatePayload
     {
         $operations = [];
-        foreach ($this->steps as $step) {
-            $operations[] = $this->lowerStep($step);
+        foreach ($this->steps as $i => $step) {
+            $operations[] = $this->lowerStep($step, $i);
         }
 
         $job = new JobDefinitionPayload(
@@ -170,8 +170,8 @@ final class Recipe
      */
     private function assertOperationsLowerable(): void
     {
-        foreach ($this->steps as $step) {
-            $this->lowerStep($step);
+        foreach ($this->steps as $i => $step) {
+            $this->lowerStep($step, $i);
         }
     }
 
@@ -461,10 +461,10 @@ final class Recipe
         );
     }
 
-    private function lowerStep(RecipeStep $step): OperationDef
+    private function lowerStep(RecipeStep $step, int $stepIndex): OperationDef
     {
         $options = $step->opType === 'compress'
-            ? $this->lowerCompressOptions($step->options)
+            ? $this->lowerCompressOptions($step->options, $stepIndex)
             : $step->options;
 
         // Empty options omit the `options` wire key entirely, so PHP (null →
@@ -485,7 +485,7 @@ final class Recipe
      *
      * @return array<string, mixed>
      */
-    private function lowerCompressOptions(array $options): array
+    private function lowerCompressOptions(array $options, int $uptoIndex): array
     {
         // Mirror the op-first resolver precedence
         // ({@see \Gisl\Sdk\Ergonomic\OperationBuilder::resolve()}): optimize =
@@ -498,7 +498,7 @@ final class Recipe
         $presetOverrides = $explicit['presetOverrides'] ?? null;
         unset($explicit['presetOverrides']);
 
-        $media = $this->input->compressMediaHint();
+        $media = $this->effectiveCompressMedia($uptoIndex);
         if ($media === null) {
             // Cannot infer a media class (a resource handle or bare upload id
             // carries no extension) → preset resolution is impossible. Fail
@@ -536,10 +536,68 @@ final class Recipe
             presetOverrides: OperationBuilder::normalisePresetOverrides($presetOverrides),
             optimize: $optimize,
             explicitOptions: $explicit,
-            audioLossless: $media === 'audio' ? $this->input->compressAudioLosslessHint() : null,
+            audioLossless: $media === 'audio' ? $this->effectiveAudioLossless($uptoIndex) : null,
         );
 
         return $resolved['wireOptions'];
+    }
+
+    /**
+     * The media class a `compress` step at `$uptoIndex` actually operates on. FOLD the
+     * preceding `convert` steps: each `convert(output_format)` changes the media the next
+     * step sees (56N4chXY / N8eESzQN). With no preceding convert, falls back to the
+     * original input's media. Mirrors the TS Recipe.compressMediaHint(uptoIndex).
+     */
+    private function effectiveCompressMedia(int $uptoIndex): ?string
+    {
+        $media = $this->input->compressMediaHint();
+        for ($i = 0; $i < $uptoIndex; $i++) {
+            $step = $this->steps[$i];
+            if ($step->opType === 'convert') {
+                $fmt = $step->options['output_format'] ?? null;
+                if (\is_string($fmt)) {
+                    $media = self::resolveConvertOutputMedia($media, $fmt);
+                }
+            }
+        }
+
+        return $media;
+    }
+
+    /**
+     * Whether the media a `compress` step at `$uptoIndex` operates on is lossless audio —
+     * from the most recent preceding `convert` target (flac/wav) when there is one, else
+     * the original input. Mirrors the TS Recipe.compressAudioLossless(uptoIndex).
+     */
+    private function effectiveAudioLossless(int $uptoIndex): bool
+    {
+        for ($i = $uptoIndex - 1; $i >= 0; $i--) {
+            $step = $this->steps[$i];
+            if ($step->opType === 'convert') {
+                $fmt = $step->options['output_format'] ?? null;
+
+                return \is_string($fmt) ? OperationBuilder::detectAudioLossless("f.{$fmt}") : false;
+            }
+        }
+
+        return $this->input->compressAudioLosslessHint();
+    }
+
+    /**
+     * Media of a `convert` step's output given its source media. Reuses the extension
+     * classifier on a synthetic `f.<format>`, with ONE guard: a video source converted to
+     * `ogg` stays video (an OGG *video* container — `ogg` otherwise lands in the audio
+     * extension list, mis-resolving a video output to audio). video->`gif` is left as the
+     * classifier's `image` result. Per the 56N4chXY plan review. Mirrors the TS
+     * _resolveConvertOutputMedia.
+     */
+    private static function resolveConvertOutputMedia(?string $source, string $outputFormat): ?string
+    {
+        if ($source === 'video' && \strtolower($outputFormat) === 'ogg') {
+            return 'video';
+        }
+
+        return OperationBuilder::detectCompressMedia("f.{$outputFormat}");
     }
 
     /**
