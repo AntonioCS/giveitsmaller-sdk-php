@@ -112,7 +112,9 @@ final class PresetCompressOptionsTest extends TestCase
         $this->assertSame(65, $dto->quality);
         $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
         $this->assertSame(IccProfilePolicy::Strip, $dto->iccProfile);
-        $this->assertSame(ImageFormat::Smallest, $dto->outputFormat);
+        // VcPeRWdD (contracts v2.73.0): Size outputFormat re-pointed Smallest -> Original
+        // (`smallest` is now per_value_availability:planned — facade self-422 guard).
+        $this->assertSame(ImageFormat::Original, $dto->outputFormat);
     }
 
     public function testImageShippedDefaultsForQualityOmitsQuality(): void
@@ -136,13 +138,14 @@ final class PresetCompressOptionsTest extends TestCase
 
     public function testVideoShippedDefaultsForSize(): void
     {
-        // Video is the only DTO that resolves an int-backed enum
-        // (audioBitrate '_96') through the enum() reader against a live cell
-        // — this exercises that name->case wiring end-to-end.
         $dto = VideoCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
         $this->assertSame(30, $dto->crf);
         $this->assertSame(VideoPreset::Slow, $dto->preset);
-        $this->assertSame(AudioBitrate::_96, $dto->audioBitrate);
+        // v2.71.0 (rza1htNO): audioBitrate dropped from video_compress presets
+        // (audio re-encode is opt-in — the worker rejects audio_bitrate + the
+        // default `copy` audio_codec). The int-backed enum() reader is still
+        // exercised end-to-end by the audio `bitrate` cell test above.
+        $this->assertNull($dto->audioBitrate);
         // v2.66.0 (contracts ADR-0020): presets no longer bake codec /
         // audioCodec / faststart — the server container-resolves those so a
         // WebM target cannot 422 on a baked MP4-oriented codec.

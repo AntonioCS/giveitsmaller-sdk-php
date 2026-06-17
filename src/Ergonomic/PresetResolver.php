@@ -56,8 +56,13 @@ use Gisl\Sdk\PresetDefaults;
  */
 final class PresetResolver
 {
-    /** Bumped on any change to a `*CompressPresetOptions::shippedDefaultsFor()` cell value. */
-    public const PRESET_VERSION = '1.0';
+    /**
+     * Bumped on any change to a `*CompressPresetOptions::shippedDefaultsFor()` cell value.
+     * Must track the contracts `sdk-spec/version.yaml` `presetVersion`. 1.0 -> 1.2 on the
+     * contracts v2.71.0 (video_compress `audioBitrate` dropped) + v2.73.0 (image Size/Balanced
+     * `outputFormat` Smallest/Auto -> Original — VcPeRWdD facade self-422 guard) cuts.
+     */
+    public const PRESET_VERSION = '1.2';
 
     /** @var list<string> Resolver source layers, lowest precedence first. */
     private const SOURCE_KEYS = ['sdkDefault', 'clientDefault', 'scopedDefault', 'callPresetOverride', 'explicit'];

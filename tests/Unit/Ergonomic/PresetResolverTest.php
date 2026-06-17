@@ -40,7 +40,7 @@ final class PresetResolverTest extends TestCase
         $this->assertSame(['quality'], $ro->sources->explicit);
         $this->assertSame([], $ro->sources->sdkDefault);
         $this->assertSame([], $ro->sources->clientDefault);
-        $this->assertSame('1.0', $ro->presetVersion);
+        $this->assertSame('1.2', $ro->presetVersion);
         $this->assertNull($ro->presetConfigHash);
         // overrides back-compat mirrors sources.explicit.
         $this->assertSame(['quality'], $ro->overrides);

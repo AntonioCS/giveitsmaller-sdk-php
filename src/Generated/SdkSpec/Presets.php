@@ -31,7 +31,7 @@ final class Presets
                 'metadata' => 'All',
                 'iccProfile' => 'Strip',
                 'progressive' => true,
-                'outputFormat' => 'Smallest',
+                'outputFormat' => 'Original',
             ],
             'Balanced' => [
                 'mode' => 'Auto',
@@ -39,7 +39,7 @@ final class Presets
                 'metadata' => 'Sensitive',
                 'iccProfile' => 'Preserve',
                 'progressive' => true,
-                'outputFormat' => 'Auto',
+                'outputFormat' => 'Original',
             ],
             'Quality' => [
                 'mode' => 'Lossless',
@@ -70,17 +70,14 @@ final class Presets
             'Size' => [
                 'crf' => 30,
                 'preset' => 'Slow',
-                'audioBitrate' => '_96',
             ],
             'Balanced' => [
                 'crf' => 23,
                 'preset' => 'Medium',
-                'audioBitrate' => '_128',
             ],
             'Quality' => [
                 'crf' => 18,
                 'preset' => 'Slow',
-                'audioBitrate' => '_192',
             ],
         ],
         'document_pdf_compress' => [
