@@ -10,7 +10,6 @@ use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\MergeOptions;
-use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
@@ -405,76 +404,25 @@ final class FilesRecipe
             $preflight->toWorkflowPayload('preflight');
         }
 
-        // 1. Upload EVERY input: verbatim for a pre-uploaded id; a path or a
-        // seekable stream resource (VOxtu0RZ-B4) otherwise, via the byte-counter
-        // progress closure.
-        $fileIds = [];
-        // Per-input probe-gate inputs for freshly-uploaded inputs only (a
-        // pre-uploaded id carries no local mime/size, so it is never probed).
-        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
-        $probeTargets = [];
-        foreach ($this->inputs as $input) {
-            // Fail fast between uploads — a deadline that elapses or a caller
-            // cancel mid-batch should not force every remaining input to upload
-            // before throwing.
-            BuilderInternals::throwIfCancelled($cancellation, 'fan-out upload');
-            if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-                throw new GislTimeoutError('maxWait elapsed during fan-out uploads before all inputs were uploaded.');
-            }
-            if ($input->kind === FileInput::KIND_UPLOAD_ID) {
-                $fileIds[] = BuilderInternals::coerceString($input->fileId);
-            } else {
-                $onProgressUpload = $onProgressClosure !== null
-                    ? static function (int $u, int $t) use ($onProgressClosure): void {
-                        $onProgressClosure(new UploadProgressEvent($u, $t));
-                    }
-                    : null;
-                $uploadTarget = BuilderInternals::coerceString($input->path);
-                $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
-                if ($input->kind === FileInput::KIND_RESOURCE) {
-                    \assert(\is_resource($input->resource));
-                    $uploadTarget = $input->resource;
-                    // fFwaKsN5 (codex r1): carry the resource's filename/contentType
-                    // hints into the fan-out upload too — same as the single-file
-                    // file() path, so files([resource(...)]) is consistent.
-                    $uploadOpts = new UploadOptions(
-                        onProgress: $onProgressUpload,
-                        contentType: $input->contentType,
-                        filename: $input->filename,
-                    );
-                }
-                $uploadResp = $this->client->uploadFile($uploadTarget, $uploadOpts);
-                $fileIds[] = $uploadResp->getFileId() ?? '';
-                $probeTargets[] = [
-                    'fileId' => $uploadResp->getFileId() ?? '',
-                    'isVideo' => $input->compressMediaHint() === 'video',
-                    'sizeBytes' => $uploadResp->getSizeBytes(),
-                ];
-            }
-        }
-
-        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Uploads completed but maxWait elapsed before workflow could be created.');
-        }
-
-        // Best-effort probe-before-create for the multipart-video inputs
-        // (sequential with a shared budget; never-bounce). The total budget is
-        // capped to the remaining maxWait (run() passes $deadlineMs; submit()
-        // passes null → uncapped) so the waits cannot push createWorkflow past
-        // the caller's deadline.
-        BuilderInternals::waitForVideoProbes($this->client, $probeTargets, $probeBeforeCreate, $probeTimeoutMs, $cancellation, $deadlineMs);
-        // A cancel arriving during a FINAL successful probe request must not
-        // still create the workflow (the probe waits return landed without a
-        // final cancel re-check), so check here BEFORE createWorkflow.
-        BuilderInternals::throwIfCancelled($cancellation, 'workflow creation');
-        // RE-CHECK the deadline AFTER the probe waits (they consume time).
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before workflow could be created.');
-        }
-
-        // 2. Create ONE multi-job workflow (callback_url built in when webhook given).
-        return $this->client->createWorkflow($this->toWorkflowPayload($fileIds, $webhook));
+        // Upload all inputs + probe-before-create + create ONE multi-job
+        // workflow via the shared multi-input tail. The per-input op-chain
+        // preflight above (FilesRecipe-specific) has already run, so a bad
+        // input fails before any upload.
+        return MultiInputUpload::uploadAllAndCreate(
+            $this->client,
+            $this->inputs,
+            fn (array $fileIds, ?string $callbackUrl): WorkflowCreatePayload => $this->toWorkflowPayload($fileIds, $callbackUrl),
+            $webhook,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+            'fan-out upload',
+            'workflow creation',
+            'fan-out',
+            'workflow',
+        );
     }
 
     /**

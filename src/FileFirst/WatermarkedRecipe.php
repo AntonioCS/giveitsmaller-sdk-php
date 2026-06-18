@@ -9,7 +9,6 @@ use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
-use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -303,55 +302,21 @@ final class WatermarkedRecipe
             }
         }
 
-        $fileIds = [];
-        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
-        $probeTargets = [];
-        foreach ($this->inputsInOrder() as $input) {
-            BuilderInternals::throwIfCancelled($cancellation, 'watermark upload');
-            if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-                throw new GislTimeoutError('maxWait elapsed during watermark uploads before all inputs were uploaded.');
-            }
-            if ($input->kind === FileInput::KIND_UPLOAD_ID) {
-                $fileIds[] = BuilderInternals::coerceString($input->fileId);
-                continue;
-            }
-            $onProgressUpload = $onProgressClosure !== null
-                ? static function (int $u, int $t) use ($onProgressClosure): void {
-                    $onProgressClosure(new UploadProgressEvent($u, $t));
-                }
-                : null;
-            $uploadTarget = BuilderInternals::coerceString($input->path);
-            $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
-            if ($input->kind === FileInput::KIND_RESOURCE) {
-                \assert(\is_resource($input->resource));
-                $uploadTarget = $input->resource;
-                $uploadOpts = new UploadOptions(
-                    onProgress: $onProgressUpload,
-                    contentType: $input->contentType,
-                    filename: $input->filename,
-                );
-            }
-            $resp = $client->uploadFile($uploadTarget, $uploadOpts);
-            $fileIds[] = $resp->getFileId() ?? '';
-            $probeTargets[] = [
-                'fileId' => $resp->getFileId() ?? '',
-                'isVideo' => $input->compressMediaHint() === 'video',
-                'sizeBytes' => $resp->getSizeBytes(),
-            ];
-        }
-
-        BuilderInternals::throwIfCancelled($cancellation, 'watermark workflow creation');
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Uploads completed but maxWait elapsed before the watermark workflow could be created.');
-        }
-
-        BuilderInternals::waitForVideoProbes($client, $probeTargets, $probeBeforeCreate, $probeTimeoutMs, $cancellation, $deadlineMs);
-        BuilderInternals::throwIfCancelled($cancellation, 'watermark workflow creation');
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before the watermark workflow could be created.');
-        }
-
-        return $client->createWorkflow($this->toWorkflowPayload($fileIds, $webhook));
+        return MultiInputUpload::uploadAllAndCreate(
+            $client,
+            $this->inputsInOrder(),
+            fn (array $fileIds, ?string $callbackUrl): WorkflowCreatePayload => $this->toWorkflowPayload($fileIds, $callbackUrl),
+            $webhook,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+            'watermark upload',
+            'watermark workflow creation',
+            'watermark',
+            'the watermark workflow',
+        );
     }
 
     /**

@@ -10,7 +10,6 @@ use Gisl\Sdk\Ergonomic\ArchiveFormat;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
-use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\GislClient;
@@ -191,69 +190,21 @@ final class ArchivedRecipe
             }
         }
 
-        $fileIds = [];
-        // Archive is media-agnostic (no inference) — detect per input via
-        // compressMediaHint() so only video uploads are probed. A pre-uploaded
-        // id carries no local mime/size, so it is never probed.
-        /** @var list<array{fileId: string, isVideo: bool, sizeBytes: int|null}> $probeTargets */
-        $probeTargets = [];
-        foreach ($this->inputs as $input) {
-            BuilderInternals::throwIfCancelled($cancellation, 'archive upload');
-            if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-                throw new GislTimeoutError('maxWait elapsed during archive uploads before all inputs were uploaded.');
-            }
-            if ($input->kind === FileInput::KIND_UPLOAD_ID) {
-                $fileIds[] = BuilderInternals::coerceString($input->fileId);
-                continue;
-            }
-            $onProgressUpload = $onProgressClosure !== null
-                ? static function (int $u, int $t) use ($onProgressClosure): void {
-                    $onProgressClosure(new UploadProgressEvent($u, $t));
-                }
-                : null;
-            $uploadTarget = BuilderInternals::coerceString($input->path);
-            $uploadOpts = $onProgressUpload !== null ? new UploadOptions(onProgress: $onProgressUpload) : null;
-            if ($input->kind === FileInput::KIND_RESOURCE) {
-                \assert(\is_resource($input->resource));
-                $uploadTarget = $input->resource;
-                // fFwaKsN5 (codex r1): carry the resource's filename/contentType
-                // hints so the bundled file gets a real name (not `upload.bin`).
-                $uploadOpts = new UploadOptions(
-                    onProgress: $onProgressUpload,
-                    contentType: $input->contentType,
-                    filename: $input->filename,
-                );
-            }
-            $resp = $client->uploadFile($uploadTarget, $uploadOpts);
-            $fileIds[] = $resp->getFileId() ?? '';
-            $probeTargets[] = [
-                'fileId' => $resp->getFileId() ?? '',
-                'isVideo' => $input->compressMediaHint() === 'video',
-                'sizeBytes' => $resp->getSizeBytes(),
-            ];
-        }
-
-        BuilderInternals::throwIfCancelled($cancellation, 'archive workflow creation');
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Uploads completed but maxWait elapsed before the archive workflow could be created.');
-        }
-
-        // Best-effort probe-before-create for the multipart-video inputs
-        // (sequential with a shared budget; never-bounce). The total budget is
-        // capped to the remaining maxWait (run() passes $deadlineMs; submit()
-        // passes null → uncapped) so the waits cannot push createWorkflow past
-        // the caller's deadline.
-        BuilderInternals::waitForVideoProbes($client, $probeTargets, $probeBeforeCreate, $probeTimeoutMs, $cancellation, $deadlineMs);
-        // A cancel arriving during a FINAL successful probe request must not
-        // still create the workflow (the probe waits return landed without a
-        // final cancel re-check), so check here BEFORE createWorkflow.
-        BuilderInternals::throwIfCancelled($cancellation, 'archive workflow creation');
-        // RE-CHECK the deadline AFTER the probe waits (they consume time).
-        if ($deadlineMs !== null && BuilderInternals::nowMs() >= $deadlineMs) {
-            throw new GislTimeoutError('Probe wait completed but maxWait elapsed before the archive workflow could be created.');
-        }
-
-        return $client->createWorkflow($this->toWorkflowPayload($fileIds, $webhook));
+        return MultiInputUpload::uploadAllAndCreate(
+            $client,
+            $this->inputs,
+            fn (array $fileIds, ?string $callbackUrl): WorkflowCreatePayload => $this->toWorkflowPayload($fileIds, $callbackUrl),
+            $webhook,
+            $deadlineMs,
+            $onProgressClosure,
+            $cancellation,
+            $probeBeforeCreate,
+            $probeTimeoutMs,
+            'archive upload',
+            'archive workflow creation',
+            'archive',
+            'the archive workflow',
+        );
     }
 
     /**
