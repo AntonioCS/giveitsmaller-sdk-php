@@ -7,14 +7,22 @@ namespace Gisl\Sdk\Tests\FileFirst;
 use Gisl\Generated\OpenApi\Model\JobResponse;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\Recipe;
 use Gisl\Sdk\FileFirst\RunResult;
 use Gisl\Sdk\FileFirst\WatermarkedRecipe;
 use Gisl\Sdk\FileFirst\WatermarkGate;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
+use Gisl\Sdk\GislClientConfig;
+use Gisl\Sdk\GislErgonomicClient;
+use GuzzleHttp\Psr7\HttpFactory;
+use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * FF4a (Z7zTr789) — fluent `file($base)->watermark($overlay, $opts)` multi-input
@@ -316,5 +324,254 @@ final class WatermarkRecipeTest extends TestCase
     public function test_is_watermark_status_false_for_empty_job_list(): void
     {
         self::assertFalse(RunResult::isWatermarkStatus($this->statusOf([])));
+    }
+
+    // ── run() through the shared MultiInputUpload helper ────────────────────
+    // xxy5Rlsy follow-up (Wi4OnaJE): run() reaches the shared helper at runtime
+    // (the other tests are lowering-only). Mirrors the TS file-first-watermark.
+
+    private const WORKFLOW_ID = '01936fb2-0000-7000-8000-0000000000b0';
+
+    public function test_run_creates_the_lowered_watermark_dag_and_projects_only_the_watermark_output(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->uploadResponse('01936fb1-7bb3-7000-8000-0000000060b1'),
+            $this->uploadResponse('01936fb1-7bb3-7000-8000-0000000060b2'),
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.completed\ndata: {\"status\":\"completed\"}\n\n"),
+            $this->statusResponse('completed'),
+            $this->watermarkDownloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        $base = $this->tempFile('jpg');
+        $overlay = $this->tempFile('png');
+        try {
+            $result = $client->file($base)
+                ->watermark(new Recipe(FileInput::path($overlay)), ['anchor' => 'center'])
+                ->run();
+        } finally {
+            @\unlink($base);
+            @\unlink($overlay);
+        }
+
+        // base + overlay both uploaded → the workflow create is the THIRD request.
+        self::assertStringContainsString('/api/workflows', (string) $captured[2]->getUri());
+        $body = \json_decode((string) $captured[2]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        // The lowered watermark DAG: src_0 base + src_1 overlay passthrough jobs +
+        // the role-tagged watermark job.
+        self::assertSame('src_0', $body['jobs'][0]['id']);
+        self::assertSame('src_1', $body['jobs'][1]['id']);
+        self::assertSame('watermark', $body['jobs'][2]['id']);
+        self::assertSame('image_watermark', $body['jobs'][2]['operations'][0]['type']);
+
+        // The RunResult projects ONLY the watermark output — the src_* passthrough
+        // downloads (raw base/overlay) are filtered out.
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertSame(['photo_watermarked.jpg'], \array_map(static fn ($a) => $a->filename, $result->artifacts));
+        self::assertSame('https://signed.example.com/photo_watermarked.jpg', $result->url);
+    }
+
+    public function test_run_mid_batch_timeout_message_names_the_watermark_label(): void
+    {
+        // Pin the watermark label noun the shared helper threads into its timeout
+        // message. A mid-batch deadline (maxWait 1ms + a slow first upload over
+        // base + overlay) trips the `during {uploadsLabel} uploads` throw.
+        $base = $this->tempFile('jpg');
+        $overlay = $this->tempFile('png');
+        $http = $this->slowFirstStubClient([$this->uploadResponse(), $this->uploadResponse()]);
+        $client = $this->makeClient($http);
+        try {
+            $client->file($base)
+                ->watermark(new Recipe(FileInput::path($overlay)))
+                ->run(maxWait: 1);
+            self::fail('expected GislTimeoutError');
+        } catch (GislTimeoutError $e) {
+            self::assertStringContainsString('watermark', $e->getMessage());
+        } finally {
+            @\unlink($base);
+            @\unlink($overlay);
+        }
+    }
+
+    // ── run() stub plumbing (mirrors RecipeRunTest / FilesRecipeTest) ───────
+
+    private function makeClient(ClientInterface $http): GislErgonomicClient
+    {
+        $factory = new HttpFactory();
+        return new GislErgonomicClient(
+            config: new GislClientConfig(baseUrl: 'https://api.example.com', apiKey: 'sk_test', multipartConcurrency: 1),
+            httpClient: $http,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+    }
+
+    /**
+     * @param list<ResponseInterface> $queue
+     * @param-out list<RequestInterface> $captured
+     */
+    private function stubClient(array $queue, array &$captured = []): ClientInterface
+    {
+        $captured = [];
+        return new class ($queue, $captured) implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            private array $queue;
+            /** @var list<RequestInterface> */
+            private array $captured;
+
+            /**
+             * @param list<ResponseInterface> $queue
+             * @param list<RequestInterface>  $captured
+             */
+            public function __construct(array $queue, array &$captured)
+            {
+                $this->queue = $queue;
+                $this->captured = &$captured;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                $this->captured[] = $request;
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub queue exhausted on ' . $request->getUri());
+                }
+                return $next;
+            }
+        };
+    }
+
+    /**
+     * A PSR-18 stub that usleeps ~5ms on its FIRST request so a 1ms maxWait is
+     * reliably blown DURING the upload loop — the mid-batch throw.
+     *
+     * @param list<ResponseInterface> $queue
+     */
+    private function slowFirstStubClient(array $queue): ClientInterface
+    {
+        return new class ($queue) implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            private array $queue;
+            private bool $first = true;
+
+            /** @param list<ResponseInterface> $queue */
+            public function __construct(array $queue)
+            {
+                $this->queue = $queue;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                if ($this->first) {
+                    $this->first = false;
+                    \usleep(5000);
+                }
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub queue exhausted on ' . $request->getUri());
+                }
+                return $next;
+            }
+        };
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function jsonResponse(int $status, array $body): ResponseInterface
+    {
+        return new Response($status, ['Content-Type' => 'application/json'], (string) \json_encode($body, JSON_THROW_ON_ERROR));
+    }
+
+    private function uploadResponse(string $fileId = '01936fb1-7bb3-7000-8000-0000000060b9'): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['file_id' => $fileId, 'content_type' => 'image/jpeg', 'size_bytes' => 2048],
+        ]);
+    }
+
+    private function createResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(201, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => 'pending'],
+        ]);
+    }
+
+    private function sseResponse(string $sse): ResponseInterface
+    {
+        return new Response(200, ['Content-Type' => 'text/event-stream'], $sse);
+    }
+
+    private function statusResponse(string $status): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => $status, 'jobs' => []],
+        ]);
+    }
+
+    /**
+     * Downloads carrying the src_* passthrough re-exposures of the raw base +
+     * overlay uploads ALONGSIDE the watermark output, so run()'s
+     * `ref === 'watermark'` filter is genuinely exercised.
+     */
+    private function watermarkDownloadsResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'downloads' => [
+                    [
+                        'job_id' => '01936fb3-0001-7000-8000-0000000060b1',
+                        'ref' => 'src_0',
+                        'files' => [[
+                            'operation' => 'passthrough',
+                            'operation_id' => '01936fb4-0001-7000-8000-0000000060b1',
+                            'filename' => 'photo.jpg',
+                            'size_bytes' => 1,
+                            'download_url' => 'https://signed.example.com/photo.jpg',
+                        ]],
+                    ],
+                    [
+                        'job_id' => '01936fb3-0002-7000-8000-0000000060b2',
+                        'ref' => 'src_1',
+                        'files' => [[
+                            'operation' => 'passthrough',
+                            'operation_id' => '01936fb4-0002-7000-8000-0000000060b2',
+                            'filename' => 'logo.png',
+                            'size_bytes' => 1,
+                            'download_url' => 'https://signed.example.com/logo.png',
+                        ]],
+                    ],
+                    [
+                        'job_id' => '01936fb3-0003-7000-8000-0000000060b3',
+                        'ref' => 'watermark',
+                        'files' => [[
+                            'operation' => 'image_watermark',
+                            'operation_id' => '01936fb4-0003-7000-8000-0000000060b3',
+                            'filename' => 'photo_watermarked.jpg',
+                            'size_bytes' => 99,
+                            'download_url' => 'https://signed.example.com/photo_watermarked.jpg',
+                        ]],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
+    private function tempFile(string $ext): string
+    {
+        $tmp = \tempnam(\sys_get_temp_dir(), 'gisl_wm_');
+        self::assertIsString($tmp);
+        $path = $tmp . '.' . $ext;
+        \rename($tmp, $path);
+        \file_put_contents($path, \str_repeat('x', 64));
+        return $path;
     }
 }

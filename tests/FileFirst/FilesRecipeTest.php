@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Tests\FileFirst;
 
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\FilesRecipe;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -486,9 +487,87 @@ final class FilesRecipeTest extends TestCase
         }
     }
 
+    #[Test]
+    public function run_mid_batch_timeout_message_names_the_fan_out_label(): void
+    {
+        // xxy5Rlsy follow-up (Wi4OnaJE): pin the fan-out label noun the shared
+        // MultiInputUpload helper threads into its timeout message. A mid-batch
+        // deadline (maxWait 1ms + a slow first upload over two inputs) trips the
+        // `during {uploadsLabel} uploads` throw. The fan-out noun is the
+        // DISTINGUISHING one (the post-upload workflowLabel for a fan-out is the
+        // generic 'workflow'), so a 'fan-out' -> 'workflow' regression is caught.
+        $a = $this->tempFile('jpg');
+        $b = $this->tempFile('jpg');
+        $http = $this->slowFirstStubClient([$this->uploadResponse(), $this->uploadResponse()]);
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::path($a), FileInput::path($b)])
+                ->compress()
+                ->run(maxWait: 1);
+            self::fail('expected GislTimeoutError');
+        } catch (GislTimeoutError $e) {
+            self::assertStringContainsString('fan-out', $e->getMessage());
+        } finally {
+            @\unlink($a);
+            @\unlink($b);
+        }
+    }
+
     // ----------------------------------------------------------------------
     // Stub plumbing — mirrors RecipeRunTest.
     // ----------------------------------------------------------------------
+
+    /**
+     * A PSR-18 stub that usleeps ~5ms on its FIRST request so a 1ms maxWait is
+     * reliably blown DURING the upload loop — the mid-batch throw.
+     *
+     * @param list<ResponseInterface> $queue
+     */
+    private function slowFirstStubClient(array $queue): ClientInterface
+    {
+        return new class ($queue) implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            private array $queue;
+            private bool $first = true;
+
+            /** @param list<ResponseInterface> $queue */
+            public function __construct(array $queue)
+            {
+                $this->queue = $queue;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                if ($this->first) {
+                    $this->first = false;
+                    \usleep(5000);
+                }
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub PSR-18 client: response queue exhausted');
+                }
+                return $next;
+            }
+        };
+    }
+
+    private function uploadResponse(string $fileId = '01936fb1-7bb3-7000-8000-0000000060c1'): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['file_id' => $fileId, 'content_type' => 'image/jpeg', 'size_bytes' => 2048],
+        ]);
+    }
+
+    private function tempFile(string $ext): string
+    {
+        $tmp = \tempnam(\sys_get_temp_dir(), 'gisl_files_');
+        self::assertNotFalse($tmp);
+        $path = $tmp . '.' . $ext;
+        \rename($tmp, $path);
+        \file_put_contents($path, \str_repeat('x', 64));
+        return $path;
+    }
 
     /**
      * @param list<ResponseInterface|\Throwable> $queue

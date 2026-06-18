@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Tests\FileFirst;
 
 use Gisl\Sdk\Ergonomic\ArchiveFormat;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\ArchivedRecipe;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\FilesRecipe;
@@ -13,6 +14,7 @@ use Gisl\Sdk\FileFirst\RecipeStep;
 use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\GislErgonomicClient;
 use GuzzleHttp\Psr7\HttpFactory;
+use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
@@ -25,6 +27,8 @@ use Psr\Http\Message\ResponseInterface;
 #[CoversClass(ArchivedRecipe::class)]
 final class ArchivedRecipeTest extends TestCase
 {
+    private const WORKFLOW_ID = '01936fb2-0000-7000-8000-0000000000a0';
+
     public function test_archive_lowers_to_one_passthrough_src_per_input_plus_an_archive_job(): void
     {
         $archived = new ArchivedRecipe(
@@ -115,6 +119,72 @@ final class ArchivedRecipeTest extends TestCase
     }
 
     // -----------------------------------------------------------------
+    // xxy5Rlsy follow-up (Wi4OnaJE): run() reaches the shared
+    // MultiInputUpload helper at runtime (the other tests are lowering-only +
+    // count-guard submits). Mirrors the TS file-first-archive.test.ts.
+    // -----------------------------------------------------------------
+
+    public function test_run_creates_the_lowered_archive_dag_and_projects_only_the_archive_output(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.completed\ndata: {\"status\":\"completed\"}\n\n"),
+            $this->statusResponse('completed'),
+            $this->archiveDownloadsResponse(),
+        ], $captured);
+
+        $client = $this->makeClient($http);
+        // uploadId arm keeps the queue tight (no upload requests); the lowering +
+        // projection is what this exercises.
+        $result = $client->files([FileInput::uploadId('id0'), FileInput::uploadId('id1')])
+            ->archive(ArchiveFormat::Zip)
+            ->run();
+
+        // The FIRST captured request is the workflow create — its body carries the
+        // lowered archive DAG: a passthrough src job per input + a terminal
+        // archive job consuming them.
+        $body = \json_decode((string) $captured[0]->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($body);
+        self::assertStringContainsString('/api/workflows', (string) $captured[0]->getUri());
+        self::assertSame('src_0', $body['jobs'][0]['id']);
+        self::assertSame('src_1', $body['jobs'][1]['id']);
+        self::assertSame('archive', $body['jobs'][2]['id']);
+        self::assertSame(['type' => 'upload', 'file_id' => 'id0'], $body['jobs'][0]['source']);
+        self::assertSame('archive', $body['jobs'][2]['operations'][0]['type']);
+
+        // The RunResult projects ONLY the archive output — the src_* passthrough
+        // downloads (raw uploads) are filtered out.
+        self::assertSame('completed', $result->state);
+        self::assertTrue($result->ok);
+        self::assertSame(['bundle.zip'], \array_map(static fn ($a) => $a->filename, $result->artifacts));
+        self::assertSame('https://signed.example.com/bundle.zip', $result->url);
+    }
+
+    public function test_run_mid_batch_timeout_message_names_the_archive_label(): void
+    {
+        // Pin the archive label noun the shared helper threads into its timeout
+        // message. A mid-batch deadline (maxWait 1ms + a slow first upload over
+        // two inputs) trips the `during {uploadsLabel} uploads` throw. Asserting
+        // the MESSAGE (not the racy upload count) locks the distinguishing noun.
+        $a = $this->tempFile('pdf');
+        $b = $this->tempFile('pdf');
+        $http = $this->slowFirstStubClient([$this->uploadResponse(), $this->uploadResponse()]);
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::path($a), FileInput::path($b)])
+                ->archive()
+                ->run(maxWait: 1);
+            self::fail('expected GislTimeoutError');
+        } catch (GislTimeoutError $e) {
+            self::assertStringContainsString('archive', $e->getMessage());
+        } finally {
+            @\unlink($a);
+            @\unlink($b);
+        }
+    }
+
+    // -----------------------------------------------------------------
 
     private function makeClient(ClientInterface $http): GislErgonomicClient
     {
@@ -160,5 +230,137 @@ final class ArchivedRecipeTest extends TestCase
                 return $next;
             }
         };
+    }
+
+    /**
+     * A PSR-18 stub that usleeps ~5ms on its FIRST request so a 1ms maxWait is
+     * reliably blown DURING the upload loop — the mid-batch throw. Extra queued
+     * responses are harmless (only exhaustion throws), and if the iteration-0
+     * deadline check trips before any request the queue simply goes unused.
+     *
+     * @param list<ResponseInterface> $queue
+     */
+    private function slowFirstStubClient(array $queue): ClientInterface
+    {
+        return new class ($queue) implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            private array $queue;
+            private bool $first = true;
+
+            /** @param list<ResponseInterface> $queue */
+            public function __construct(array $queue)
+            {
+                $this->queue = $queue;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                if ($this->first) {
+                    $this->first = false;
+                    \usleep(5000);
+                }
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub queue exhausted on ' . $request->getUri());
+                }
+                return $next;
+            }
+        };
+    }
+
+    /**
+     * @param array<string, mixed> $body
+     */
+    private function jsonResponse(int $status, array $body): ResponseInterface
+    {
+        return new Response($status, ['Content-Type' => 'application/json'], (string) \json_encode($body, JSON_THROW_ON_ERROR));
+    }
+
+    private function uploadResponse(string $fileId = '01936fb1-7bb3-7000-8000-0000000060a1'): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['file_id' => $fileId, 'content_type' => 'application/pdf', 'size_bytes' => 2048],
+        ]);
+    }
+
+    private function createResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(201, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => 'pending'],
+        ]);
+    }
+
+    private function sseResponse(string $sse): ResponseInterface
+    {
+        return new Response(200, ['Content-Type' => 'text/event-stream'], $sse);
+    }
+
+    private function statusResponse(string $status): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => ['workflow_id' => self::WORKFLOW_ID, 'status' => $status, 'jobs' => []],
+        ]);
+    }
+
+    /**
+     * Downloads carrying the src_* passthrough re-exposures of the raw uploads
+     * ALONGSIDE the archive output, so run()'s `ref === 'archive'` filter is
+     * genuinely exercised.
+     */
+    private function archiveDownloadsResponse(): ResponseInterface
+    {
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => [
+                'downloads' => [
+                    [
+                        'job_id' => '01936fb3-0001-7000-8000-0000000060a1',
+                        'ref' => 'src_0',
+                        'files' => [[
+                            'operation' => 'passthrough',
+                            'operation_id' => '01936fb4-0001-7000-8000-0000000060a1',
+                            'filename' => 'report.pdf',
+                            'size_bytes' => 1,
+                            'download_url' => 'https://signed.example.com/report.pdf',
+                        ]],
+                    ],
+                    [
+                        'job_id' => '01936fb3-0002-7000-8000-0000000060a2',
+                        'ref' => 'src_1',
+                        'files' => [[
+                            'operation' => 'passthrough',
+                            'operation_id' => '01936fb4-0002-7000-8000-0000000060a2',
+                            'filename' => 'hero.jpg',
+                            'size_bytes' => 1,
+                            'download_url' => 'https://signed.example.com/hero.jpg',
+                        ]],
+                    ],
+                    [
+                        'job_id' => '01936fb3-0003-7000-8000-0000000060a3',
+                        'ref' => 'archive',
+                        'files' => [[
+                            'operation' => 'archive',
+                            'operation_id' => '01936fb4-0003-7000-8000-0000000060a3',
+                            'filename' => 'bundle.zip',
+                            'size_bytes' => 99,
+                            'download_url' => 'https://signed.example.com/bundle.zip',
+                        ]],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
+    private function tempFile(string $ext): string
+    {
+        $tmp = \tempnam(\sys_get_temp_dir(), 'gisl_arc_');
+        self::assertIsString($tmp);
+        $path = $tmp . '.' . $ext;
+        \rename($tmp, $path);
+        \file_put_contents($path, \str_repeat('x', 64));
+        return $path;
     }
 }

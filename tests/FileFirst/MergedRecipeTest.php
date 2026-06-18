@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Tests\FileFirst;
 
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
 use Gisl\Sdk\FileFirst\FilesRecipe;
 use Gisl\Sdk\FileFirst\MergedRecipe;
@@ -14,6 +15,7 @@ use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\GislErgonomicClient;
 use GuzzleHttp\Psr7\HttpFactory;
+use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
@@ -180,6 +182,29 @@ final class MergedRecipeTest extends TestCase
         }
     }
 
+    public function test_run_mid_batch_timeout_message_names_the_merge_label(): void
+    {
+        // xxy5Rlsy follow-up (Wi4OnaJE): pin the merge label noun the shared
+        // MultiInputUpload helper threads into its timeout message. A mid-batch
+        // deadline (maxWait 1ms + a slow first upload over two inputs) trips the
+        // `during {uploadsLabel} uploads` throw.
+        $a = $this->tempFile('mp4');
+        $b = $this->tempFile('mp4');
+        $http = $this->slowFirstStubClient([$this->uploadResponse(), $this->uploadResponse()]);
+        $client = $this->makeClient($http);
+        try {
+            $client->files([FileInput::path($a), FileInput::path($b)])
+                ->merge()
+                ->run(maxWait: 1);
+            self::fail('expected GislTimeoutError');
+        } catch (GislTimeoutError $e) {
+            self::assertStringContainsString('merge', $e->getMessage());
+        } finally {
+            @\unlink($a);
+            @\unlink($b);
+        }
+    }
+
     // -----------------------------------------------------------------
 
     private function makeClient(ClientInterface $http): GislErgonomicClient
@@ -191,6 +216,62 @@ final class MergedRecipeTest extends TestCase
             requestFactory: $factory,
             streamFactory: $factory,
         );
+    }
+
+    /**
+     * A PSR-18 stub that usleeps ~5ms on its FIRST request so a 1ms maxWait is
+     * reliably blown DURING the upload loop — the mid-batch throw.
+     *
+     * @param list<ResponseInterface> $queue
+     */
+    private function slowFirstStubClient(array $queue): ClientInterface
+    {
+        return new class ($queue) implements ClientInterface {
+            /** @var list<ResponseInterface> */
+            private array $queue;
+            private bool $first = true;
+
+            /** @param list<ResponseInterface> $queue */
+            public function __construct(array $queue)
+            {
+                $this->queue = $queue;
+            }
+
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                if ($this->first) {
+                    $this->first = false;
+                    \usleep(5000);
+                }
+                $next = \array_shift($this->queue);
+                if ($next === null) {
+                    throw new \RuntimeException('Stub queue exhausted on ' . $request->getUri());
+                }
+                return $next;
+            }
+        };
+    }
+
+    private function uploadResponse(string $fileId = '01936fb1-7bb3-7000-8000-0000000060d1'): ResponseInterface
+    {
+        return new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            (string) \json_encode([
+                'success' => true,
+                'data' => ['file_id' => $fileId, 'content_type' => 'video/mp4', 'size_bytes' => 2048],
+            ], JSON_THROW_ON_ERROR),
+        );
+    }
+
+    private function tempFile(string $ext): string
+    {
+        $tmp = \tempnam(\sys_get_temp_dir(), 'gisl_merge_');
+        self::assertNotFalse($tmp);
+        $path = $tmp . '.' . $ext;
+        \rename($tmp, $path);
+        \file_put_contents($path, \str_repeat('x', 64));
+        return $path;
     }
 
     /**
