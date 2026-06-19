@@ -20,6 +20,10 @@ namespace Gisl\Sdk;
  *   - $onPoll:     fired once per polling cycle (including the very first
  *     status fetch) with the current status string. Useful for surfacing
  *     "still pending..." UI without re-implementing the poll loop.
+ *   - $capability: anonymous-workflow capability token (the `cap` from the
+ *     anonymous workflow-create response), forwarded to each underlying
+ *     status poll as the `X-Workflow-Capability` header. Required to poll a
+ *     null-owner workflow without a session; null for authenticated polling.
  *
  * The callable signature is `function(string $status): void`. PHP can't
  * declare a typed `callable(string): void` property, so the field is
@@ -31,6 +35,7 @@ final class WaitOptions
         public readonly ?int $intervalMs = null,
         public readonly ?int $timeoutMs = null,
         public readonly mixed $onPoll = null,
+        public readonly ?string $capability = null,
     ) {
     }
 }

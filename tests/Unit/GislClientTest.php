@@ -18,6 +18,7 @@ use Gisl\Sdk\GislClientConfig;
 use Gisl\Sdk\JobDefinitionPayload;
 use Gisl\Sdk\OperationDef;
 use Gisl\Sdk\Sources;
+use Gisl\Sdk\WaitOptions;
 use Gisl\Sdk\WorkflowCreatePayload;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
@@ -400,6 +401,117 @@ final class GislClientTest extends TestCase
         self::assertCount(1, $captured);
         self::assertSame('GET', $captured[0]->getMethod());
         self::assertSame('/api/workflows/01936fb2-0000-7000-8000-000000000222/status', $captured[0]->getUri()->getPath());
+    }
+
+    // ---------------------------------------------------------------
+    // Anonymous-read capability header (X-Workflow-Capability) — lets a
+    // session-less caller read its own null-owner workflow by passing back
+    // the one-time `cap` from the anonymous workflow-create response.
+    // ---------------------------------------------------------------
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function statusEnvelope(array $data = []): ResponseInterface
+    {
+        // The generated WorkflowStatusResponse validates `workflow_id` against a
+        // UUIDv7 pattern on hydration, so the envelope must carry a conformant id
+        // (the request-path arg passed to getWorkflowStatus is unconstrained).
+        return $this->jsonResponse(200, [
+            'success' => true,
+            'data' => \array_merge(
+                [
+                    'workflow_id' => '01936fb2-0000-7000-8000-0000000000c1',
+                    'status' => 'completed',
+                    'jobs' => [],
+                ],
+                $data,
+            ),
+        ]);
+    }
+
+    public function testGetWorkflowStatusSendsCapabilityHeaderWhenProvided(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([$this->statusEnvelope()], $captured);
+        $client = $this->makeClient($http);
+
+        $client->getWorkflowStatus('wf-1', 'wcap_abc123');
+
+        self::assertCount(1, $captured);
+        self::assertSame('wcap_abc123', $captured[0]->getHeaderLine('X-Workflow-Capability'));
+    }
+
+    public function testGetWorkflowStatusOmitsCapabilityHeaderWhenAbsent(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([$this->statusEnvelope()], $captured);
+        $client = $this->makeClient($http);
+
+        $client->getWorkflowStatus('wf-1');
+
+        self::assertCount(1, $captured);
+        self::assertFalse($captured[0]->hasHeader('X-Workflow-Capability'));
+    }
+
+    public function testGetWorkflowStatusTreatsEmptyCapabilityAsAbsent(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([$this->statusEnvelope()], $captured);
+        $client = $this->makeClient($http);
+
+        $client->getWorkflowStatus('wf-1', '');
+
+        self::assertCount(1, $captured);
+        self::assertFalse($captured[0]->hasHeader('X-Workflow-Capability'));
+    }
+
+    public function testGetWorkflowDownloadsSendsCapabilityHeaderWhenProvided(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, ['success' => true, 'data' => ['downloads' => []]]),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $client->getWorkflowDownloads('wf-1', 'wcap_dl');
+
+        self::assertCount(1, $captured);
+        self::assertSame('wcap_dl', $captured[0]->getHeaderLine('X-Workflow-Capability'));
+    }
+
+    public function testGetWorkflowDownloadsOmitsCapabilityHeaderWhenAbsent(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->jsonResponse(200, ['success' => true, 'data' => ['downloads' => []]]),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $client->getWorkflowDownloads('wf-1');
+
+        self::assertCount(1, $captured);
+        self::assertFalse($captured[0]->hasHeader('X-Workflow-Capability'));
+    }
+
+    public function testWaitForWorkflowForwardsCapabilityToEachPoll(): void
+    {
+        $captured = [];
+        $http = $this->stubClient([
+            $this->statusEnvelope(['status' => 'in_progress']),
+            $this->statusEnvelope(['status' => 'completed']),
+        ], $captured);
+        $client = $this->makeClient($http);
+
+        $client->waitForWorkflow('wf-1', new WaitOptions(
+            intervalMs: 0,
+            timeoutMs: 5000,
+            capability: 'wcap_poll',
+        ));
+
+        self::assertCount(2, $captured);
+        self::assertSame('wcap_poll', $captured[0]->getHeaderLine('X-Workflow-Capability'));
+        self::assertSame('wcap_poll', $captured[1]->getHeaderLine('X-Workflow-Capability'));
     }
 
     // ---------------------------------------------------------------

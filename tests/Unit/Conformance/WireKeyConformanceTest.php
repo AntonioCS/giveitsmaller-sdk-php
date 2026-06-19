@@ -148,18 +148,24 @@ final class WireKeyConformanceTest extends TestCase
 
     /**
      * Contract compress options the ergonomic resolver deliberately does NOT
-     * expose. `output_format` on compress is the planned API-side "compress +
-     * change format" facade surface (contracts VcPeRWdD / ADR-0021) —
-     * canonicalized to a `convert` op server-side, all non-`original` values
-     * `per_value_availability: planned`. NOT an ergonomic compress option, so
-     * audio's contract `output_format` is an allowed omission. (Image keeps
-     * `output_format` in KNOWN_WIRE_FIELDS — its preset emits the stable
-     * `original` value — so it is NOT listed here.)
+     * expose. `output_format` on compress is the API-side "compress + change
+     * format" facade surface (contracts VcPeRWdD / ADR-0021) — canonicalized to
+     * a `convert` op server-side. Changing format is a `convert()` concern in
+     * the ergonomic SDK, never an ergonomic `compress()` option, so compress's
+     * `output_format` is omitted for every media REGARDLESS of its availability:
+     *   - audio: ALL values flipped `stable` in contracts v2.78.0 (RTokti20) —
+     *     now live, but still omitted here (format-change goes through `convert`).
+     *   - video: non-`original` values are `per_value_availability: planned`
+     *     (facade unbuilt for video) — omitted; exposing a planned value would
+     *     let the resolver emit a field the worker can't honour.
+     * (Image keeps `output_format` in KNOWN_WIRE_FIELDS — its preset emits the
+     * stable `original` value — so it is NOT listed here.)
      *
      * @var array<string, list<string>>
      */
     private const INTENTIONALLY_OMITTED = [
         'audio' => ['output_format'],
+        'video' => ['output_format'],
     ];
 
     /**

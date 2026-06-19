@@ -158,6 +158,35 @@ final class GislClientSseTest extends TestCase
         self::assertSame(['output' => 'x'], $events[1]->data);
     }
 
+    public function testStreamEventsSendsCapabilityHeaderWhenProvided(): void
+    {
+        // Anonymous-read capability: a session-less caller passes the `cap`
+        // from the anonymous workflow-create response so the server authorizes
+        // the SSE read. Sent as the X-Workflow-Capability header.
+        $body = "event: progress\ndata: {\"percent\":50}\n\n";
+        $captured = [];
+        $http = $this->stubClient([$this->sseResponse($body)], $captured);
+        $client = $this->makeClient($http);
+
+        $this->collect($client->streamEvents(self::HARNESS_WORKFLOW_ID, 'wcap_sse'));
+
+        self::assertCount(1, $captured);
+        self::assertSame('wcap_sse', $captured[0]->getHeaderLine('X-Workflow-Capability'));
+    }
+
+    public function testStreamEventsOmitsCapabilityHeaderWhenAbsent(): void
+    {
+        $body = "event: progress\ndata: {\"percent\":50}\n\n";
+        $captured = [];
+        $http = $this->stubClient([$this->sseResponse($body)], $captured);
+        $client = $this->makeClient($http);
+
+        $this->collect($client->streamEvents(self::HARNESS_WORKFLOW_ID));
+
+        self::assertCount(1, $captured);
+        self::assertFalse($captured[0]->hasHeader('X-Workflow-Capability'));
+    }
+
     public function testMultiLineDataIsJoinedWithNewline(): void
     {
         // Multi-line JSON object split across three data: lines. Joined

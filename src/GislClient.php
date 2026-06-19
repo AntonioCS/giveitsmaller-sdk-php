@@ -1412,8 +1412,19 @@ class GislClient
         return $this->hydrate(WorkflowCreateResponse::class, $data);
     }
 
-    public function getWorkflowStatus(string $workflowId): WorkflowStatusResponse
-    {
+    /**
+     * Get current workflow status.
+     *
+     * For an anonymous (null-owner) workflow, pass `$capability` (the `cap`
+     * from the anonymous workflow-create response) so a session-less caller can
+     * read it — the SDK sends it as the `X-Workflow-Capability` header. Pass
+     * null for authenticated reads. A wrong/missing cap on a null-owner
+     * workflow is a 404.
+     */
+    public function getWorkflowStatus(
+        string $workflowId,
+        ?string $capability = null,
+    ): WorkflowStatusResponse {
         // rawurlencode the path segment — workflow IDs come from the server
         // as ULID/UUID-shaped strings, but the SDK can't assume that, and a
         // workflowId containing `/`, `?`, `#`, or unicode would otherwise
@@ -1422,6 +1433,7 @@ class GislClient
         $request = $this->buildRequest(
             method: 'GET',
             path: "/api/workflows/{$encoded}/status",
+            extraHeaders: $this->workflowCapabilityHeaders($capability),
         );
 
         /** @var array<string, mixed> $data */
@@ -1507,13 +1519,23 @@ class GislClient
      * adding a `downloadResultTo($path)` helper overlaps too much with
      * existing PSR-7 idioms — readers can call `copy('php://memory', $stream)`
      * or write their own loop.
+     *
+     * For an anonymous (null-owner) workflow, pass `$capability` (the `cap`
+     * from the anonymous workflow-create response) so a session-less caller can
+     * read it — sent as the `X-Workflow-Capability` header. Pass null for
+     * authenticated reads. A wrong/missing cap on a null-owner workflow is a 404.
+     *
+     * @param ?string $capability Anonymous-workflow capability token.
      */
-    public function getWorkflowDownloads(string $workflowId): WorkflowDownloadResponse
-    {
+    public function getWorkflowDownloads(
+        string $workflowId,
+        ?string $capability = null,
+    ): WorkflowDownloadResponse {
         $encoded = \rawurlencode($workflowId);
         $request = $this->buildRequest(
             method: 'GET',
             path: "/api/workflows/{$encoded}/downloads",
+            extraHeaders: $this->workflowCapabilityHeaders($capability),
         );
 
         /** @var array<string, mixed> $data */
@@ -1551,17 +1573,26 @@ class GislClient
      * in B2.1 surfaces the same exceptions for SSE as for JSON
      * endpoints.
      *
+     * For an anonymous (null-owner) workflow, pass `$capability` (the `cap`
+     * from the anonymous workflow-create response) so a session-less caller
+     * can read it — sent as the `X-Workflow-Capability` header. Pass null for
+     * authenticated reads. A wrong/missing cap on a null-owner workflow is a 404.
+     *
+     * @param ?string $capability Anonymous-workflow capability token.
      * @return \Generator<int, GislSseEvent, void, void>
      * @throws GislNetworkError on transport failure.
      * @throws GislApiError     on a non-2xx envelope (typed subclass
      *                          where the dispatch matches).
      */
-    public function streamEvents(string $workflowId): \Generator
-    {
+    public function streamEvents(
+        string $workflowId,
+        ?string $capability = null,
+    ): \Generator {
         $encoded = \rawurlencode($workflowId);
         $request = $this->buildRequest(
             method: 'GET',
             path: "/api/workflows/{$encoded}/events",
+            extraHeaders: $this->workflowCapabilityHeaders($capability),
         );
 
         try {
@@ -1885,8 +1916,10 @@ class GislClient
         $timeoutNs = $timeoutMs * 1_000_000;
         $deadlineNs = \hrtime(true) + $timeoutNs;
 
+        $capability = $options?->capability;
+
         while (true) {
-            $status = $this->getWorkflowStatus($workflowId);
+            $status = $this->getWorkflowStatus($workflowId, $capability);
             $statusString = $status->getStatus() ?? '';
 
             if ($onPoll !== null) {
@@ -2581,6 +2614,30 @@ class GislClient
     // ---------------------------------------------------------------------
     // Internal helpers
     // ---------------------------------------------------------------------
+
+    /**
+     * Anonymous-read capability header. An anonymous (null-owner) workflow
+     * create returns a one-time `cap` token (WorkflowCreateResponse::getCap());
+     * the session-less caller passes it back on status/downloads/events reads
+     * via this header so the server can authorize the read. A wrong/missing cap
+     * on a null-owner workflow returns 404 (no existence oracle), per contracts
+     * ticket YQt88cq2. Mirrors `WORKFLOW_CAPABILITY_HEADER` in
+     * `packages/typescript/src/client.ts`.
+     */
+    private const WORKFLOW_CAPABILITY_HEADER = 'X-Workflow-Capability';
+
+    /**
+     * Build the capability header set for a workflow read. Empty when no token
+     * is supplied (authenticated reads — the session authorizes those).
+     *
+     * @return array<string, string>
+     */
+    private function workflowCapabilityHeaders(?string $capability): array
+    {
+        return ($capability !== null && $capability !== '')
+            ? [self::WORKFLOW_CAPABILITY_HEADER => $capability]
+            : [];
+    }
 
     /**
      * @param array<string, string> $extraHeaders
