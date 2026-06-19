@@ -6,6 +6,7 @@ namespace Gisl\Sdk\Ergonomic;
 
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
+use Gisl\Sdk\Generated\SdkSpec\Version;
 use Gisl\Sdk\Preset\AudioCompressPresetOptions;
 use Gisl\Sdk\Preset\DocumentEpubCompressPresetOptions;
 use Gisl\Sdk\Preset\DocumentOdfCompressPresetOptions;
@@ -57,12 +58,12 @@ use Gisl\Sdk\PresetDefaults;
 final class PresetResolver
 {
     /**
-     * Bumped on any change to a `*CompressPresetOptions::shippedDefaultsFor()` cell value.
-     * Must track the contracts `sdk-spec/version.yaml` `presetVersion`. 1.0 -> 1.2 on the
-     * contracts v2.71.0 (video_compress `audioBitrate` dropped) + v2.73.0 (image Size/Balanced
-     * `outputFormat` Smallest/Auto -> Original — VcPeRWdD facade self-422 guard) cuts.
+     * Sourced from the generated `sdk-spec/version.yaml` `presetVersion` (via
+     * {@see Version::PRESET_VERSION}) so it can NEVER drift from the contracts
+     * value — a regen propagates a bump with no hand edit here. Mirrors the TS
+     * resolver, which re-exports `PRESET_VERSION` from the generated `version.ts`.
      */
-    public const PRESET_VERSION = '1.2';
+    public const PRESET_VERSION = Version::PRESET_VERSION;
 
     /** @var list<string> Resolver source layers, lowest precedence first. */
     private const SOURCE_KEYS = ['sdkDefault', 'clientDefault', 'scopedDefault', 'callPresetOverride', 'explicit'];

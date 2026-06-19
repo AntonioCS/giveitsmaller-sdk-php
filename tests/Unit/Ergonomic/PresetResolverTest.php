@@ -13,6 +13,7 @@ use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoCodec;
+use Gisl\Sdk\Generated\SdkSpec\Version;
 use Gisl\Sdk\Preset\AudioCompressPresetOptions;
 use Gisl\Sdk\Preset\ImageCompressPresetOptions;
 use Gisl\Sdk\Preset\VideoCompressPresetOptions;
@@ -25,6 +26,21 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(ResolvedOptions::class)]
 final class PresetResolverTest extends TestCase
 {
+    // -----------------------------------------------------------------
+    // Generated-constant invariant (mirrors TS preset-resolver.test.ts)
+    // -----------------------------------------------------------------
+
+    /**
+     * The public PRESET_VERSION constant must equal the generated sdk_spec
+     * constant — guards the direct consumer path (OperationBuilder reads
+     * PresetResolver::PRESET_VERSION) against a same-value hand-typed
+     * regression that the resolver-output pin alone would not catch.
+     */
+    public function testPresetVersionConstantTracksGeneratedConstant(): void
+    {
+        $this->assertSame(Version::PRESET_VERSION, PresetResolver::PRESET_VERSION);
+    }
+
     // -----------------------------------------------------------------
     // Layer precedence
     // -----------------------------------------------------------------
@@ -40,7 +56,7 @@ final class PresetResolverTest extends TestCase
         $this->assertSame(['quality'], $ro->sources->explicit);
         $this->assertSame([], $ro->sources->sdkDefault);
         $this->assertSame([], $ro->sources->clientDefault);
-        $this->assertSame('1.2', $ro->presetVersion);
+        $this->assertSame(Version::PRESET_VERSION, $ro->presetVersion);
         $this->assertNull($ro->presetConfigHash);
         // overrides back-compat mirrors sources.explicit.
         $this->assertSame(['quality'], $ro->overrides);
