@@ -449,6 +449,22 @@ final class FixtureLoader
         $expectedReturn = $hasExpectedReturn ? $raw['expected_return'] : null;
         $expectsError = ($raw['expects_error'] ?? false) === true;
 
+        // Vgg8yITh — cross-SDK error-message parity. Must be a string, and is
+        // only meaningful with `expects_error: true`; reject otherwise so an
+        // author typo fails loud at load instead of silently skipping the
+        // assertion (the PHP loader is otherwise tolerant of unknown keys, so
+        // an un-parsed field would be the silent false-green to avoid).
+        $expectedErrorMessage = null;
+        if (\array_key_exists('expected_error_message', $raw)) {
+            if (!\is_string($raw['expected_error_message'])) {
+                throw new \RuntimeException("[{$base}] expected_error_message must be a string");
+            }
+            if (!$expectsError) {
+                throw new \RuntimeException("[{$base}] expected_error_message requires expects_error: true");
+            }
+            $expectedErrorMessage = $raw['expected_error_message'];
+        }
+
         // F4-A — schema-version discrimination + v2 assertion blocks.
         // PHP loader is naturally tolerant of unknown top-level keys; the
         // schema-version branch here is enforcement, not gatekeeping. v2
@@ -605,6 +621,7 @@ final class FixtureLoader
             hasExpectedReturn: $hasExpectedReturn,
             webhook: $webhook,
             expectsError: $expectsError,
+            expectedErrorMessage: $expectedErrorMessage,
             absolutePath: $file,
             schemaVersion: $schemaVersion,
             resolvedOptions: $resolvedOptions,

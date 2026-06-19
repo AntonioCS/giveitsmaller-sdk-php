@@ -383,6 +383,25 @@ final class ParityTest extends TestCase
             "[{$fixture->name}] request parity failure:\n  - " . \implode("\n  - ", $requestIssues),
         );
 
+        // Vgg8yITh — cross-SDK error-message parity. Compare the RAW human
+        // message via GislApiError::getMessage() (PHP carries no prefix; the TS
+        // counterpart reads GislApiError.errorMessage, since TS .message is
+        // prefixed `API error <status> at <path>:`). Require the throw to be a
+        // GislApiError — no fallback — so a wrong/early throw fails loudly.
+        if ($fixture->expectedErrorMessage !== null) {
+            $thrown = $result->thrown;
+            $this->assertInstanceOf(
+                \Gisl\Sdk\Errors\GislApiError::class,
+                $thrown,
+                "[{$fixture->name}] expected_error_message set but the throw was not a GislApiError",
+            );
+            $this->assertSame(
+                $fixture->expectedErrorMessage,
+                $thrown->getMessage(),
+                "[{$fixture->name}] error-message parity failure",
+            );
+        }
+
         if ($fixture->expectsError) {
             // Error fixtures do not pin a return shape — the typed-error
             // dispatch is asserted by the unit suite, parity only pins the

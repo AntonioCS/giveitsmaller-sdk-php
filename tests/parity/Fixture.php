@@ -109,6 +109,9 @@ final class Fixture
         public readonly ?array $webhook,
         public readonly bool $expectsError,
         public readonly string $absolutePath,
+        // Vgg8yITh — cross-SDK error-message parity. Null unless the fixture
+        // pins the expected thrown human message (only with expectsError).
+        public readonly ?string $expectedErrorMessage = null,
         public readonly string $schemaVersion = self::SCHEMA_VERSION_V1,
         public readonly ?array $resolvedOptions = null,
         public readonly ?array $omittedFromWire = null,
