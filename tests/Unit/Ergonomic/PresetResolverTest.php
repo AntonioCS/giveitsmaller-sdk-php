@@ -234,16 +234,64 @@ final class PresetResolverTest extends TestCase
 
     public function testPresetConfigHashForClientDefaultOnly(): void
     {
-        // WITHIN-PHP determinism pin (NOT cross-anchored with TS). PHP and TS
-        // reconstruct a registered client-default cell into different record
-        // shapes, so the clientDefault-layer hash diverges across SDKs — see
-        // the cross-SDK presetConfigHash follow-up. The override-path hashes
-        // ARE cross-anchored (testPresetConfigHashExactForSingleOverride et al.).
+        // CROSS-ANCHORED with TS (SVQcoR1K). PHP and TS now reconstruct a
+        // registered client-default cell into the SAME sparse camelCase record
+        // ({quality:75}), so the clientDefault-layer hash is byte-identical
+        // across SDKs — the TS suite pins this exact digest too. (Previously a
+        // within-PHP-only pin: TS carried extra undefined-valued keys into the
+        // hash input; fixed by normalising TS's presetDefaultsCellRecord.)
         $defaults = PresetDefaults::create()
             ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 75));
         $out = PresetResolver::resolveCompress('image', $defaults, null, null, OptimizeFor::Size, []);
         $this->assertSame(
             'sha256:2d0bc3473e067653a67d92c0e03ff3666ff498f737b74b9550eb116e91bb2c96',
+            $out['resolvedOptions']->presetConfigHash,
+        );
+    }
+
+    public function testPresetConfigHashForClientDefaultEnumField(): void
+    {
+        // CROSS-ANCHORED with TS (SVQcoR1K). Guards enum->wire conversion on
+        // the REGISTERED-cell path: the canonical clientDefault record is
+        // {outputFormat:"webp"} (camelCase key, wire enum value). The override
+        // anchors only exercise enum parity on the override path — this is the
+        // only guard for the registered-cell path.
+        $defaults = PresetDefaults::create()
+            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp));
+        $out = PresetResolver::resolveCompress('image', $defaults, null, null, OptimizeFor::Size, []);
+        $this->assertSame(
+            'sha256:77af8c77695cc88aed893346ccb5e74b6a2c0df8596ce01854cd312578c69878',
+            $out['resolvedOptions']->presetConfigHash,
+        );
+    }
+
+    public function testPresetConfigHashForScopedDefaultOnly(): void
+    {
+        // CROSS-ANCHORED with TS (SVQcoR1K). scopedDefault (P7) shares the same
+        // record-normalisation path as clientDefault, so its hash must also be
+        // byte-identical across SDKs. Canonical input:
+        // {clientDefault:null, scopedDefault:{quality:88}, callPresetOverride:null}.
+        $scoped = PresetDefaults::create()
+            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 88));
+        $out = PresetResolver::resolveCompress('image', null, $scoped, null, OptimizeFor::Size, []);
+        $this->assertSame(
+            'sha256:4db0c1f71bf073f0031652da39ee1124a11793b8ff8aa26ea2c2af55a3e9272d',
+            $out['resolvedOptions']->presetConfigHash,
+        );
+    }
+
+    public function testPresetConfigHashForClientDefaultFalseBoolean(): void
+    {
+        // CROSS-ANCHORED with TS (SVQcoR1K). Guards the falsy-KEEP symmetry:
+        // PHP leafToRecord drops only `null`, TS definedFieldsOf drops only
+        // `undefined` — both KEEP `false`. Canonical clientDefault record is
+        // {progressive:false}. A regression where one SDK starts dropping
+        // `false` (e.g. a truthiness filter) would break exactly one pin.
+        $defaults = PresetDefaults::create()
+            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(progressive: false));
+        $out = PresetResolver::resolveCompress('image', $defaults, null, null, OptimizeFor::Size, []);
+        $this->assertSame(
+            'sha256:bfb3f628b3f8aa42d05bde2afbc5a3fc88818da676a4bd7d47d2f93757be6976',
             $out['resolvedOptions']->presetConfigHash,
         );
     }
