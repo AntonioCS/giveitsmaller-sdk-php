@@ -6,10 +6,8 @@ namespace Gisl\Sdk\Tests\Unit;
 
 use Gisl\Sdk\Generated\SdkSpec\Enums\AudioBitrate;
 use Gisl\Sdk\Generated\SdkSpec\Enums\AudioSampleRate;
-use Gisl\Sdk\Generated\SdkSpec\Enums\IccProfilePolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMetadataPolicy;
-use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\PdfColorspace;
 use Gisl\Sdk\Generated\SdkSpec\Enums\PdfProfile;
@@ -42,7 +40,7 @@ final class PresetCompressOptionsTest extends TestCase
 
     public function testCaseByNameResolvesStringBackedEnum(): void
     {
-        $this->assertSame(ImageMode::Lossy, PresetCellTranslator::caseByName(ImageMode::class, 'Lossy'));
+        $this->assertSame(ImageMetadataPolicy::All, PresetCellTranslator::caseByName(ImageMetadataPolicy::class, 'All'));
     }
 
     public function testCaseByNameResolvesIntBackedEnumByName(): void
@@ -56,14 +54,14 @@ final class PresetCompressOptionsTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage("'Nope' is not a case of");
-        PresetCellTranslator::caseByName(ImageMode::class, 'Nope');
+        PresetCellTranslator::caseByName(ImageMetadataPolicy::class, 'Nope');
     }
 
     public function testCellReadersReturnNullWhenAbsent(): void
     {
-        $this->assertNull(PresetCellTranslator::enum([], 'mode', ImageMode::class));
+        $this->assertNull(PresetCellTranslator::enum([], 'metadata', ImageMetadataPolicy::class));
         $this->assertNull(PresetCellTranslator::int([], 'quality'));
-        $this->assertNull(PresetCellTranslator::bool([], 'progressive'));
+        $this->assertNull(PresetCellTranslator::bool([], 'normalize'));
     }
 
     public function testEnumReaderThrowsOnNonStringCellValue(): void
@@ -72,7 +70,7 @@ final class PresetCompressOptionsTest extends TestCase
         // violation and must fail loudly (distinct from caseByName's
         // unknown-name InvalidArgumentException).
         $this->expectException(\LogicException::class);
-        PresetCellTranslator::enum(['mode' => 96], 'mode', ImageMode::class);
+        PresetCellTranslator::enum(['metadata' => 96], 'metadata', ImageMetadataPolicy::class);
     }
 
     public function testIntReaderThrowsOnNonInt(): void
@@ -84,7 +82,7 @@ final class PresetCompressOptionsTest extends TestCase
     public function testBoolReaderThrowsOnNonBool(): void
     {
         $this->expectException(\LogicException::class);
-        PresetCellTranslator::bool(['progressive' => 1], 'progressive');
+        PresetCellTranslator::bool(['normalize' => 1], 'normalize');
     }
 
     // -----------------------------------------------------------------
@@ -93,8 +91,7 @@ final class PresetCompressOptionsTest extends TestCase
 
     public function testLeafDtoNamedArgConstructionIsSparse(): void
     {
-        $dto = new ImageCompressPresetOptions(mode: ImageMode::Lossy, quality: 75);
-        $this->assertSame(ImageMode::Lossy, $dto->mode);
+        $dto = new ImageCompressPresetOptions(quality: 75);
         $this->assertSame(75, $dto->quality);
         // Unset fields stay null (sparse delta).
         $this->assertNull($dto->metadata);
@@ -107,23 +104,24 @@ final class PresetCompressOptionsTest extends TestCase
 
     public function testImageShippedDefaultsForSize(): void
     {
+        // v2.80.0 honesty pass (lossy-only): the cell ships only quality /
+        // metadata / outputFormat. `mode` + `iccProfile` were removed.
         $dto = ImageCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(ImageMode::Lossy, $dto->mode);
         $this->assertSame(65, $dto->quality);
         $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
-        $this->assertSame(IccProfilePolicy::Strip, $dto->iccProfile);
         // VcPeRWdD (contracts v2.73.0): Size outputFormat re-pointed Smallest -> Original
         // (`smallest` is now per_value_availability:planned — facade self-422 guard).
         $this->assertSame(ImageFormat::Original, $dto->outputFormat);
     }
 
-    public function testImageShippedDefaultsForQualityOmitsQuality(): void
+    public function testImageShippedDefaultsForQualityShipsQuality(): void
     {
-        // The Quality cell omits `quality` (contract gates it on mode:lossy);
-        // a sparse null must result, NOT a hardcoded fallback.
+        // v2.80.0 honesty pass: the worker is lossy-only, so the Quality cell
+        // now ships a concrete quality:92 (was previously omitted under the
+        // removed mode:lossless gate).
         $dto = ImageCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Quality);
-        $this->assertSame(ImageMode::Lossless, $dto->mode);
-        $this->assertNull($dto->quality);
+        $this->assertSame(92, $dto->quality);
+        $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
         $this->assertSame(ImageFormat::Original, $dto->outputFormat);
     }
 
@@ -204,18 +202,17 @@ final class PresetCompressOptionsTest extends TestCase
             $cell = Presets::shippedDefaultsFor('image_compress', $level);
             $dto = ImageCompressPresetOptions::shippedDefaultsFor($level);
 
-            if (\array_key_exists('mode', $cell)) {
-                $this->assertNotNull($dto->mode);
-                $this->assertSame($cell['mode'], $dto->mode->name);
+            if (\array_key_exists('metadata', $cell)) {
+                $this->assertNotNull($dto->metadata);
+                $this->assertSame($cell['metadata'], $dto->metadata->name);
             }
             if (\array_key_exists('outputFormat', $cell)) {
                 $this->assertNotNull($dto->outputFormat);
                 $this->assertSame($cell['outputFormat'], $dto->outputFormat->name);
             }
-            // A field absent from the cell must be null on the DTO.
-            if (!\array_key_exists('quality', $cell)) {
-                $this->assertNull($dto->quality);
-            }
+            // v2.80.0: lossy-only, so every level ships a concrete quality.
+            $this->assertArrayHasKey('quality', $cell);
+            $this->assertSame($cell['quality'], $dto->quality);
         }
     }
 }

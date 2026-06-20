@@ -11,6 +11,7 @@ use Gisl\Sdk\Preset\DocumentEpubCompressPresetOptions;
 use Gisl\Sdk\Preset\DocumentOdfCompressPresetOptions;
 use Gisl\Sdk\Preset\DocumentOfficeCompressPresetOptions;
 use Gisl\Sdk\Preset\DocumentPdfCompressPresetOptions;
+use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Preset\ImageCompressPresetOptions;
 use Gisl\Sdk\Preset\VideoCompressPresetOptions;
 use Gisl\Sdk\PresetDefaults;
@@ -94,7 +95,7 @@ final class PresetDefaultsTest extends TestCase
     public function testMergeFieldWiseChildWinsParentFillsGaps(): void
     {
         $parent = PresetDefaults::create()
-            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 70, progressive: true));
+            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 70, outputFormat: ImageFormat::Webp));
         $child = PresetDefaults::create()
             ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 92));
 
@@ -102,8 +103,8 @@ final class PresetDefaultsTest extends TestCase
         $cell = $merged->cellFor('image_compress', OptimizeFor::Size);
 
         $this->assertInstanceOf(ImageCompressPresetOptions::class, $cell);
-        $this->assertSame(92, $cell->quality);      // child wins
-        $this->assertTrue($cell->progressive);      // parent fills gap
+        $this->assertSame(92, $cell->quality);                  // child wins
+        $this->assertSame(ImageFormat::Webp, $cell->outputFormat); // parent fills gap
     }
 
     public function testMergeTakesChildOnlyAndParentOnlyCellsVerbatim(): void
@@ -147,7 +148,7 @@ final class PresetDefaultsTest extends TestCase
         $level = OptimizeFor::Size;
 
         $parent = PresetDefaults::create()
-            ->imageCompress($level, new ImageCompressPresetOptions(progressive: true))
+            ->imageCompress($level, new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp))
             ->audioCompress($level, new AudioCompressPresetOptions(normalize: true))
             ->videoCompress($level, new VideoCompressPresetOptions(fps: 24))
             ->pdfCompress($level, new DocumentPdfCompressPresetOptions(profile: PdfProfile::Web))
@@ -168,8 +169,8 @@ final class PresetDefaultsTest extends TestCase
 
         $img = $m->cellFor('image_compress', $level);
         $this->assertInstanceOf(ImageCompressPresetOptions::class, $img);
-        $this->assertSame(92, $img->quality);          // child
-        $this->assertTrue($img->progressive);          // parent
+        $this->assertSame(92, $img->quality);              // child
+        $this->assertSame(ImageFormat::Webp, $img->outputFormat); // parent
 
         $aud = $m->cellFor('audio_compress', $level);
         $this->assertInstanceOf(AudioCompressPresetOptions::class, $aud);

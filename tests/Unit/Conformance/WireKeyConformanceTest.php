@@ -89,6 +89,21 @@ final class WireKeyConformanceTest extends TestCase
     }
 
     /**
+     * The contract mime_group keys that make up the image FAMILY: the single
+     * `image` group plus every `image_*` (image_jpeg / image_png / image_avif).
+     * The SDK's one format-agnostic `image` media maps to this whole family.
+     *
+     * @return list<string>
+     */
+    private function imageFamilyGroups(OperationMetadata $metadata): array
+    {
+        return array_values(array_filter(
+            array_keys($metadata->mime_groups),
+            static fn (string $g): bool => $g === 'image' || str_starts_with($g, 'image_'),
+        ));
+    }
+
+    /**
      * @param list<string>        $emitted
      * @param array<string, true> $contract
      */
@@ -161,11 +176,33 @@ final class WireKeyConformanceTest extends TestCase
      * (Image keeps `output_format` in KNOWN_WIRE_FIELDS — its preset emits the
      * stable `original` value — so it is NOT listed here.)
      *
+     * Image format-specific knobs (contracts v2.80.0 honesty pass): compress.image
+     * is now a 4-group family — image (webp/gif/svg/tiff), image_jpeg, image_png,
+     * image_avif. The ergonomic resolver models image-compress with ONE
+     * format-agnostic `image` media that emits only the options common to every
+     * image input format (quality / metadata / output_format). The per-format
+     * advanced knobs are NOT emitted by the format-agnostic path and are omitted
+     * until per-input-format ergonomic options ship (tracked follow-up):
+     *   - progressive        (image_jpeg only)
+     *   - optimization_level (image_png only)
+     *   - avif_speed         (image_avif only)
+     *
+     * Document `quality` (contracts v2.83.0 document-compress honesty pass): a
+     * stable per-document-group quality knob the ergonomic document-compress
+     * preset path does not expose yet (the document preset DTOs carry
+     * profile/image_quality/strip_* but not `quality`) — omitted until a
+     * document-quality ergonomic option ships (tracked follow-up).
+     *
      * @var array<string, list<string>>
      */
     private const INTENTIONALLY_OMITTED = [
+        'image' => ['progressive', 'optimization_level', 'avif_speed'],
         'audio' => ['output_format'],
         'video' => ['output_format'],
+        'document_pdf' => ['quality'],
+        'document_office' => ['quality'],
+        'document_odf' => ['quality'],
+        'document_epub' => ['quality'],
     ];
 
     /**
@@ -180,9 +217,21 @@ final class WireKeyConformanceTest extends TestCase
     public function every_compress_contract_option_per_media_is_known_or_documented_omission(): void
     {
         foreach (PresetResolver::KNOWN_WIRE_FIELDS as $media => $fields) {
-            // mediaGroupOptionKeys asserts the mime group exists → a renamed/dropped
-            // PresetMedia<->mime_group mapping fails loudly, not silently skipped.
-            $contractForMedia = $this->mediaGroupOptionKeys(CompressMetadata::instance(), $media);
+            // For `image` the contract surface is the UNION of every image-family
+            // group (image + image_*) so a per-format option like
+            // optimization_level is captured; for other media it is the one
+            // same-named group. mediaGroupOptionKeys asserts the group exists → a
+            // renamed/dropped PresetMedia<->mime_group mapping fails loudly.
+            if ($media === 'image') {
+                $contractForMedia = [];
+                foreach ($this->imageFamilyGroups(CompressMetadata::instance()) as $group) {
+                    foreach (array_keys($this->mediaGroupOptionKeys(CompressMetadata::instance(), $group)) as $k) {
+                        $contractForMedia[$k] = true;
+                    }
+                }
+            } else {
+                $contractForMedia = $this->mediaGroupOptionKeys(CompressMetadata::instance(), $media);
+            }
             $allowed = [];
             foreach ($fields as $field) {
                 $allowed[$field] = true;
@@ -204,9 +253,13 @@ final class WireKeyConformanceTest extends TestCase
     public function every_compress_contract_mime_group_is_covered_by_known_wire_fields(): void
     {
         $known = PresetResolver::KNOWN_WIRE_FIELDS;
+        // Fold the image-family groups (image + image_*) into the SDK's single
+        // `image` media: a group is covered if it has a same-named KNOWN_WIRE_FIELDS
+        // entry, OR it is an image-family group and the SDK has an `image` entry.
         $uncovered = array_values(array_filter(
             array_keys(CompressMetadata::instance()->mime_groups),
-            static fn (string $m): bool => !isset($known[$m]),
+            static fn (string $m): bool => !isset($known[$m])
+                && !(isset($known['image']) && ($m === 'image' || str_starts_with($m, 'image_'))),
         ));
         self::assertSame(
             [],

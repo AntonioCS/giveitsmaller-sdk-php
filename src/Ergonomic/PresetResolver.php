@@ -88,18 +88,17 @@ final class PresetResolver
 
     /**
      * Declarative camelCase → snake_case wire-field alias map. Lifted verbatim
-     * from `preset_resolver.ts:71-90`. Fields whose ergonomic name IS the wire
-     * name (`mode`, `quality`, `codec`, …) are NOT here — {@see applyAlias()}
+     * from `preset_resolver.ts`. Fields whose ergonomic name IS the wire
+     * name (`quality`, `codec`, …) are NOT here — {@see applyAlias()}
      * returns them unchanged. A generic snake_case regex would mistranslate
-     * names like `iccProfile` → `i_c_c_profile`; the declarative map is the
-     * only safe path. `targetSize` is deliberately ABSENT — it is DERIVED into
-     * `target_size_bytes` + `encoding_mode`, never emitted under its own snake
-     * form.
+     * acronym/camel names (e.g. an `outputFormat` rename or the former
+     * `iccProfile`); the declarative map is the only safe path. `targetSize`
+     * is deliberately ABSENT — it is DERIVED into `target_size_bytes` +
+     * `encoding_mode`, never emitted under its own snake form.
      *
      * @var array<string, string>
      */
     private const WIRE_ALIASES = [
-        'iccProfile' => 'icc_profile',
         'outputFormat' => 'output_format',
         'sampleRate' => 'sample_rate',
         'audioCodec' => 'audio_codec',
@@ -131,7 +130,7 @@ final class PresetResolver
      * @var array<string, list<string>>
      */
     private const MEDIA_FIELDS = [
-        'image' => ['mode', 'quality', 'metadata', 'iccProfile', 'progressive', 'outputFormat'],
+        'image' => ['quality', 'metadata', 'outputFormat'],
         'audio' => ['bitrate', 'channels', 'sampleRate', 'normalize'],
         'video' => ['codec', 'targetSize', 'crf', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audioCodec', 'audioBitrate'],
         'document_pdf' => ['profile', 'colorspace', 'flattenForms'],
@@ -151,7 +150,7 @@ final class PresetResolver
      * @var array<string, list<string>>
      */
     public const KNOWN_WIRE_FIELDS = [
-        'image' => ['mode', 'quality', 'metadata', 'icc_profile', 'progressive', 'output_format'],
+        'image' => ['quality', 'metadata', 'output_format'],
         'audio' => ['bitrate', 'channels', 'sample_rate', 'normalize', 'trim_start', 'trim_end'],
         'video' => ['codec', 'encoding_mode', 'crf', 'target_size_bytes', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audio_codec', 'audio_bitrate', 'trim_start', 'trim_end'],
         'document_pdf' => ['profile', 'colorspace', 'pages', 'flatten_forms'],
@@ -631,17 +630,6 @@ final class PresetResolver
                     resolvedSnapshot: $merged,
                 );
             }
-        }
-
-        // Image: mode=Lossless + quality set is invalid (depends_on mode:lossy).
-        if ($media === 'image' && ($merged['mode'] ?? null) === 'lossless' && \array_key_exists('quality', $merged)) {
-            throw new GislConfigError(
-                "Image compress: 'quality' is ignored when 'mode' is Lossless — passing both is a configuration bug.",
-                reason: 'missing_dependency',
-                conflictingFields: ['quality', 'mode'],
-                resolvedSnapshot: $merged,
-                suggestion: "Either drop 'quality' for lossless output, or set 'mode' to Lossy.",
-            );
         }
 
         // Video: targetSize-derived encoding_mode='target_size' is only valid

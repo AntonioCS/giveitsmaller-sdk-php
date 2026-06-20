@@ -101,7 +101,7 @@ final class WithPresetDefaultsTest extends TestCase
     {
         $a = PresetDefaults::create()->imageCompress(
             OptimizeFor::Size,
-            new ImageCompressPresetOptions(quality: 70, progressive: true),
+            new ImageCompressPresetOptions(quality: 70, outputFormat: ImageFormat::Webp),
         );
         $b = PresetDefaults::create()->imageCompress(
             OptimizeFor::Size,
@@ -116,7 +116,7 @@ final class WithPresetDefaultsTest extends TestCase
         $this->assertInstanceOf(ImageCompressPresetOptions::class, $cell);
         // b wins the overlapping field; a fills the gap it didn't set.
         $this->assertSame(92, $cell->quality);
-        $this->assertTrue($cell->progressive);
+        $this->assertSame(ImageFormat::Webp, $cell->outputFormat);
     }
 
     public function testCompressForwardsScopedDefaultsToBuilder(): void
@@ -187,7 +187,7 @@ final class WithPresetDefaultsTest extends TestCase
         );
         $derived = $client
             ->withPresetDefaults(PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 80)))
-            ->withPresetDefaults(PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(metadata: ImageMetadataPolicy::None)));
+            ->withPresetDefaults(PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(metadata: ImageMetadataPolicy::All)));
 
         $builder = $derived->compress('/tmp/x.jpg', ['optimize' => 'Size']);
         $ref = new \ReflectionObject($builder);

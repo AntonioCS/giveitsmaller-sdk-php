@@ -79,14 +79,16 @@ final class RecipeChainOptionsTest extends TestCase
     #[Test]
     public function convert_lowers_shorthand_to_output_format_and_merges_the_bag(): void
     {
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['codec' => 'h265', 'quality' => 90]));
+        // Image convert legitimately carries two passthrough keys (quality + background)
+        // — video convert is only { output_format, crf? } since v2.81.0.
+        $ops = $this->operations($this->recipe('photo.jpg')->convert('webp', ['quality' => 90, 'background' => '#ffffff']));
         // The shorthand $format lowers to the `output_format` wire key (contract:
         // convert.yaml) and is spread LAST (authoritative). Assert membership
         // order-independently so this does not couple to insertion order.
         self::assertCount(1, $ops);
         self::assertSame('convert', $ops[0]['type']);
         self::assertEqualsCanonicalizing(
-            ['output_format' => 'mp4', 'codec' => 'h265', 'quality' => 90],
+            ['output_format' => 'webp', 'quality' => 90, 'background' => '#ffffff'],
             $ops[0]['options'],
         );
     }
@@ -148,8 +150,8 @@ final class RecipeChainOptionsTest extends TestCase
     {
         // A `format` key in the bag is the OLD (wrong) wire key — the shorthand
         // now owns output_format, so the stray `format` must NOT leak onto the wire.
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['format' => 'legacy', 'codec' => 'h264']));
-        self::assertEqualsCanonicalizing(['output_format' => 'mp4', 'codec' => 'h264'], $ops[0]['options']);
+        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['format' => 'legacy', 'crf' => 23]));
+        self::assertEqualsCanonicalizing(['output_format' => 'mp4', 'crf' => 23], $ops[0]['options']);
         self::assertArrayNotHasKey('format', $ops[0]['options']);
     }
 
@@ -421,7 +423,7 @@ final class RecipeChainOptionsTest extends TestCase
     public function files_convert_carries_the_option_into_every_job(): void
     {
         $jobs = (new FilesRecipe([FileInput::path('a.mov'), FileInput::path('b.mov')]))
-            ->convert('mp4', ['codec' => 'h265'])
+            ->convert('mp4', ['crf' => 23])
             ->toWorkflowPayload(['f0', 'f1'])
             ->toWire()['jobs'];
 
@@ -434,7 +436,7 @@ final class RecipeChainOptionsTest extends TestCase
             self::assertSame('convert', $job['operations'][0]['type']);
             // $format is spread LAST (authoritative); assert order-independently.
             self::assertEqualsCanonicalizing(
-                ['output_format' => 'mp4', 'codec' => 'h265'],
+                ['output_format' => 'mp4', 'crf' => 23],
                 $job['operations'][0]['options'],
             );
         }
@@ -508,13 +510,13 @@ final class RecipeChainOptionsTest extends TestCase
             [FileInput::path('a.mp4'), FileInput::path('b.mp4')],
             new MergeOptions(mediaKind: 'video'),
         ))
-            ->convert('webm', ['codec' => 'vp9'])
+            ->convert('webm', ['crf' => 28])
             ->toWorkflowPayload(['f0', 'f1'], null);
 
         $mergeJob = $payload->jobs[2];
         self::assertSame('convert', $mergeJob->operations[1]->type);
         // $format is spread LAST (authoritative); assert order-independently.
-        self::assertEqualsCanonicalizing(['output_format' => 'webm', 'codec' => 'vp9'], $mergeJob->operations[1]->options);
+        self::assertEqualsCanonicalizing(['output_format' => 'webm', 'crf' => 28], $mergeJob->operations[1]->options);
     }
 
     #[Test]

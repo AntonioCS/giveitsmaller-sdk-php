@@ -26,26 +26,18 @@ final class Presets
     public const PRESETS = [
         'image_compress' => [
             'Size' => [
-                'mode' => 'Lossy',
                 'quality' => 65,
                 'metadata' => 'All',
-                'iccProfile' => 'Strip',
-                'progressive' => true,
                 'outputFormat' => 'Original',
             ],
             'Balanced' => [
-                'mode' => 'Auto',
                 'quality' => 80,
-                'metadata' => 'Sensitive',
-                'iccProfile' => 'Preserve',
-                'progressive' => true,
+                'metadata' => 'All',
                 'outputFormat' => 'Original',
             ],
             'Quality' => [
-                'mode' => 'Lossless',
-                'metadata' => 'None',
-                'iccProfile' => 'Preserve',
-                'progressive' => true,
+                'quality' => 92,
+                'metadata' => 'All',
                 'outputFormat' => 'Original',
             ],
         ],

@@ -8,9 +8,8 @@ use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\ResolvedOptions;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\AudioBitrate;
-use Gisl\Sdk\Generated\SdkSpec\Enums\IccProfilePolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
-use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMode;
+use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMetadataPolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoCodec;
 use Gisl\Sdk\Generated\SdkSpec\Version;
@@ -69,11 +68,13 @@ final class PresetResolverTest extends TestCase
 
         $this->assertSame('Size', $ro->preset);
         // Stable cell values from the generated PRESETS image_compress/Size cell.
+        // v2.80.0 honesty pass: image wire surface is only {quality, metadata,
+        // output_format} — mode / icc_profile / progressive are gone.
         $this->assertSame(65, $out['wireOptions']['quality']);
-        $this->assertSame('lossy', $out['wireOptions']['mode']);
+        $this->assertSame('all', $out['wireOptions']['metadata']);
         // Every shipped field is attributed to sdkDefault (wire names, sorted).
         $this->assertSame(
-            ['icc_profile', 'metadata', 'mode', 'output_format', 'progressive', 'quality'],
+            ['metadata', 'output_format', 'quality'],
             $ro->sources->sdkDefault,
         );
         $this->assertSame([], $ro->sources->explicit);
@@ -130,14 +131,14 @@ final class PresetResolverTest extends TestCase
             ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 75));
 
         // No optimize ⇒ shipped + client layers contribute nothing.
-        $out = PresetResolver::resolveCompress('image', $defaults, null, ['progressive' => true], null, ['quality' => 50]);
+        $out = PresetResolver::resolveCompress('image', $defaults, null, ['metadata' => ImageMetadataPolicy::All], null, ['quality' => 50]);
         $ro = $out['resolvedOptions'];
 
         $this->assertNull($ro->preset);
-        $this->assertEqualsCanonicalizing(['quality' => 50, 'progressive' => true], $out['wireOptions']);
+        $this->assertEqualsCanonicalizing(['quality' => 50, 'metadata' => 'all'], $out['wireOptions']);
         $this->assertSame([], $ro->sources->sdkDefault);
         $this->assertSame([], $ro->sources->clientDefault);
-        $this->assertSame(['progressive'], $ro->sources->callPresetOverride);
+        $this->assertSame(['metadata'], $ro->sources->callPresetOverride);
         $this->assertSame(['quality'], $ro->sources->explicit);
     }
 
@@ -153,11 +154,11 @@ final class PresetResolverTest extends TestCase
 
     public function testCamelFieldAliasedToSnakeWire(): void
     {
-        $out = PresetResolver::resolveCompress('image', null, null, null, null, ['iccProfile' => IccProfilePolicy::Strip]);
-        $this->assertArrayHasKey('icc_profile', $out['wireOptions']);
-        $this->assertArrayNotHasKey('iccProfile', $out['wireOptions']);
-        $this->assertSame('strip', $out['wireOptions']['icc_profile']);
-        $this->assertSame(['icc_profile'], $out['resolvedOptions']->sources->explicit);
+        $out = PresetResolver::resolveCompress('image', null, null, null, null, ['outputFormat' => ImageFormat::Webp]);
+        $this->assertArrayHasKey('output_format', $out['wireOptions']);
+        $this->assertArrayNotHasKey('outputFormat', $out['wireOptions']);
+        $this->assertSame('webp', $out['wireOptions']['output_format']);
+        $this->assertSame(['output_format'], $out['resolvedOptions']->sources->explicit);
     }
 
     // -----------------------------------------------------------------
@@ -223,12 +224,19 @@ final class PresetResolverTest extends TestCase
 
     public function testPresetConfigHashSortsKeysDeterministically(): void
     {
-        // progressive + quality, regardless of insertion order, hash to the
-        // same value (recursive key-sort, camelCase record).
-        $out = PresetResolver::resolveCompress('image', null, null, ['quality' => 70, 'progressive' => true], null, []);
+        // CROSS-ANCHORED with TS. metadata + quality, regardless of insertion
+        // order, hash to the SAME byte-identical value (recursive key-sort,
+        // camelCase record) — the TS suite pins this exact digest too.
+        $a = PresetResolver::resolveCompress('image', null, null, ['quality' => 70, 'metadata' => ImageMetadataPolicy::All], null, []);
+        $b = PresetResolver::resolveCompress('image', null, null, ['metadata' => ImageMetadataPolicy::All, 'quality' => 70], null, []);
+
         $this->assertSame(
-            'sha256:26aa8ab195e269b4dde191a94f5018e50fc84493251074c2974f90e88b93e40b',
-            $out['resolvedOptions']->presetConfigHash,
+            $a['resolvedOptions']->presetConfigHash,
+            $b['resolvedOptions']->presetConfigHash,
+        );
+        $this->assertSame(
+            'sha256:62daaae9d0b8717221d87f7a2e9823cea7fd833220b5cda7cdcd9c845f96c104',
+            $a['resolvedOptions']->presetConfigHash,
         );
     }
 
@@ -280,22 +288,6 @@ final class PresetResolverTest extends TestCase
         );
     }
 
-    public function testPresetConfigHashForClientDefaultFalseBoolean(): void
-    {
-        // CROSS-ANCHORED with TS (SVQcoR1K). Guards the falsy-KEEP symmetry:
-        // PHP leafToRecord drops only `null`, TS definedFieldsOf drops only
-        // `undefined` — both KEEP `false`. Canonical clientDefault record is
-        // {progressive:false}. A regression where one SDK starts dropping
-        // `false` (e.g. a truthiness filter) would break exactly one pin.
-        $defaults = PresetDefaults::create()
-            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(progressive: false));
-        $out = PresetResolver::resolveCompress('image', $defaults, null, null, OptimizeFor::Size, []);
-        $this->assertSame(
-            'sha256:bfb3f628b3f8aa42d05bde2afbc5a3fc88818da676a4bd7d47d2f93757be6976',
-            $out['resolvedOptions']->presetConfigHash,
-        );
-    }
-
     public function testEmptyRegisteredOverrideHashesAsEmptyObject(): void
     {
         // A registered-but-empty override participates (presence), and its
@@ -307,21 +299,26 @@ final class PresetResolverTest extends TestCase
         );
     }
 
+    public function testPresetConfigHashKeepsFalsyClientDefaultValue(): void
+    {
+        // CROSS-ANCHORED with TS. v2.80.0 dropped the boolean `progressive`
+        // field that previously guarded falsy-KEEP symmetry, so this uses a
+        // falsy NUMBER (quality:0): PHP leaf normalisation keeps a defined-but-
+        // falsy value (never drops 0/false), matching TS `definedFieldsOf`. A
+        // regression dropping the registered cell because its only value is
+        // falsy would make the hash disappear.
+        $defaults = PresetDefaults::create()
+            ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 0));
+        $out = PresetResolver::resolveCompress('image', $defaults, null, null, OptimizeFor::Size, []);
+        $this->assertSame(
+            'sha256:65a242e8070dccc9befe4770232de2c9b2f83eb942e1644212dcafc26b03e8bb',
+            $out['resolvedOptions']->presetConfigHash,
+        );
+    }
+
     // -----------------------------------------------------------------
     // Validations (post-merge)
     // -----------------------------------------------------------------
-
-    public function testImageLosslessWithQualityThrowsMissingDependency(): void
-    {
-        try {
-            PresetResolver::resolveCompress('image', null, null, null, null, ['mode' => ImageMode::Lossless, 'quality' => 80]);
-            $this->fail('expected GislConfigError');
-        } catch (GislConfigError $e) {
-            $this->assertSame('missing_dependency', $e->reason);
-            $this->assertSame(['quality', 'mode'], $e->conflictingFields);
-            $this->assertIsArray($e->resolvedSnapshot);
-        }
-    }
 
     public function testTargetSizeWithNonH264ThrowsInvalidCombination(): void
     {
@@ -445,7 +442,7 @@ final class PresetResolverTest extends TestCase
 
     public function testClientDefaultMergesFieldByFieldWithShipped(): void
     {
-        // Client sets only `quality`; the shipped `mode` must survive (the
+        // Client sets only `quality`; the shipped `metadata` must survive (the
         // client layer must NOT wipe the whole sdkDefault layer).
         $defaults = PresetDefaults::create()
             ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 75));
@@ -453,9 +450,9 @@ final class PresetResolverTest extends TestCase
         $ro = $out['resolvedOptions'];
 
         $this->assertSame(75, $out['wireOptions']['quality']);
-        $this->assertSame('lossy', $out['wireOptions']['mode']);
+        $this->assertSame('all', $out['wireOptions']['metadata']);
         $this->assertSame(['quality'], $ro->sources->clientDefault);
-        $this->assertContains('mode', $ro->sources->sdkDefault);
+        $this->assertContains('metadata', $ro->sources->sdkDefault);
     }
 
     public function testTargetSizeSourcedFromClientDefaultAttributesDerivedKeys(): void
@@ -483,7 +480,7 @@ final class PresetResolverTest extends TestCase
     {
         $defaults = PresetDefaults::create()
             ->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 75));
-        $out = PresetResolver::resolveCompress('image', $defaults, null, ['progressive' => false], OptimizeFor::Size, ['quality' => 100]);
+        $out = PresetResolver::resolveCompress('image', $defaults, null, ['metadata' => ImageMetadataPolicy::All], OptimizeFor::Size, ['quality' => 100]);
         // scopedDefault is reserved for P7 — always empty regardless of the
         // other layers being populated.
         $this->assertSame([], $out['resolvedOptions']->sources->scopedDefault);
@@ -705,7 +702,7 @@ final class PresetResolverTest extends TestCase
     {
         // Defensive: the flag does nothing for image (no bitrate concept).
         $out = PresetResolver::resolveCompress('image', null, null, null, OptimizeFor::Size, [], audioLossless: true);
-        $this->assertSame('lossy', $out['wireOptions']['mode']);
+        $this->assertSame(65, $out['wireOptions']['quality']);
         $this->assertArrayNotHasKey('bitrate', $out['wireOptions']);
     }
 }

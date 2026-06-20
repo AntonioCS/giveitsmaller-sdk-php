@@ -141,11 +141,8 @@ final class PresetDefaults
         return match (true) {
             $parent instanceof ImageCompressPresetOptions && $child instanceof ImageCompressPresetOptions
                 => new ImageCompressPresetOptions(
-                    mode: $child->mode ?? $parent->mode,
                     quality: $child->quality ?? $parent->quality,
                     metadata: $child->metadata ?? $parent->metadata,
-                    iccProfile: $child->iccProfile ?? $parent->iccProfile,
-                    progressive: $child->progressive ?? $parent->progressive,
                     outputFormat: $child->outputFormat ?? $parent->outputFormat,
                 ),
             $parent instanceof AudioCompressPresetOptions && $child instanceof AudioCompressPresetOptions
