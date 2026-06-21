@@ -154,7 +154,7 @@ final class WithPresetDefaultsTest extends TestCase
     public function testDerivedScopedThreadsThroughToWire(): void
     {
         $client = $this->makeClient(
-            PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(outputFormat: ImageFormat::Auto)),
+            PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp)),
         );
         $derived = $client->withPresetDefaults(
             PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 92)),
@@ -183,7 +183,7 @@ final class WithPresetDefaultsTest extends TestCase
     public function testChainedDeriveThreeLayerOverlay(): void
     {
         $client = $this->makeClient(
-            PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(outputFormat: ImageFormat::Auto)),
+            PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp)),
         );
         $derived = $client
             ->withPresetDefaults(PresetDefaults::create()->imageCompress(OptimizeFor::Size, new ImageCompressPresetOptions(quality: 80)))

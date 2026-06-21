@@ -537,7 +537,7 @@ final class PresetResolverTest extends TestCase
         // both reach the wire.
         $client = PresetDefaults::create()->imageCompress(
             OptimizeFor::Size,
-            new ImageCompressPresetOptions(outputFormat: ImageFormat::Auto),
+            new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp),
         );
         $scoped = PresetDefaults::create()->imageCompress(
             OptimizeFor::Size,
