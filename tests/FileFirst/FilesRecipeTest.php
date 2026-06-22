@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Tests\FileFirst;
 
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislItemFailedError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\FileFirst\FileInput;
@@ -264,11 +265,67 @@ final class FilesRecipeTest extends TestCase
         self::assertSame(['1'], array_map(static fn ($f) => $f->key, $result->failed));
         // The failed item carries THAT job's first op error, scoped via the
         // PER-JOB status: "{jobStatus}: {message}".
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
         self::assertSame('failed: codec exploded', $result->failed[0]->error->getMessage());
+        // The typed error exposes the per-job state for branchless handling; no
+        // error_code was mocked, so it stays null.
+        self::assertSame('failed', $result->failed[0]->error->state);
+        self::assertSame('codec exploded', $result->failed[0]->error->errorMessage);
+        self::assertNull($result->failed[0]->error->errorCode);
         // The succeeded outputs are still resolvable; the failed job has none.
         self::assertSame('https://cdn/a.webp', $result->byKey('0')->outputs[0]->url);
         self::assertSame('https://cdn/c.webp', $result->byKey('2')->outputs[0]->url);
         self::assertSame(['https://cdn/a.webp', 'https://cdn/c.webp'], array_map(static fn ($a) => $a->url, $result->artifacts));
+    }
+
+    #[Test]
+    public function run_failed_jobs_scope_error_code_and_message_per_job(): void
+    {
+        // PER-JOB scoping of the typed GislItemFailedError: file-0 fails with
+        // BOTH an error_code + error_message; file-1 fails with only a message
+        // (no code). Each failed entry reads from ITS OWN job's first failing op
+        // — never bleeding the other job's code.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            $this->multiJobStatusResponse('failed', [
+                ['ref' => 'file-0', 'status' => 'failed', 'error' => 'too large', 'error_code' => 'output_too_large'],
+                ['ref' => 'file-1', 'status' => 'failed', 'error' => 'unsupported pixel format'],
+            ]),
+            $this->multiJobDownloadsResponse([]),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $client->files([
+            FileInput::uploadId('id0'),
+            FileInput::uploadId('id1'),
+        ])->compress()->run();
+
+        self::assertSame(['0', '1'], array_map(static fn ($f) => $f->key, $result->failed));
+
+        // file-0: both fields present.
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('failed', $result->failed[0]->error->state);
+        self::assertSame('too large', $result->failed[0]->error->errorMessage);
+        self::assertSame('output_too_large', $result->failed[0]->error->errorCode);
+
+        // file-1: message present, code absent (the other job's code never leaks).
+        self::assertSame('failed', $result->failed[1]->error->state);
+        self::assertSame('unsupported pixel format', $result->failed[1]->error->errorMessage);
+        self::assertNull($result->failed[1]->error->errorCode);
+
+        // toArray() reflects the per-job key sets: first entry has errorCode,
+        // second omits it.
+        $failedArray = $result->toArray()['failed'];
+        self::assertSame(
+            ['key' => '0', 'error' => 'failed: too large', 'state' => 'failed', 'errorMessage' => 'too large', 'errorCode' => 'output_too_large'],
+            $failedArray[0],
+        );
+        self::assertSame(
+            ['key' => '1', 'error' => 'failed: unsupported pixel format', 'state' => 'failed', 'errorMessage' => 'unsupported pixel format'],
+            $failedArray[1],
+        );
+        self::assertArrayNotHasKey('errorCode', $failedArray[1]);
     }
 
     #[Test]
@@ -641,8 +698,15 @@ final class FilesRecipeTest extends TestCase
         $jobsWire = [];
         foreach ($jobs as $i => $job) {
             $ops = [];
-            if (isset($job['error'])) {
-                $ops[] = ['error_message' => $job['error']];
+            if (isset($job['error']) || isset($job['error_code'])) {
+                $op = [];
+                if (isset($job['error'])) {
+                    $op['error_message'] = $job['error'];
+                }
+                if (isset($job['error_code'])) {
+                    $op['error_code'] = $job['error_code'];
+                }
+                $ops[] = $op;
             }
             $jobsWire[] = [
                 'job_id' => \sprintf('01936fb2-00%02d-7000-8000-0000000000%02d', $i + 2, $i + 2),

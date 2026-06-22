@@ -9,6 +9,7 @@ use Gisl\Sdk\Ergonomic\ProcessingProgressEvent;
 use Gisl\Sdk\Ergonomic\ProgressEvent;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislItemFailedError;
 use Gisl\Sdk\Errors\GislNetworkError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislTimeoutError;
@@ -497,10 +498,111 @@ final class RecipeRunTest extends TestCase
         self::assertSame([], $result->succeeded);
         self::assertCount(1, $result->failed);
         self::assertNull($result->failed[0]->key);
-        self::assertInstanceOf(\Throwable::class, $result->failed[0]->error);
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
         // The error message is "{state}: {firstOpErrorMessage}" — pin the
         // content, not just the type, so a misformatted partition is caught.
         self::assertSame('failed: codec exploded', $result->failed[0]->error->getMessage());
+        // The typed error exposes the structured failure for branchless handling.
+        self::assertSame('failed', $result->failed[0]->error->state);
+        self::assertSame('codec exploded', $result->failed[0]->error->errorMessage);
+        // No error_code was mocked → it stays null.
+        self::assertNull($result->failed[0]->error->errorCode);
+    }
+
+    #[Test]
+    public function failed_terminal_reads_error_code_and_message_from_same_op(): void
+    {
+        // The downloads-path failure reads errorMessage AND errorCode from the
+        // SAME first failing op (whole-workflow scoped). Both surface on the
+        // typed error.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            $this->statusResponse('failed', [
+                ['operations' => [['error_message' => 'too large', 'error_code' => 'output_too_large']]],
+            ]),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('failed', $result->failed[0]->error->state);
+        self::assertSame('too large', $result->failed[0]->error->errorMessage);
+        self::assertSame('output_too_large', $result->failed[0]->error->errorCode);
+        self::assertSame('failed: too large', $result->failed[0]->error->getMessage());
+        // toArray() failed[] carries the full key set in fixed order.
+        self::assertSame(
+            ['key' => null, 'error' => 'failed: too large', 'state' => 'failed', 'errorMessage' => 'too large', 'errorCode' => 'output_too_large'],
+            $result->toArray()['failed'][0],
+        );
+    }
+
+    #[Test]
+    public function failed_terminal_keeps_an_empty_string_error_message_with_the_colon(): void
+    {
+        // An EMPTY-string error_message is NOT null, so the message composition
+        // still appends the colon ("failed: ") and toArray() INCLUDES the
+        // errorMessage key (present, empty) — the "!== null" rule, not truthiness.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            $this->statusResponse('failed', [
+                ['operations' => [['error_message' => '']]],
+            ]),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('', $result->failed[0]->error->errorMessage);
+        self::assertNull($result->failed[0]->error->errorCode);
+        self::assertSame('failed: ', $result->failed[0]->error->getMessage());
+        // The empty string is PRESENT in toArray() (not omitted); errorCode absent.
+        $failedEntry = $result->toArray()['failed'][0];
+        self::assertSame(
+            ['key' => null, 'error' => 'failed: ', 'state' => 'failed', 'errorMessage' => ''],
+            $failedEntry,
+        );
+        self::assertArrayHasKey('errorMessage', $failedEntry);
+        self::assertArrayNotHasKey('errorCode', $failedEntry);
+    }
+
+    #[Test]
+    public function failed_terminal_reads_code_and_message_from_the_same_op_no_cross_op_pairing(): void
+    {
+        // Two ops: op A carries ONLY error_code, op B ONLY error_message. The
+        // break-2 selects the FIRST op with EITHER field (op A) and reads BOTH
+        // fields from THAT op — so errorCode comes from op A and errorMessage
+        // stays null; op B's message is NOT paired in.
+        $http = $this->stubClient([
+            $this->createResponse(),
+            $this->sseResponse("event: workflow.failed\ndata: {\"status\":\"failed\"}\n\n"),
+            $this->statusResponse('failed', [
+                ['operations' => [
+                    ['error_code' => 'a'],
+                    ['error_message' => 'b'],
+                ]],
+            ]),
+            $this->downloadsResponse(),
+        ]);
+
+        $client = $this->makeClient($http);
+        $result = $this->recipe($client, FileInput::uploadId('file_existing'))->compress()->run();
+
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('a', $result->failed[0]->error->errorCode);
+        // op B's message is NOT cross-paired — only op A's fields are read.
+        self::assertNull($result->failed[0]->error->errorMessage);
+        // No errorMessage → no colon; the message is the bare state.
+        self::assertSame('failed', $result->failed[0]->error->getMessage());
+        self::assertSame(
+            ['key' => null, 'error' => 'failed', 'state' => 'failed', 'errorCode' => 'a'],
+            $result->toArray()['failed'][0],
+        );
     }
 
     #[Test]

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk\Tests\FileFirst;
 
+use Gisl\Sdk\Errors\GislItemFailedError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislSinkError;
 use Gisl\Sdk\FileFirst\Downloader;
@@ -61,7 +62,7 @@ final class RunResultTest extends TestCase
     public function ok_is_true_only_when_failed_is_empty(): void
     {
         self::assertTrue((new RunResult('wf1', 'completed', [], [], []))->ok);
-        $failed = [new ItemFailure('bad', new \RuntimeException('boom'))];
+        $failed = [new ItemFailure('bad', new GislItemFailedError('bad', 'failed', 'boom'))];
         self::assertFalse((new RunResult('wf1', 'failed', [], [], $failed))->ok);
     }
 
@@ -121,7 +122,7 @@ final class RunResultTest extends TestCase
     public function download_to_fail_on_partial_throws_when_failures_present(): void
     {
         $dl = new RecordingDownloader();
-        $failed = [new ItemFailure('bad', new \RuntimeException('boom'))];
+        $failed = [new ItemFailure('bad', new GislItemFailedError('bad', 'partially_failed', 'boom'))];
         $r = new RunResult('wf1', 'partially_failed', [$this->out('a.jpg')], [], $failed, $dl);
         try {
             $r->downloadTo('/tmp/out', failOnPartial: true);
@@ -136,7 +137,7 @@ final class RunResultTest extends TestCase
     public function download_to_default_downloads_successes_despite_failures(): void
     {
         $dl = new RecordingDownloader();
-        $failed = [new ItemFailure('bad', new \RuntimeException('boom'))];
+        $failed = [new ItemFailure('bad', new GislItemFailedError('bad', 'partially_failed', 'boom'))];
         $r = new RunResult('wf1', 'partially_failed', [$this->out('a.jpg'), $this->out('b.jpg')], [], $failed, $dl);
         $manifest = $r->downloadTo('/tmp/out');   // failOnPartial defaults false
         self::assertCount(2, $manifest->paths);
@@ -247,7 +248,7 @@ final class RunResultTest extends TestCase
     public function to_array_shape_with_failure_matches_cross_language_golden(): void
     {
         $ok = new ItemResult('good', [$this->out('good.jpg')]);
-        $failed = [new ItemFailure('bad', new \RuntimeException('boom'))];
+        $failed = [new ItemFailure('bad', new GislItemFailedError('bad', 'failed', 'boom', 'codec_failed'))];
         $r = new RunResult('wf1', 'partially_failed', [$this->out('good.jpg')], [$ok], $failed);
         self::assertSame(
             [
@@ -263,12 +264,65 @@ final class RunResultTest extends TestCase
                         ['url' => 'https://cdn.example.com/good.jpg', 'filename' => 'good.jpg', 'sizeBytes' => 10, 'operation' => 'compress'],
                     ]],
                 ],
+                // failed[] is now {key, error, state, errorMessage?, errorCode?} — the
+                // error string is the GislItemFailedError message; the two optional
+                // keys appear in fixed order AFTER state.
                 'failed' => [
-                    ['key' => 'bad', 'error' => 'boom'],
+                    ['key' => 'bad', 'error' => 'failed: boom', 'state' => 'failed', 'errorMessage' => 'boom', 'errorCode' => 'codec_failed'],
                 ],
             ],
             $r->toArray(),
         );
+    }
+
+    #[Test]
+    public function failed_item_error_is_a_typed_gisl_item_failed_error_carrying_state_and_code(): void
+    {
+        // The narrowed `ItemFailure::$error` exposes the structured failure so a
+        // caller can branch WITHOUT string-parsing the message.
+        $err = new GislItemFailedError('bad', 'failed', 'codec exploded', 'codec_failed');
+        $r = new RunResult('wf1', 'failed', [], [], [new ItemFailure('bad', $err)]);
+
+        self::assertInstanceOf(GislItemFailedError::class, $r->failed[0]->error);
+        self::assertSame('bad', $r->failed[0]->error->key);
+        self::assertSame('failed', $r->failed[0]->error->state);
+        self::assertSame('codec exploded', $r->failed[0]->error->errorMessage);
+        self::assertSame('codec_failed', $r->failed[0]->error->errorCode);
+        // The message preserves the pre-typed "{state}: {errorMessage}" string.
+        self::assertSame('failed: codec exploded', $r->failed[0]->error->getMessage());
+    }
+
+    #[Test]
+    public function to_array_omits_error_message_and_code_for_a_bare_state_failure(): void
+    {
+        // A cancel/expire terminal carries only the bare $state — both optional
+        // keys are OMITTED entirely (never emitted as `=> null`).
+        $err = new GislItemFailedError(null, 'cancelled');
+        $r = new RunResult('wf1', 'cancelled', [], [], [new ItemFailure(null, $err)]);
+
+        $failedEntry = $r->toArray()['failed'][0];
+        self::assertSame(
+            ['key' => null, 'error' => 'cancelled', 'state' => 'cancelled'],
+            $failedEntry,
+        );
+        self::assertArrayNotHasKey('errorMessage', $failedEntry);
+        self::assertArrayNotHasKey('errorCode', $failedEntry);
+    }
+
+    #[Test]
+    public function to_array_omits_only_the_code_when_message_present_without_code(): void
+    {
+        // A failure with an errorMessage but no errorCode keeps `errorMessage`
+        // and omits `errorCode` only — proving each optional key is independent.
+        $err = new GislItemFailedError('bad', 'failed', 'no code here');
+        $r = new RunResult('wf1', 'failed', [], [], [new ItemFailure('bad', $err)]);
+
+        $failedEntry = $r->toArray()['failed'][0];
+        self::assertSame(
+            ['key' => 'bad', 'error' => 'failed: no code here', 'state' => 'failed', 'errorMessage' => 'no code here'],
+            $failedEntry,
+        );
+        self::assertArrayNotHasKey('errorCode', $failedEntry);
     }
 
     #[Test]

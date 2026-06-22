@@ -7,6 +7,7 @@ namespace Gisl\Sdk\Tests\Unit\Ergonomic;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\StatusSnapshot;
 use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\Errors\GislItemFailedError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislResultNotReadyError;
 use Gisl\Sdk\FileFirst\RunResult;
@@ -659,13 +660,69 @@ final class HandleTest extends TestCase
         self::assertSame([], $result->succeeded);
         self::assertCount(1, $result->failed);
         self::assertNull($result->failed[0]->key);
-        self::assertInstanceOf(\Throwable::class, $result->failed[0]->error);
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
         // The server-provided reason must survive + carry the state prefix — a
         // regression dropping or mis-formatting it would otherwise pass.
         self::assertSame($state . ': boom', $result->failed[0]->error->getMessage());
+        // The reattached Handle funnels through fromTerminalDownloads, so the
+        // typed error carries the terminal state + the op's message.
+        self::assertSame($state, $result->failed[0]->error->state);
+        self::assertSame('boom', $result->failed[0]->error->errorMessage);
         // Downloads still flatten into artifacts even though the run failed;
         // the partition is independent of artifact presence.
         self::assertNotEmpty($result->artifacts);
+    }
+
+    #[Test]
+    public function reattached_handle_failure_carries_error_code_from_the_op(): void
+    {
+        // The reattach surface produces the SAME typed error as a direct run():
+        // a failing op with BOTH error_code + error_message surfaces both, and
+        // toArray() emits the full key set in fixed order.
+        $http = $this->stubClient([
+            $this->statusResponse('failed', [
+                ['operations' => [['error_message' => 'too large', 'error_code' => 'output_too_large']]],
+            ]),
+            $this->downloadsResponse(),
+        ]);
+        $client = $this->makeClient($http);
+
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->result();
+
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('failed', $result->failed[0]->error->state);
+        self::assertSame('too large', $result->failed[0]->error->errorMessage);
+        self::assertSame('output_too_large', $result->failed[0]->error->errorCode);
+        self::assertSame(
+            ['key' => null, 'error' => 'failed: too large', 'state' => 'failed', 'errorMessage' => 'too large', 'errorCode' => 'output_too_large'],
+            $result->toArray()['failed'][0],
+        );
+    }
+
+    #[Test]
+    public function reattached_handle_cancelled_terminal_carries_only_bare_state_and_omits_optional_keys(): void
+    {
+        // cancelled is a terminal with NO failing op — the typed error carries
+        // only the bare state; errorMessage/errorCode are null and toArray()
+        // OMITS both keys (never `=> null`). `error` === the bare state string.
+        $http = $this->stubClient([
+            $this->statusResponse('cancelled', [['operations' => []]]),
+            $this->downloadsResponse(),
+        ]);
+        $client = $this->makeClient($http);
+
+        $result = (new Handle(self::WORKFLOW_ID, null, $client))->result();
+
+        self::assertInstanceOf(GislItemFailedError::class, $result->failed[0]->error);
+        self::assertSame('cancelled', $result->failed[0]->error->state);
+        self::assertNull($result->failed[0]->error->errorMessage);
+        self::assertNull($result->failed[0]->error->errorCode);
+        self::assertSame('cancelled', $result->failed[0]->error->getMessage());
+
+        $failedEntry = $result->toArray()['failed'][0];
+        self::assertSame(['key' => null, 'error' => 'cancelled', 'state' => 'cancelled'], $failedEntry);
+        self::assertArrayNotHasKey('errorMessage', $failedEntry);
+        self::assertArrayNotHasKey('errorCode', $failedEntry);
     }
 
     #[Test]

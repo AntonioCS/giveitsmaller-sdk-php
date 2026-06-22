@@ -7,6 +7,7 @@ namespace Gisl\Sdk\FileFirst;
 use Gisl\Generated\OpenApi\Model\JobDownload;
 use Gisl\Generated\OpenApi\Model\WorkflowStatusResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
+use Gisl\Sdk\Errors\GislItemFailedError;
 use Gisl\Sdk\Errors\GislNoSuchKeyError;
 use Gisl\Sdk\Errors\GislSinkError;
 
@@ -106,11 +107,15 @@ final class RunResult
             $succeeded = [new ItemResult($key, $artifacts)];
             $failed = [];
         } else {
-            $firstError = null;
+            // First failing op across ALL jobs (downloads path is whole-workflow
+            // scoped); read errorMessage AND errorCode from the SAME op.
+            $errorMessage = null;
+            $errorCode = null;
             foreach ($finalStatus->getJobs() ?? [] as $job) {
                 foreach ($job->getOperations() ?? [] as $op) {
-                    if ($op->getErrorMessage() !== null) {
-                        $firstError = $op->getErrorMessage();
+                    if ($op->getErrorMessage() !== null || $op->getErrorCode() !== null) {
+                        $errorMessage = $op->getErrorMessage();
+                        $errorCode = $op->getErrorCode();
                         break 2;
                     }
                 }
@@ -118,7 +123,7 @@ final class RunResult
             $succeeded = [];
             $failed = [new ItemFailure(
                 $key,
-                new \RuntimeException($firstError !== null ? $state . ': ' . $firstError : $state),
+                new GislItemFailedError($key, $state, $errorMessage, $errorCode),
             )];
         }
 
@@ -198,16 +203,19 @@ final class RunResult
             if ($status === 'completed') {
                 $succeeded[] = new ItemResult($key, $outputs);
             } else {
-                $firstError = null;
+                // Per-job scoped: read the error from THIS job's ops only.
+                $errorMessage = null;
+                $errorCode = null;
                 foreach ($job->getOperations() ?? [] as $op) {
-                    if ($op->getErrorMessage() !== null) {
-                        $firstError = $op->getErrorMessage();
+                    if ($op->getErrorMessage() !== null || $op->getErrorCode() !== null) {
+                        $errorMessage = $op->getErrorMessage();
+                        $errorCode = $op->getErrorCode();
                         break;
                     }
                 }
                 $failed[] = new ItemFailure(
                     $key,
-                    new \RuntimeException($firstError !== null ? $status . ': ' . $firstError : $status),
+                    new GislItemFailedError($key, $status, $errorMessage, $errorCode),
                 );
             }
         }
@@ -451,7 +459,7 @@ final class RunResult
      *     url?: string,
      *     artifacts: list<array{url: string, filename: string, sizeBytes: int, operation: string}>,
      *     succeeded: list<array{key: string|null, outputs: list<array{url: string, filename: string, sizeBytes: int, operation: string}>}>,
-     *     failed: list<array{key: string|null, error: string}>
+     *     failed: list<array{key: string|null, error: string, state: string, errorMessage?: string, errorCode?: string}>
      * }
      */
     public function toArray(): array
