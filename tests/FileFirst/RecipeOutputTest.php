@@ -1,0 +1,333 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Gisl\Sdk\Tests\FileFirst;
+
+use Gisl\Sdk\Errors\GislConfigError;
+use Gisl\Sdk\FileFirst\FileInput;
+use Gisl\Sdk\FileFirst\Recipe;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Image "Output" + Resize file-first helpers (card YNLrGhNo, contracts v2.97.0).
+ *
+ * `output(format?, options)` resolves the route from (input format, output_format)
+ * against the image-output-routes projection and lowers to that route's wire op —
+ * `compress` (same_format, `output_format: 'original'`) or `convert` (format_change,
+ * `output_format: <fmt>`) — emitting only route-honored options. `resize()` merges
+ * width/height/fit into the SAME Output step (one artifact, never a thumbnail).
+ * Planned / not-honored / planned-per-value options throw BEFORE upload.
+ *
+ * PHP arm of the TS `file-first-output.test.ts` — every case mirrors a TS case so
+ * the lowered wire shapes are asserted byte-identical across SDKs. Network-free:
+ * the recipe carries no client and only the pure `toWorkflowPayload()` lowering
+ * seam is exercised.
+ */
+final class RecipeOutputTest extends TestCase
+{
+    private const FILE_ID = 'file_0001';
+
+    private function recipe(string $path): Recipe
+    {
+        return new Recipe(FileInput::path($path));
+    }
+
+    /**
+     * Lower a single-input Recipe and return its one job's operations.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function operations(Recipe $recipe): array
+    {
+        $wire = $recipe->toWorkflowPayload(self::FILE_ID)->toWire();
+        self::assertIsArray($wire['jobs']);
+        self::assertCount(1, $wire['jobs'], 'a single-input chain lowers to exactly one job');
+        $job = $wire['jobs'][0];
+        self::assertIsArray($job);
+        self::assertIsArray($job['operations']);
+
+        /** @var list<array<string, mixed>> $operations */
+        $operations = $job['operations'];
+
+        return $operations;
+    }
+
+    /**
+     * The single lowered op (asserts exactly one). Mirrors the TS `soleOp`.
+     *
+     * @return array<string, mixed>
+     */
+    private function soleOp(Recipe $recipe): array
+    {
+        $ops = $this->operations($recipe);
+        self::assertCount(1, $ops);
+
+        return $ops[0];
+    }
+
+    // --- output(): route resolution + wire op -------------------------------
+
+    #[Test]
+    public function same_format_lowers_to_a_compress_op_with_output_format_original(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.jpg')->output('jpeg', ['quality' => 80]));
+        self::assertSame(['type' => 'compress', 'options' => ['output_format' => 'original', 'quality' => 80]], $op);
+    }
+
+    #[Test]
+    public function format_omitted_lowers_to_a_same_format_compress_op(): void
+    {
+        // null format → keep the input format → same-format optimiser route.
+        $op = $this->soleOp($this->recipe('photo.png')->output(null, ['quality' => 70]));
+        self::assertSame(['type' => 'compress', 'options' => ['output_format' => 'original', 'quality' => 70]], $op);
+    }
+
+    #[Test]
+    public function format_change_lowers_to_a_convert_op_with_the_target_output_format(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.png')->output('webp', ['quality' => 80]));
+        self::assertSame(['type' => 'convert', 'options' => ['output_format' => 'webp', 'quality' => 80]], $op);
+    }
+
+    #[Test]
+    public function output_never_emits_a_thumbnail_op(): void
+    {
+        $ops = $this->operations($this->recipe('photo.png')->output('webp')->resize(800, 600));
+        self::assertNotContains('thumbnail', \array_column($ops, 'type'));
+    }
+
+    // --- output() + resize(): one artifact ----------------------------------
+
+    #[Test]
+    public function format_change_plus_resize_is_one_convert_op_carrying_resize_keys(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.png')->output('webp')->resize(1200, 800, 'max'));
+        self::assertSame(
+            ['type' => 'convert', 'options' => ['output_format' => 'webp', 'width' => 1200, 'height' => 800, 'fit' => 'max']],
+            $op,
+        );
+    }
+
+    #[Test]
+    public function same_format_width_only_resize_omits_height_and_fit(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.jpg')->output('jpeg')->resize(800));
+        self::assertSame(['type' => 'compress', 'options' => ['output_format' => 'original', 'width' => 800]], $op);
+    }
+
+    #[Test]
+    public function resize_with_no_preceding_output_appends_a_same_format_output_step(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.png')->resize(800, 600));
+        self::assertSame(
+            ['type' => 'compress', 'options' => ['output_format' => 'original', 'width' => 800, 'height' => 600]],
+            $op,
+        );
+    }
+
+    #[Test]
+    public function resize_merges_into_the_preceding_output_step_no_extra_op(): void
+    {
+        $ops = $this->operations($this->recipe('photo.png')->output('webp')->resize(800));
+        self::assertCount(1, $ops);
+    }
+
+    // --- output(): route-aware option gating --------------------------------
+
+    #[Test]
+    public function progressive_is_honored_on_same_format_jpeg(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.jpg')->output('jpeg', ['progressive' => true]));
+        self::assertSame(true, $op['options']['progressive'] ?? null);
+    }
+
+    #[Test]
+    public function progressive_on_a_format_change_throws_option_not_on_route(): void
+    {
+        // png → jpeg is a format-change (convert); progressive is a same-format
+        // optimiser knob, not honored on the transcoder route.
+        try {
+            $this->operations($this->recipe('photo.png')->output('jpeg', ['progressive' => true]));
+            self::fail('progressive on a format-change must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function background_is_honored_on_format_change_to_jpeg(): void
+    {
+        $op = $this->soleOp($this->recipe('photo.png')->output('jpeg', ['background' => '#ffffff']));
+        self::assertSame(['type' => 'convert', 'options' => ['output_format' => 'jpeg', 'background' => '#ffffff']], $op);
+    }
+
+    #[Test]
+    public function background_on_a_same_format_route_throws_option_not_on_route(): void
+    {
+        // jpeg → jpeg is same-format; background is a transcoder-only fill option.
+        try {
+            $this->operations($this->recipe('photo.jpg')->output('jpeg', ['background' => '#fff']));
+            self::fail('background on a same-format route must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+            self::assertStringContainsString('not honored', $err->getMessage());
+        }
+    }
+
+    #[Test]
+    public function optimization_level_is_honored_on_same_format_png(): void
+    {
+        $op = $this->soleOp($this->recipe('a.png')->output('png', ['optimization_level' => 6]));
+        self::assertSame(6, $op['options']['optimization_level'] ?? null);
+    }
+
+    #[Test]
+    public function optimization_level_on_jpeg_throws_option_not_on_route(): void
+    {
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['optimization_level' => 6]));
+            self::fail('optimization_level on jpeg must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+        }
+    }
+
+    // --- output(): planned options gated unavailable ------------------------
+
+    #[Test]
+    public function planned_lossless_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('photo.jpg')->output('jpeg', ['lossless' => true]));
+            self::fail('a planned lossless option must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function planned_lossy_on_png_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('photo.png')->output('png', ['lossy' => true]));
+            self::fail('a planned lossy option must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function metadata_all_is_honored_but_keep_throws_per_value_planned(): void
+    {
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'all']));
+        self::assertSame('all', $op['options']['metadata'] ?? null);
+
+        // `metadata: 'keep'` is planned at the VALUE level even though the
+        // `metadata` key is honored.
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'keep']));
+            self::fail("metadata: 'keep' (planned per-value) must throw");
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    // --- output(): unrepresentable routes + svg (vector, no resize) ---------
+
+    #[Test]
+    public function converting_to_a_format_with_no_route_throws_unsupported_route(): void
+    {
+        // svg is not a format_change target (cannot transcode TO svg).
+        try {
+            $this->operations($this->recipe('photo.png')->output('svg'));
+            self::fail('converting to svg must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unsupported_route', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function svg_input_has_no_resize_on_its_route_so_resize_throws_not_honored(): void
+    {
+        try {
+            $this->operations($this->recipe('logo.svg')->output('svg')->resize(200, 200));
+            self::fail('resize on an svg route must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+            self::assertStringContainsString('not honored', $err->getMessage());
+        }
+    }
+
+    // --- output(): undetectable input (bare upload id) ----------------------
+
+    #[Test]
+    public function facade_managed_webp_on_an_upload_id_emits_the_compress_facade(): void
+    {
+        $op = $this->soleOp((new Recipe(FileInput::uploadId('upl_x')))->output('webp'));
+        self::assertSame(['type' => 'compress', 'options' => ['output_format' => 'webp']], $op);
+    }
+
+    #[Test]
+    public function non_facade_target_on_an_upload_id_throws_media_unknown(): void
+    {
+        try {
+            $this->operations((new Recipe(FileInput::uploadId('upl_x')))->output('jpeg'));
+            self::fail('a non-facade target on an upload id must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('media_unknown', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function resize_on_an_upload_id_throws_media_unknown(): void
+    {
+        // resize needs a resolvable route; an undetectable input cannot route.
+        try {
+            $this->operations((new Recipe(FileInput::uploadId('upl_x')))->output('webp')->resize(800));
+            self::fail('resize on an undetectable input must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('media_unknown', $err->reason);
+        }
+    }
+
+    // --- output(): eager key validation (pre-upload, no client) --------------
+
+    #[Test]
+    public function an_unknown_option_key_throws_unknown_field_at_the_verb_call(): void
+    {
+        try {
+            $this->recipe('a.jpg')->output('jpeg', ['bogus' => 1]);
+            self::fail('an unknown output option must throw at the verb call');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['bogus'], $err->conflictingFields);
+        }
+    }
+
+    #[Test]
+    public function a_bag_supplied_output_format_is_rejected_owned_by_the_positional_arg(): void
+    {
+        try {
+            $this->recipe('a.jpg')->output('jpeg', ['output_format' => 'webp']);
+            self::fail('a bag-supplied output_format must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['output_format'], $err->conflictingFields);
+            self::assertStringContainsString('first argument', $err->getMessage());
+        }
+    }
+
+    #[Test]
+    public function a_bag_supplied_format_alias_is_rejected_owned_by_the_positional_arg(): void
+    {
+        try {
+            $this->recipe('a.jpg')->output('jpeg', ['format' => 'webp']);
+            self::fail('a bag-supplied format alias must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['format'], $err->conflictingFields);
+        }
+    }
+}

@@ -7,6 +7,7 @@ namespace Gisl\Sdk\FileFirst;
 use Gisl\Generated\OpenApi\Model\WorkflowCreateResponse;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
+use Gisl\Sdk\Ergonomic\ImageOutputRoutes;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
 use Gisl\Sdk\Ergonomic\OptionValidation;
@@ -123,6 +124,91 @@ final class Recipe
             }
         }
         return $this->withStep(new RecipeStep('thumbnail', $wire));
+    }
+
+    /**
+     * Produce ONE transformed image: keep or change format, plus quality, resize
+     * and route-honored controls. The single user-facing image transform — the SDK
+     * resolves the route from `(input format, output_format)` against the contract's
+     * image-output-routes projection and lowers to that route's wire op:
+     * same-format → `compress` (optimiser, `output_format: 'original'`),
+     * format-change → `convert` (transcoder, `output_format: <fmt>`). Only options
+     * the resolved route honors are sent; a planned or not-honored option throws
+     * BEFORE upload. Resize (`width`/`height`/`fit`, via `$options` or
+     * {@see resize()}) stays on the SAME op — one output, never a separate
+     * thumbnail. Mirrors the TS `Recipe::output`.
+     *
+     * `$format` null → keep the input format (same-format optimiser route).
+     *
+     * `$options` is an OutputOptions array shape (keys honored vary by route; the
+     * lowering narrows per route and throws on a not-honored/planned option):
+     *
+     * @param array{
+     *   quality?: int,
+     *   width?: int,
+     *   height?: int,
+     *   fit?: 'max'|'crop'|'scale',
+     *   background?: string,
+     *   progressive?: bool,
+     *   optimization_level?: int,
+     *   avif_speed?: int,
+     *   metadata?: 'all'|'keep',
+     *   lossless?: bool,
+     *   lossy?: bool,
+     * } $options
+     */
+    public function output(?string $format = null, array $options = []): self
+    {
+        // Eager pre-upload key validation (coarse: rejects keys no image route
+        // honors, + a bag-supplied output_format/format which the positional
+        // `$format` owns).
+        OptionValidation::validateVerbOptions('output', $options);
+        $wire = [];
+        foreach ($options as $key => $value) {
+            if ($value !== null) {
+                $wire[$key] = $value;
+            }
+        }
+        // Store the REQUESTED format token under `output_format`; lowerOutputStep
+        // resolves the route and rewrites it to the wire value ('original' for
+        // same-format). Omitted format → no output_format key → same-format route.
+        if ($format !== null) {
+            $wire['output_format'] = $format;
+        }
+        return $this->withStep(new RecipeStep('output', $wire));
+    }
+
+    /**
+     * Resize as part of the Output transform. Merges `width`/`height`/`fit` into
+     * the PRECEDING `output()` step (one artifact); if no Output step precedes,
+     * appends a same-format Output step carrying the resize. Never emits a
+     * `thumbnail` op. `$height` is optional — width-only resize preserves aspect
+     * ratio. Resize is raster-only (e.g. an SVG input has no resize on its route →
+     * throws at lower). Mirrors the TS `Recipe::resize`.
+     */
+    public function resize(int $width, ?int $height = null, ?string $fit = null): self
+    {
+        $resizeOptions = ['width' => $width];
+        if ($height !== null) {
+            $resizeOptions['height'] = $height;
+        }
+        if ($fit !== null) {
+            $resizeOptions['fit'] = $fit;
+        }
+        $steps = $this->steps;
+        $last = $steps !== [] ? $steps[\count($steps) - 1] : null;
+        if ($last !== null && $last->opType === 'output') {
+            $steps[\count($steps) - 1] = new RecipeStep('output', [...$last->options, ...$resizeOptions]);
+            return new self(
+                $this->input,
+                $this->key,
+                $steps,
+                $this->presetDefaults,
+                $this->scopedPresetDefaults,
+                $this->client,
+            );
+        }
+        return $this->withStep(new RecipeStep('output', $resizeOptions));
     }
 
     /**
@@ -523,6 +609,12 @@ final class Recipe
 
     private function lowerStep(RecipeStep $step, int $stepIndex): OperationDef
     {
+        // The internal `output` step lowers to a `compress`/`convert` wire op per
+        // the route projection (it owns its own type + options resolution + gating).
+        if ($step->opType === 'output') {
+            return $this->lowerOutputStep($step, $stepIndex);
+        }
+
         $options = $step->opType === 'compress'
             ? $this->lowerCompressOptions($step->options, $stepIndex)
             : $step->options;
@@ -531,6 +623,157 @@ final class Recipe
         // absent) and TS (undefined → absent) serialise byte-identically — an
         // empty PHP array would otherwise emit `[]` where TS emits `{}`.
         return new OperationDef($step->opType, $options === [] ? null : $options);
+    }
+
+    /**
+     * Lower an `output` step to its route's wire op. Resolves the route from the
+     * (chain-folded) input format token + the requested `output_format`, then
+     * emits `compress` (same_format) or `convert` (format_change) carrying only the
+     * route-honored options. A planned option (e.g. `lossless`), an option not
+     * honored on the resolved route (e.g. `progressive` on a format-change), a
+     * planned per-value (e.g. `metadata: 'keep'`), or an unrepresentable route all
+     * throw a typed {@see GislConfigError} BEFORE upload. Resize (`width`/`height`/
+     * `fit`) is input-keyed (raster only) and rides whichever op the route selects.
+     * Mirrors the TS `Recipe::lowerOutputStep`.
+     */
+    private function lowerOutputStep(RecipeStep $step, int $stepIndex): OperationDef
+    {
+        $requested = \is_string($step->options['output_format'] ?? null)
+            ? $step->options['output_format']
+            : null;
+        $inputToken = $this->outputInputToken($stepIndex);
+
+        if ($inputToken === null) {
+            // Undetectable input (bare upload id / hint-less resource) → the route
+            // can't be resolved. Only the legacy compress facade for a
+            // facade-managed output (webp) + quality is expressible without knowing
+            // the input; anything else (resize, a same-format optimise, a
+            // non-facade target) needs a detectable input. Mirrors
+            // lowerCompressOptions' media_unknown fail-fast.
+            if ($requested !== null && \in_array($requested, ImageOutputRoutes::FACADE_MANAGED_OUTPUTS, true)) {
+                $facade = ['output_format' => $requested];
+                foreach ($step->options as $key => $value) {
+                    if ($key === 'output_format' || $value === null) {
+                        continue;
+                    }
+                    if ($key !== 'quality') {
+                        throw new GislConfigError(
+                            "output(): '{$key}' needs a detectable input format to route; reference the file by "
+                            . 'a path with an extension (or a resource with a filename/contentType hint) rather than a bare upload id.',
+                            reason: 'media_unknown',
+                            conflictingFields: [$key],
+                        );
+                    }
+                    $facade[$key] = $value;
+                }
+                return new OperationDef('compress', $facade);
+            }
+            throw new GislConfigError(
+                'output() needs a detectable input format to resolve the route (same-format optimise vs '
+                . 'format-change transcode); reference the file by a path with an extension, or a resource with '
+                . 'a filename/contentType hint, rather than a bare upload id.',
+                reason: 'media_unknown',
+                conflictingFields: ['output_format'],
+            );
+        }
+
+        $resolved = ImageOutputRoutes::resolveOutputRoute($inputToken, $requested);
+        if ($resolved === null) {
+            $what = $requested === null ? 'this output' : "'{$requested}'";
+            throw new GislConfigError(
+                "output(): cannot produce {$what} from a '{$inputToken}' input — no such image Output route.",
+                reason: 'unsupported_route',
+                conflictingFields: ['output_format'],
+            );
+        }
+
+        $wireOptions = ['output_format' => $resolved['outputFormatWire']];
+        foreach ($step->options as $key => $value) {
+            if ($key === 'output_format' || $value === null) {
+                continue;
+            }
+            if (isset($resolved['planned'][$key])) {
+                throw new GislConfigError(
+                    "output(): '{$key}' is advertised but not available yet on the {$resolved['route']} route "
+                    . "for '{$resolved['inputToken']}' images (planned). It will work once stable-flipped.",
+                    reason: 'feature_not_available',
+                    conflictingFields: [$key],
+                );
+            }
+            if (!isset($resolved['honored'][$key])) {
+                $target = $requested ?? $resolved['inputToken'];
+                throw new GislConfigError(
+                    "output(): '{$key}' is not honored on the {$resolved['route']} route "
+                    . "({$resolved['inputToken']} → {$target}). "
+                    . 'Check it applies to this format/route combination.',
+                    reason: 'option_not_on_route',
+                    conflictingFields: [$key],
+                );
+            }
+            if (ImageOutputRoutes::isPlannedValue($resolved['inputToken'], $key, $value)) {
+                $shown = ImageOutputRoutes::stringifyForMessage($value);
+                throw new GislConfigError(
+                    "output(): '{$key}: {$shown}' is advertised but not available yet (planned).",
+                    reason: 'feature_not_available',
+                    conflictingFields: [$key],
+                );
+            }
+            $wireOptions[$key] = $value;
+        }
+        return new OperationDef($resolved['sourceOp'], $wireOptions);
+    }
+
+    /**
+     * The input format token an `output` step at `$uptoIndex` operates on — the
+     * original input's token, FOLDED through preceding `convert`/`output` steps
+     * that change the format (mirrors {@see effectiveCompressMedia()}). Null when
+     * the input media is not inferable (a bare upload id / hint-less resource).
+     * Mirrors the TS `Recipe::outputInputToken`.
+     */
+    private function outputInputToken(?int $uptoIndex = null): ?string
+    {
+        $token = $this->inputFormatToken();
+        if ($uptoIndex === null) {
+            return $token;
+        }
+        for ($i = 0; $i < $uptoIndex; $i++) {
+            $prior = $this->steps[$i];
+            if ($prior->opType === 'convert' || $prior->opType === 'output') {
+                $fmt = $prior->options['output_format'] ?? null;
+                // A same-format `output` step carries no output_format (or
+                // 'original') → token unchanged; a format target (e.g. 'webp')
+                // advances it.
+                if (\is_string($fmt)) {
+                    $token = ImageOutputRoutes::tokenForPath("f.{$fmt}") ?? $token;
+                }
+            }
+        }
+        return $token;
+    }
+
+    /**
+     * The original input's image format token (path ext / resource
+     * contentType / filename). Mirrors the TS `Recipe::inputFormatToken` (PHP's
+     * resource hints stand in for the TS Blob `.type`/`.name`). A bare upload id
+     * is undetectable → null.
+     */
+    private function inputFormatToken(): ?string
+    {
+        if ($this->input->kind === FileInput::KIND_PATH && $this->input->path !== null) {
+            return ImageOutputRoutes::tokenForPath($this->input->path);
+        }
+        if ($this->input->kind === FileInput::KIND_RESOURCE) {
+            if ($this->input->contentType !== null) {
+                $fromType = ImageOutputRoutes::tokenForMime($this->input->contentType);
+                if ($fromType !== null) {
+                    return $fromType;
+                }
+            }
+            if ($this->input->filename !== null) {
+                return ImageOutputRoutes::tokenForPath($this->input->filename);
+            }
+        }
+        return null; // uploadId / hint-less resource — undetectable
     }
 
     /**

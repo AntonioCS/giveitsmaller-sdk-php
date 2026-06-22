@@ -23,10 +23,10 @@ use Gisl\Sdk\Errors\GislConfigError;
  * set is read from the generated `OperationMetadata` (the same contract-anchored
  * source the wire-key conformance guard uses), so it cannot silently drift.
  *
- * SCOPE: `convert` / `thumbnail` / `textWatermark` / `watermark` only. `compress`
- * is deliberately EXCLUDED — its bag legitimately carries SDK-only keys
- * (`optimize`, `presetOverrides`) and resolver aliases; it has its own
- * `unknown_field` validation through the preset resolver.
+ * SCOPE: `convert` / `thumbnail` / `textWatermark` / `watermark` / `output`
+ * only. `compress` is deliberately EXCLUDED — its bag legitimately carries
+ * SDK-only keys (`optimize`, `presetOverrides`) and resolver aliases; it has its
+ * own `unknown_field` validation through the preset resolver.
  */
 final class OptionValidation
 {
@@ -48,6 +48,26 @@ final class OptionValidation
     private const POSITIONAL_OWNED = [
         'convert' => ['output_format', 'format'],
         'textWatermark' => ['text'],
+        // `output(format, …)` sets the target format via its first argument; the
+        // wire key `output_format` and the SDK alias `format` must not be supplied
+        // in the bag.
+        'output' => ['output_format', 'format'],
+    ];
+
+    /**
+     * The user-supplyable option keys for the image `output` facade — the UNION
+     * of every image route's honored+planned options (the image-output-routes
+     * projection). This is the COARSE static gate (reject keys no image route
+     * ever honors, e.g. a video `crf`); the precise per-route honored/planned
+     * narrowing happens in the `output()` lowering ({@see ImageOutputRoutes::resolveOutputRoute()}).
+     * Mirrors the TS `OUTPUT_OPTION_KEYS`; pinned to the projection union by the
+     * output-route conformance test.
+     *
+     * @var list<string>
+     */
+    private const OUTPUT_OPTION_KEYS = [
+        'quality', 'width', 'height', 'fit', 'background', 'progressive',
+        'optimization_level', 'avif_speed', 'metadata', 'lossless', 'lossy',
     ];
 
     /**
@@ -82,12 +102,25 @@ final class OptionValidation
     public static function allowedKeysFor(string $verb): array
     {
         if (self::$allowedCache === null) {
+            $output = [];
+            foreach (self::OUTPUT_OPTION_KEYS as $k) {
+                $output[$k] = true;
+            }
+            // Like `convert`, the allowlist INCLUDES the positional-owned
+            // `output_format` (in every route's honored set) — rejected first by
+            // the POSITIONAL_OWNED guard, not the allowed-key check. Keeps the PHP
+            // allowlist == the full projection union, matching TS.
+            $output['output_format'] = true;
             self::$allowedCache = [
                 'convert' => self::operationOptionKeys(ConvertMetadata::instance()),
                 'thumbnail' => self::operationOptionKeys(ThumbnailMetadata::instance()),
                 'textWatermark' => self::operationOptionKeys(TextWatermarkMetadata::instance()),
                 'watermark' => self::operationOptionKeys(ImageWatermarkMetadata::instance())
                     + self::operationOptionKeys(VideoWatermarkMetadata::instance()),
+                // `output` is the image Output facade — its bag-allowed keys are
+                // the UNION of every image route's honored+planned options (the
+                // image-output-routes projection), NOT a single op's contract keys.
+                'output' => $output,
             ];
         }
 

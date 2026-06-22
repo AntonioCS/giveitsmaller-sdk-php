@@ -103,10 +103,10 @@ final class FixtureLoader
         Fixture::MODE_FILES,
     ];
 
-    private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark'];
+    private const LOWERING_OPS = ['compress', 'convert', 'thumbnail', 'text_watermark', 'output', 'resize'];
     private const LOWERING_KEYS = ['file', 'resolvedFileId', 'operations', 'watermark'];
     private const LOWERING_FILE_KEYS = ['kind', 'path', 'uploadId', 'key'];
-    private const LOWERING_OP_KEYS = ['op', 'optimize', 'format', 'width', 'height', 'text'];
+    private const LOWERING_OP_KEYS = ['op', 'optimize', 'format', 'width', 'height', 'text', 'options', 'fit'];
     // FF4a (Z7zTr789) — watermark sub-block keys + post-op grammar (no text_watermark).
     private const WATERMARK_KEYS = ['overlay', 'options', 'post'];
     private const WATERMARK_OVERLAY_KEYS = ['file', 'resolvedFileId', 'operations'];

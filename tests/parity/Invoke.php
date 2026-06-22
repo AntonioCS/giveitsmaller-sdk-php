@@ -615,6 +615,15 @@ final class Invoke
             'convert' => $recipe->convert((string) $op['format']),
             'thumbnail' => $recipe->thumbnail(self::thumbnailOptions($op)),
             'text_watermark' => $recipe->textWatermark((string) $op['text']),
+            'output' => $recipe->output(
+                isset($op['format']) && \is_string($op['format']) ? $op['format'] : null,
+                isset($op['options']) && \is_array($op['options']) ? $op['options'] : [],
+            ),
+            'resize' => $recipe->resize(
+                (int) $op['width'],
+                isset($op['height']) && \is_int($op['height']) ? $op['height'] : null,
+                isset($op['fit']) && \is_string($op['fit']) ? $op['fit'] : null,
+            ),
             default => throw new \RuntimeException("Unknown lowering op '" . \var_export($op['op'] ?? null, true) . "'"),
         };
     }

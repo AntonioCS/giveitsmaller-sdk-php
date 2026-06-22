@@ -235,7 +235,16 @@ final class WireKeyConformanceTest extends TestCase
      * @var array<string, list<string>>
      */
     private const INTENTIONALLY_OMITTED = [
-        'image' => ['progressive', 'optimization_level', 'avif_speed'],
+        // image Output-facade knobs (contracts v2.97.0 tewB37Jg): compress.image*
+        // now also carries width/height/fit (Resize-inside-Output) + lossless/lossy.
+        // These are the image OUTPUT facade surface — exposed/gated by the ergonomic
+        // output()/resize() verbs (RecipeOutputTest), NOT the preset compress() verb.
+        // Their availability + route gating is pinned by ImageOutputRouteConformanceTest
+        // (the projection honored/planned), so they are omitted from compress() here.
+        'image' => [
+            'progressive', 'optimization_level', 'avif_speed',
+            'width', 'height', 'fit', 'lossless', 'lossy',
+        ],
         'audio' => ['output_format'],
         'video' => ['output_format'],
         'document_pdf' => ['quality', 'image_dpi'],

@@ -1,0 +1,224 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Gisl\Sdk\Tests\Unit\Conformance;
+
+use Gisl\Generated\Operations\CompressMetadata;
+use Gisl\Sdk\Ergonomic\ImageOutputRoutes;
+use Gisl\Sdk\Ergonomic\OptionValidation;
+use Gisl\Sdk\Errors\GislConfigError;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * Output-route conformance guard (card YNLrGhNo).
+ *
+ * The Output gate reads a hand SDK table ({@see ImageOutputRoutes::IMAGE_OUTPUT_ROUTES})
+ * rather than the raw projection at runtime, so the gate stays offline +
+ * deterministic (mirrors the watermark-capability gate). This suite PINS that
+ * table to the generated `accepted-options/image-output-routes.json` projection —
+ * a contract regen that changes a route's source_op / honored / planned options,
+ * the facade-managed outputs, the area cap, or the mime tokens fails HERE. PHP arm
+ * of the TS `output-route-conformance.test.ts`.
+ *
+ * The PHP test/check container ships only `generated/php/`, located here via the
+ * contracts package install (vendor/giveitsmaller/contracts → generated/php). The
+ * projection lives at `<generated-php-root>/accepted-options/image-output-routes.json`,
+ * resolved by reflecting a generated metadata class (operations/src/*.php → dirname x3).
+ */
+#[CoversClass(ImageOutputRoutes::class)]
+final class ImageOutputRouteConformanceTest extends TestCase
+{
+    /** @var array<string, mixed> The `media.image` block of the projection. */
+    private static array $image = [];
+
+    public static function setUpBeforeClass(): void
+    {
+        // operations/src/CompressMetadata.php -> dirname x3 = generated/php root.
+        $opFile = (new \ReflectionClass(CompressMetadata::class))->getFileName();
+        $root = \dirname((string) $opFile, 3);
+        $path = $root . '/accepted-options/image-output-routes.json';
+        $json = \json_decode((string) \file_get_contents($path), true);
+        self::assertIsArray($json, 'image-output-routes.json must decode to an array');
+        self::assertIsArray($json['media'] ?? null);
+        self::assertIsArray($json['media']['image'] ?? null);
+        self::$image = $json['media']['image'];
+    }
+
+    // --- top-level facade constants -----------------------------------------
+
+    public function test_facade_managed_outputs_mirror_the_projection(): void
+    {
+        $expected = self::$image['facade_managed_outputs'];
+        self::assertIsArray($expected);
+        \sort($expected);
+        $actual = ImageOutputRoutes::FACADE_MANAGED_OUTPUTS;
+        \sort($actual);
+        self::assertSame($expected, $actual);
+    }
+
+    public function test_area_cap_mirrors_the_projection(): void
+    {
+        self::assertSame(self::$image['max_output_pixels'], ImageOutputRoutes::MAX_OUTPUT_PIXELS);
+    }
+
+    public function test_every_projection_mime_token_resolves_via_token_for_mime(): void
+    {
+        $tokens = self::$image['mime_tokens'];
+        self::assertIsArray($tokens);
+        foreach ($tokens as $mime => $token) {
+            self::assertSame($token, ImageOutputRoutes::tokenForMime((string) $mime), "mime token drifted for {$mime}");
+        }
+    }
+
+    // --- per-route, per-format cells ----------------------------------------
+
+    /**
+     * @param 'same_format'|'format_change' $route
+     */
+    #[DataProvider('routeProvider')]
+    public function test_route_covers_exactly_the_projection_formats(string $route, string $expectedSourceOp): void
+    {
+        $cells = self::$image[$route];
+        self::assertIsArray($cells);
+        $expected = \array_keys($cells);
+        \sort($expected);
+        $actual = \array_keys(ImageOutputRoutes::IMAGE_OUTPUT_ROUTES[$route]);
+        \sort($actual);
+        self::assertSame($expected, $actual, "{$route} format coverage drifted from the projection");
+    }
+
+    /**
+     * source_op is the uniform derivation (same_format→compress,
+     * format_change→convert); the SDK derives it rather than storing it, so pin
+     * that the projection still agrees on every cell.
+     *
+     * @param 'same_format'|'format_change' $route
+     */
+    #[DataProvider('routeProvider')]
+    public function test_route_source_op_is_uniform(string $route, string $expectedSourceOp): void
+    {
+        $cells = self::$image[$route];
+        self::assertIsArray($cells);
+        foreach ($cells as $fmt => $cell) {
+            self::assertIsArray($cell);
+            self::assertSame($expectedSourceOp, $cell['source_op'] ?? null, "{$route}.{$fmt} source_op drifted");
+        }
+    }
+
+    /**
+     * @param 'same_format'|'format_change' $route
+     */
+    #[DataProvider('routeProvider')]
+    public function test_route_honored_options_match(string $route, string $expectedSourceOp): void
+    {
+        $cells = self::$image[$route];
+        self::assertIsArray($cells);
+        foreach ($cells as $fmt => $cell) {
+            self::assertIsArray($cell);
+            $expected = $cell['honored_options'];
+            self::assertIsArray($expected);
+            \sort($expected);
+            $actual = ImageOutputRoutes::IMAGE_OUTPUT_ROUTES[$route][$fmt]['honored'];
+            \sort($actual);
+            self::assertSame($expected, $actual, "{$route}.{$fmt} honored options drifted");
+        }
+    }
+
+    /**
+     * @param 'same_format'|'format_change' $route
+     */
+    #[DataProvider('routeProvider')]
+    public function test_route_planned_options_match(string $route, string $expectedSourceOp): void
+    {
+        $cells = self::$image[$route];
+        self::assertIsArray($cells);
+        foreach ($cells as $fmt => $cell) {
+            self::assertIsArray($cell);
+            $expected = $cell['planned_options'];
+            self::assertIsArray($expected);
+            \sort($expected);
+            $actual = ImageOutputRoutes::IMAGE_OUTPUT_ROUTES[$route][$fmt]['planned'];
+            \sort($actual);
+            self::assertSame($expected, $actual, "{$route}.{$fmt} planned options drifted");
+        }
+    }
+
+    /**
+     * @return iterable<string, array{0: 'same_format'|'format_change', 1: string}>
+     */
+    public static function routeProvider(): iterable
+    {
+        yield 'same_format' => ['same_format', 'compress'];
+        yield 'format_change' => ['format_change', 'convert'];
+    }
+
+    // --- output verb allowlist conformance ----------------------------------
+
+    /**
+     * The UNION of every image route's honored+planned option keys (the full
+     * contract surface output() can emit, incl. `output_format`). Mirrors the TS
+     * `projectionUnionAll()`.
+     *
+     * @return list<string>
+     */
+    private static function projectionUnionAll(): array
+    {
+        $keys = [];
+        foreach (['same_format', 'format_change'] as $route) {
+            $cells = self::$image[$route];
+            self::assertIsArray($cells);
+            foreach ($cells as $cell) {
+                self::assertIsArray($cell);
+                foreach ([...$cell['honored_options'], ...$cell['planned_options']] as $k) {
+                    $keys[(string) $k] = true;
+                }
+            }
+        }
+        $union = \array_keys($keys);
+        \sort($union);
+
+        return $union;
+    }
+
+    public function test_runtime_validator_allowed_keys_equal_the_full_projection_union(): void
+    {
+        // Like convert, the runtime allowlist INCLUDES the positional-owned
+        // output_format (in every route's honored set; rejected first by the
+        // POSITIONAL_OWNED guard, not the allowed-key check). Pins the PHP
+        // allowlist == the full projection union, matching TS
+        // `new Set([...VERB_OPTION_KEYS.output, 'output_format'])`.
+        $actual = \array_keys(OptionValidation::allowedKeysFor('output'));
+        \sort($actual);
+        self::assertSame(self::projectionUnionAll(), $actual);
+    }
+
+    public function test_every_user_supplyable_bag_key_is_the_projection_union_minus_output_format(): void
+    {
+        // The user-supplyable bag keys (the TS OUTPUT_OPTION_KEYS / VERB_OPTION_KEYS.output)
+        // are the projection union MINUS the positional-owned output_format. PHP exposes
+        // no public bag-key list, so pin it behaviourally: every union key except
+        // output_format must be ACCEPTED by validateVerbOptions('output', …), and
+        // output_format must be REJECTED (positional-owned). This proves the SDK's
+        // private OUTPUT_OPTION_KEYS list equals the projection union minus output_format
+        // independent of how the runtime allowlist is composed.
+        foreach (self::projectionUnionAll() as $key) {
+            if ($key === 'output_format') {
+                try {
+                    OptionValidation::validateVerbOptions('output', [$key => 'webp']);
+                    self::fail('output_format must be rejected as positional-owned');
+                } catch (GislConfigError $err) {
+                    self::assertSame('unknown_field', $err->reason, 'output_format rejection reason');
+                    self::assertSame([$key], $err->conflictingFields);
+                }
+                continue;
+            }
+            // A representative value per key type; the validator only checks the KEY.
+            $value = \in_array($key, ImageOutputRoutes::RESIZE_KEYS, true) ? 100 : 'x';
+            OptionValidation::validateVerbOptions('output', [$key => $value]);
+            self::addToAssertionCount(1);
+        }
+    }
+}
