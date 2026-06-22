@@ -169,8 +169,7 @@ final class PresetDefaults
             $parent instanceof DocumentPdfCompressPresetOptions && $child instanceof DocumentPdfCompressPresetOptions
                 => new DocumentPdfCompressPresetOptions(
                     profile: $child->profile ?? $parent->profile,
-                    colorspace: $child->colorspace ?? $parent->colorspace,
-                    flattenForms: $child->flattenForms ?? $parent->flattenForms,
+                    grayscale: $child->grayscale ?? $parent->grayscale,
                 ),
             $parent instanceof DocumentOfficeCompressPresetOptions && $child instanceof DocumentOfficeCompressPresetOptions
                 => new DocumentOfficeCompressPresetOptions(

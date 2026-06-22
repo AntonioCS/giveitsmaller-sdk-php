@@ -9,7 +9,6 @@ use Gisl\Sdk\Generated\SdkSpec\Enums\AudioSampleRate;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageFormat;
 use Gisl\Sdk\Generated\SdkSpec\Enums\ImageMetadataPolicy;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
-use Gisl\Sdk\Generated\SdkSpec\Enums\PdfColorspace;
 use Gisl\Sdk\Generated\SdkSpec\Enums\PdfProfile;
 use Gisl\Sdk\Generated\SdkSpec\Enums\VideoPreset;
 use Gisl\Sdk\Generated\SdkSpec\Presets;
@@ -161,9 +160,8 @@ final class PresetCompressOptionsTest extends TestCase
     public function testPdfShippedDefaultsForSize(): void
     {
         $dto = DocumentPdfCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(PdfProfile::Max, $dto->profile);
-        $this->assertSame(PdfColorspace::Grayscale, $dto->colorspace);
-        $this->assertFalse($dto->flattenForms);
+        $this->assertSame(PdfProfile::Screen, $dto->profile);
+        $this->assertTrue($dto->grayscale);
     }
 
     public function testOfficeShippedDefaultsForSize(): void

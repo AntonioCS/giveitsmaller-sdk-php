@@ -11,12 +11,12 @@ declare(strict_types=1);
 namespace Gisl\Sdk\Generated\SdkSpec\Enums;
 
 /**
- * PDF optimization profile. Web = aggressive; Print = preserve quality; Archive = PDF/A; Max = smallest.
+ * PDF Ghostscript preset. Screen = smallest; Ebook = mid; Printer = 300dpi; Prepress = print-production.
  */
 enum PdfProfile: string
 {
-    case Web = 'web';
-    case Print = 'print';
-    case Archive = 'archive';
-    case Max = 'max';
+    case Screen = 'screen';
+    case Ebook = 'ebook';
+    case Printer = 'printer';
+    case Prepress = 'prepress';
 }

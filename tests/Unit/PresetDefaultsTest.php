@@ -151,7 +151,7 @@ final class PresetDefaultsTest extends TestCase
             ->imageCompress($level, new ImageCompressPresetOptions(outputFormat: ImageFormat::Webp))
             ->audioCompress($level, new AudioCompressPresetOptions(normalize: true))
             ->videoCompress($level, new VideoCompressPresetOptions(fps: 24))
-            ->pdfCompress($level, new DocumentPdfCompressPresetOptions(profile: PdfProfile::Web))
+            ->pdfCompress($level, new DocumentPdfCompressPresetOptions(profile: PdfProfile::Printer))
             ->officeCompress($level, new DocumentOfficeCompressPresetOptions(stripMacros: true))
             ->odfCompress($level, new DocumentOdfCompressPresetOptions(stripMetadata: true))
             ->epubCompress($level, new DocumentEpubCompressPresetOptions(fontSubsetting: true));
@@ -160,7 +160,7 @@ final class PresetDefaultsTest extends TestCase
             ->imageCompress($level, new ImageCompressPresetOptions(quality: 92))
             ->audioCompress($level, new AudioCompressPresetOptions(channels: 2))
             ->videoCompress($level, new VideoCompressPresetOptions(crf: 18))
-            ->pdfCompress($level, new DocumentPdfCompressPresetOptions(flattenForms: true))
+            ->pdfCompress($level, new DocumentPdfCompressPresetOptions(grayscale: true))
             ->officeCompress($level, new DocumentOfficeCompressPresetOptions(imageQuality: 60))
             ->odfCompress($level, new DocumentOdfCompressPresetOptions(imageQuality: 61))
             ->epubCompress($level, new DocumentEpubCompressPresetOptions(imageQuality: 62));
@@ -184,8 +184,8 @@ final class PresetDefaultsTest extends TestCase
 
         $pdf = $m->cellFor('document_pdf_compress', $level);
         $this->assertInstanceOf(DocumentPdfCompressPresetOptions::class, $pdf);
-        $this->assertTrue($pdf->flattenForms);         // child
-        $this->assertSame(PdfProfile::Web, $pdf->profile); // parent
+        $this->assertTrue($pdf->grayscale);            // child
+        $this->assertSame(PdfProfile::Printer, $pdf->profile); // parent
 
         $office = $m->cellFor('document_office_compress', $level);
         $this->assertInstanceOf(DocumentOfficeCompressPresetOptions::class, $office);

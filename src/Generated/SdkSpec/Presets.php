@@ -74,19 +74,16 @@ final class Presets
         ],
         'document_pdf_compress' => [
             'Size' => [
-                'profile' => 'Max',
-                'colorspace' => 'Grayscale',
-                'flattenForms' => false,
+                'profile' => 'Screen',
+                'grayscale' => true,
             ],
             'Balanced' => [
-                'profile' => 'Web',
-                'colorspace' => 'Unchanged',
-                'flattenForms' => false,
+                'profile' => 'Ebook',
+                'grayscale' => false,
             ],
             'Quality' => [
-                'profile' => 'Archive',
-                'colorspace' => 'Unchanged',
-                'flattenForms' => false,
+                'profile' => 'Printer',
+                'grayscale' => false,
             ],
         ],
         'document_office_compress' => [

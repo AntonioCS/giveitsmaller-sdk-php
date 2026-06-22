@@ -107,6 +107,30 @@ final class WireKeyConformanceTest extends TestCase
     }
 
     /**
+     * The contract option surface for a single SDK media: the UNION of every
+     * image-family group for `image`, else the one same-named mime group.
+     * mediaGroupOptionKeys asserts the group exists → a renamed/dropped
+     * PresetMedia<->mime_group mapping fails loudly rather than silently skipping.
+     *
+     * @return array<string, true>
+     */
+    private function contractOptionKeysForMedia(string $media): array
+    {
+        if ($media === 'image') {
+            $keys = [];
+            foreach ($this->imageFamilyGroups(CompressMetadata::instance()) as $group) {
+                foreach (array_keys($this->mediaGroupOptionKeys(CompressMetadata::instance(), $group)) as $k) {
+                    $keys[$k] = true;
+                }
+            }
+
+            return $keys;
+        }
+
+        return $this->mediaGroupOptionKeys(CompressMetadata::instance(), $media);
+    }
+
+    /**
      * @param list<string>        $emitted
      * @param array<string, true> $contract
      */
@@ -151,17 +175,22 @@ final class WireKeyConformanceTest extends TestCase
 
     // --- compress -----------------------------------------------------------
 
+    /**
+     * Pin KNOWN_WIRE_FIELDS to the contract PER MEDIA (not union-wide) so a key
+     * parked under the WRONG media (e.g. a PDF `grayscale` listed under
+     * document_office) is caught too — the previous union check let any such key
+     * through as long as some media owned it. Mirrors the TS per-media forward check.
+     */
     #[Test]
-    public function every_known_wire_field_is_a_real_compress_contract_option(): void
+    public function every_known_wire_field_is_a_real_compress_contract_option_for_its_media(): void
     {
-        $contract = $this->operationOptionKeys(CompressMetadata::instance());
-        $declared = [];
-        foreach (PresetResolver::KNOWN_WIRE_FIELDS as $fields) {
-            foreach ($fields as $field) {
-                $declared[$field] = true;
-            }
+        foreach (PresetResolver::KNOWN_WIRE_FIELDS as $media => $fields) {
+            $this->assertKeysConform(
+                "compress[{$media}]",
+                array_values($fields),
+                $this->contractOptionKeysForMedia($media),
+            );
         }
-        $this->assertKeysConform('compress', array_keys($declared), $contract);
     }
 
     /**
@@ -193,8 +222,15 @@ final class WireKeyConformanceTest extends TestCase
      * Document `quality` (contracts v2.83.0 document-compress honesty pass): a
      * stable per-document-group quality knob the ergonomic document-compress
      * preset path does not expose yet (the document preset DTOs carry
-     * profile/image_quality/strip_* but not `quality`) — omitted until a
-     * document-quality ergonomic option ships (tracked follow-up).
+     * profile/grayscale/image_quality/strip_* but not `quality`) — omitted until
+     * a document-quality ergonomic option ships (tracked follow-up).
+     *
+     * document_pdf `image_dpi` (contracts v2.96.0 Acrobat-PDF realignment
+     * Lw1LseYr): the PDF preset DTO now carries only {profile, grayscale}.
+     * `image_dpi` is a STABLE, worker-honored PER-CALL knob (not a preset cell) —
+     * omitted until a per-call PDF-DPI ergonomic option ships (tracked follow-up).
+     * The PDF `colorspace` / `pages` / `flatten_forms` are `planned` and live in
+     * PLANNED_OMISSIONS below (drift-guarded), NOT here.
      *
      * @var array<string, list<string>>
      */
@@ -202,10 +238,25 @@ final class WireKeyConformanceTest extends TestCase
         'image' => ['progressive', 'optimization_level', 'avif_speed'],
         'audio' => ['output_format'],
         'video' => ['output_format'],
-        'document_pdf' => ['quality'],
+        'document_pdf' => ['quality', 'image_dpi'],
         'document_office' => ['quality'],
         'document_odf' => ['quality'],
         'document_epub' => ['quality'],
+    ];
+
+    /**
+     * PLANNED_OMISSIONS: contract compress options omitted SPECIFICALLY BECAUSE the
+     * contract marks them `availability: 'planned'` (advertised-ahead, not yet read
+     * by the worker, FE-hidden). Kept separate from INTENTIONALLY_OMITTED (stable-
+     * but-deliberately-unexposed) so the drift-guard below can assert these are
+     * STILL planned: if a future regen flips one to stable, the assertion fails and
+     * forces a deliberate "expose it or reclassify it" decision instead of silently
+     * leaving a now-live option unreachable. Mirrors the TS PLANNED_OMISSIONS.
+     *
+     * @var array<string, list<string>>
+     */
+    private const PLANNED_OMISSIONS = [
+        'document_pdf' => ['colorspace', 'pages', 'flatten_forms'],
     ];
 
     /**
@@ -220,21 +271,7 @@ final class WireKeyConformanceTest extends TestCase
     public function every_compress_contract_option_per_media_is_known_or_documented_omission(): void
     {
         foreach (PresetResolver::KNOWN_WIRE_FIELDS as $media => $fields) {
-            // For `image` the contract surface is the UNION of every image-family
-            // group (image + image_*) so a per-format option like
-            // optimization_level is captured; for other media it is the one
-            // same-named group. mediaGroupOptionKeys asserts the group exists → a
-            // renamed/dropped PresetMedia<->mime_group mapping fails loudly.
-            if ($media === 'image') {
-                $contractForMedia = [];
-                foreach ($this->imageFamilyGroups(CompressMetadata::instance()) as $group) {
-                    foreach (array_keys($this->mediaGroupOptionKeys(CompressMetadata::instance(), $group)) as $k) {
-                        $contractForMedia[$k] = true;
-                    }
-                }
-            } else {
-                $contractForMedia = $this->mediaGroupOptionKeys(CompressMetadata::instance(), $media);
-            }
+            $contractForMedia = $this->contractOptionKeysForMedia($media);
             $allowed = [];
             foreach ($fields as $field) {
                 $allowed[$field] = true;
@@ -242,7 +279,36 @@ final class WireKeyConformanceTest extends TestCase
             foreach (self::INTENTIONALLY_OMITTED[$media] ?? [] as $omitted) {
                 $allowed[$omitted] = true;
             }
+            foreach (self::PLANNED_OMISSIONS[$media] ?? [] as $omitted) {
+                $allowed[$omitted] = true;
+            }
             $this->assertKeysConform("compress[{$media}]", array_keys($contractForMedia), $allowed);
+        }
+    }
+
+    /**
+     * Drift-guard for PLANNED_OMISSIONS (closes the blind spot codex flagged): an
+     * option is allowed in the reverse check above purely because we asserted it is
+     * `planned`. Pin that to the generated contract — if any is no longer
+     * `availability: 'planned'` (i.e. it went live), this fails so the omission is
+     * re-evaluated rather than silently masking a now-supported option. Mirrors TS.
+     */
+    #[Test]
+    public function every_planned_omission_is_still_availability_planned(): void
+    {
+        foreach (self::PLANNED_OMISSIONS as $media => $opts) {
+            $groups = CompressMetadata::instance()->mime_groups;
+            self::assertArrayHasKey($media, $groups, "metadata has a '{$media}' mime group");
+            foreach ($opts as $opt) {
+                self::assertArrayHasKey($opt, $groups[$media]->options, "compress[{$media}].{$opt} exists in the contract");
+                self::assertSame(
+                    'planned',
+                    $groups[$media]->options[$opt]->availability,
+                    "compress[{$media}].{$opt} is listed in PLANNED_OMISSIONS but is no longer "
+                    . "availability:'planned' — it likely went live; expose it in KNOWN_WIRE_FIELDS "
+                    . 'or move it to INTENTIONALLY_OMITTED.',
+                );
+            }
         }
     }
 
