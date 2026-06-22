@@ -10,6 +10,7 @@ use Gisl\Generated\OpenApi\Model\AuthErrorResponse;
 use Gisl\Generated\OpenApi\Model\AuthErrorType;
 use Gisl\Generated\OpenApi\Model\AuthRejectionEnvelope;
 use Gisl\Generated\OpenApi\Model\BalanceExhaustedResponse;
+use Gisl\Generated\OpenApi\Model\AccountLimits;
 use Gisl\Generated\OpenApi\Model\ContactRequest;
 use Gisl\Generated\OpenApi\Model\CreditsBalanceResponse;
 use Gisl\Generated\OpenApi\Model\CreditsUsageResponse;
@@ -2153,6 +2154,27 @@ class GislClient
         /** @var array<string, mixed> $data */
         $data = $this->sendAndUnwrap($request);
         return $this->hydrate(CreditsUsageResponse::class, $data);
+    }
+
+    /**
+     * Fetch the caller's effective account limits (the tier-resolved caps:
+     * upload/merge size + total caps, surfaced override-aware). The success
+     * envelope's `data` is unwrapped to {@see AccountLimits}.
+     *
+     * Note the path: `/api/v2/account/limits`.
+     *
+     * Mirrors `packages/typescript/src/client.ts::getAccountLimits`.
+     */
+    public function getAccountLimits(): AccountLimits
+    {
+        $request = $this->buildRequest(
+            method: 'GET',
+            path: '/api/v2/account/limits',
+        );
+
+        /** @var array<string, mixed> $data */
+        $data = $this->sendAndUnwrap($request);
+        return $this->hydrate(AccountLimits::class, $data);
     }
 
     // ---------------------------------------------------------------------

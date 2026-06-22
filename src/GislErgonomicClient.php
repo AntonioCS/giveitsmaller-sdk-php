@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Gisl\Sdk;
 
+use Gisl\Generated\OpenApi\Model\AccountLimits;
+use Gisl\Generated\OpenApi\Model\CreditsBalanceResponse;
+use Gisl\Generated\OpenApi\Model\CreditsUsageResponse;
 use Gisl\Sdk\Ergonomic\Asset;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\Merge;
@@ -221,6 +224,27 @@ class GislErgonomicClient extends GislClient
             $coerced[] = $a instanceof Asset ? $a : Merge::asset($a);
         }
         return new MergeBuilder($this, $coerced, $options ?? new MergeOptions());
+    }
+
+    // 8yqUXLCS — first-class ergonomic billing/limits accessors (thin fluent
+    // aliases over the inherited low-level getters, surfaced + documented here).
+
+    /** Current credit balance (sugar for {@see GislClient::getCreditsBalance()}). */
+    public function credits(): CreditsBalanceResponse
+    {
+        return $this->getCreditsBalance();
+    }
+
+    /** Credit usage history (sugar for {@see GislClient::getCreditsUsage()}). */
+    public function creditsUsage(?CreditsUsageOptions $options = null): CreditsUsageResponse
+    {
+        return $this->getCreditsUsage($options);
+    }
+
+    /** Effective account limits / tier-resolved caps (sugar for {@see GislClient::getAccountLimits()}). */
+    public function limits(): AccountLimits
+    {
+        return $this->getAccountLimits();
     }
 
     // `watermark()` and `archive()` factories are NOT shipped in P2/P3.

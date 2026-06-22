@@ -53,6 +53,7 @@ final class FixtureLoader
         'streamEvents',
         'getCreditsBalance',
         'getCreditsUsage',
+        'getAccountLimits',
         'getMetadata',
         'getSchema',
         'login',
