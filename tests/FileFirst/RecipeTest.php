@@ -92,7 +92,7 @@ final class RecipeTest extends TestCase
     {
         $base = $this->recipe('clip.mov');
         $branchA = $base->convert('mp4')->compress(OptimizeFor::Size);
-        $branchB = $base->thumbnail(['width' => 320]);
+        $branchB = $base->thumbnail(['width' => 320, 'height' => 240]);
 
         self::assertSame(0, $base->stepCount());
         self::assertSame(2, $branchA->stepCount());
@@ -169,19 +169,31 @@ final class RecipeTest extends TestCase
     }
 
     #[Test]
-    public function thumbnail_omits_an_unset_dimension(): void
+    public function thumbnail_rejects_a_missing_height(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(['width' => 320]));
-        self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 320]]], $ops);
-        self::assertArrayNotHasKey('height', $ops[0]['options'], 'an omitted dimension is not sent as null');
+        // Dhje3Faq: both dimensions are contract-required; a width-only thumbnail
+        // throws synchronously at the verb call (pre-upload), naming `height`.
+        try {
+            $this->recipe('photo.jpg')->thumbnail(['width' => 320]);
+            self::fail('a width-only thumbnail must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('missing_required_field', $err->reason);
+            self::assertNotNull($err->conflictingFields);
+            self::assertContains('height', $err->conflictingFields);
+        }
     }
 
     #[Test]
-    public function thumbnail_carries_height_only(): void
+    public function thumbnail_rejects_a_missing_width(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->thumbnail(['height' => 240]));
-        self::assertSame([['type' => 'thumbnail', 'options' => ['height' => 240]]], $ops);
-        self::assertArrayNotHasKey('width', $ops[0]['options']);
+        try {
+            $this->recipe('photo.jpg')->thumbnail(['height' => 240]);
+            self::fail('a height-only thumbnail must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('missing_required_field', $err->reason);
+            self::assertNotNull($err->conflictingFields);
+            self::assertContains('width', $err->conflictingFields);
+        }
     }
 
     // --- Job shape ----------------------------------------------------------
@@ -199,7 +211,7 @@ final class RecipeTest extends TestCase
     #[Test]
     public function a_chain_preserves_operation_order_in_one_job(): void
     {
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4')->thumbnail(['width' => 100]));
+        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4')->thumbnail(['width' => 100, 'height' => 100]));
         self::assertSame(['convert', 'thumbnail'], array_column($ops, 'type'));
     }
 

@@ -9,6 +9,7 @@ use Gisl\Sdk\Cancellation;
 use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
+use Gisl\Sdk\Ergonomic\OptionValidation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -72,17 +73,21 @@ final class WatermarkedRecipe
      */
     public function convert(string $format, array $options = []): self
     {
-        unset($options['format']);
+        // Eager pre-upload key validation (see Recipe::convert). Validation
+        // guarantees the bag carries neither `format` nor `output_format`.
+        OptionValidation::validateVerbOptions('convert', $options);
         return $this->withStep(new RecipeStep('convert', [...$options, 'output_format' => $format]));
     }
 
     /**
-     * Thumbnail the watermarked output.
+     * Thumbnail the watermarked output. `width` AND `height` are required.
      *
      * @param array<string, mixed> $options
      */
     public function thumbnail(array $options = []): self
     {
+        OptionValidation::validateVerbOptions('thumbnail', $options);
+        OptionValidation::assertThumbnailDimensions($options);
         $wire = [];
         foreach ($options as $key => $value) {
             if ($value !== null) {

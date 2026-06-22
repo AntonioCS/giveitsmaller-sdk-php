@@ -524,24 +524,24 @@ final class Invoke
     }
 
     /**
-     * Project a parity thumbnail op-spec into the new options-array shape
-     * (`thumbnail(array{width?: int, height?: int})`). An omitted dimension is
-     * left out of the array entirely so the lowered wire payload stays
-     * byte-identical to the prior positional `?int` call.
+     * Project a parity thumbnail op-spec into the options-array shape
+     * (`thumbnail(array{width: int, height: int})`). Dhje3Faq: thumbnail now
+     * REQUIRES both dimensions, so a fixture supplying only one is a fixture
+     * authoring bug — throw rather than silently omit a dimension (which would
+     * trip the both-required gate inside the verb with a less obvious message).
      *
      * @param array<string, mixed> $op
-     * @return array{width?: int, height?: int}
+     * @return array{width: int, height: int}
      */
     private static function thumbnailOptions(array $op): array
     {
-        $options = [];
-        if (isset($op['width'])) {
-            $options['width'] = (int) $op['width'];
+        if (!isset($op['width']) || !isset($op['height'])) {
+            throw new \RuntimeException('[parity] thumbnail fixture must supply both width and height');
         }
-        if (isset($op['height'])) {
-            $options['height'] = (int) $op['height'];
-        }
-        return $options;
+        return [
+            'width' => (int) $op['width'],
+            'height' => (int) $op['height'],
+        ];
     }
 
     /**

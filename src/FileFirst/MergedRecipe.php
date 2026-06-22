@@ -11,6 +11,7 @@ use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\MergeBuilder;
 use Gisl\Sdk\Ergonomic\MergeOptions;
+use Gisl\Sdk\Ergonomic\OptionValidation;
 use Gisl\Sdk\Errors\GislConfigError;
 use Gisl\Sdk\Errors\GislTimeoutError;
 use Gisl\Sdk\Generated\SdkSpec\Enums\OptimizeFor;
@@ -78,21 +79,22 @@ final class MergedRecipe
      */
     public function convert(string $format, array $options = []): self
     {
-        // The convert op's wire key is `output_format` (contract: convert.yaml),
-        // NOT `format`. Spread options FIRST so the explicit shorthand wins.
-        // The shorthand owns the format → a stray legacy `format` key in the bag
-        // is not a valid convert option; drop it so the wire never carries both.
-        unset($options['format']);
+        // Eager pre-upload key validation (see Recipe::convert). The convert op's
+        // wire key is `output_format`; validation guarantees the bag carries
+        // neither `format` nor `output_format`, so no drop is needed.
+        OptionValidation::validateVerbOptions('convert', $options);
         return $this->withStep(new RecipeStep('convert', [...$options, 'output_format' => $format]));
     }
 
     /**
-     * Thumbnail the merged output.
+     * Thumbnail the merged output. `width` AND `height` are required.
      *
      * @param array<string, mixed> $options
      */
     public function thumbnail(array $options = []): self
     {
+        OptionValidation::validateVerbOptions('thumbnail', $options);
+        OptionValidation::assertThumbnailDimensions($options);
         $wire = [];
         foreach ($options as $key => $value) {
             if ($value !== null) {

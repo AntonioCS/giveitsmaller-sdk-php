@@ -79,7 +79,7 @@ final class WatermarkRecipeTest extends TestCase
 
     public function test_transformed_base_routes_by_output_media_thumbnail_to_image(): void
     {
-        $wire = $this->recipe('clip.mp4')->thumbnail(['width' => 640])->watermark($this->overlay())
+        $wire = $this->recipe('clip.mp4')->thumbnail(['width' => 640, 'height' => 360])->watermark($this->overlay())
             ->toWorkflowPayload(['base', 'ovl'])->toWire();
         self::assertSame('image_watermark', $this->watermarkJob($wire)['operations'][0]['type']);
     }
@@ -154,12 +154,12 @@ final class WatermarkRecipeTest extends TestCase
 
     public function test_lowers_base_preceding_steps_into_src_0_and_overlay_steps_into_src_1(): void
     {
-        $wire = $this->recipe('hero.jpg')->thumbnail(['width' => 1200])
+        $wire = $this->recipe('hero.jpg')->thumbnail(['width' => 1200, 'height' => 800])
             ->watermark($this->overlay('logo.png')->convert('png'))
             ->toWorkflowPayload(['b', 'o'])->toWire();
         /** @var list<array<string, mixed>> $jobs */
         $jobs = $wire['jobs'];
-        self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 1200]]], $jobs[0]['operations']);
+        self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 1200, 'height' => 800]]], $jobs[0]['operations']);
         self::assertSame([['type' => 'convert', 'options' => ['output_format' => 'png']]], $jobs[1]['operations']);
     }
 
@@ -270,7 +270,7 @@ final class WatermarkRecipeTest extends TestCase
 
     public function test_allows_transformed_overlay_whose_output_is_image(): void
     {
-        $wr = $this->recipe('photo.jpg')->watermark($this->overlay('clip.mp4')->thumbnail(['width' => 64]));
+        $wr = $this->recipe('photo.jpg')->watermark($this->overlay('clip.mp4')->thumbnail(['width' => 64, 'height' => 64]));
         self::assertInstanceOf(WatermarkedRecipe::class, $wr);
     }
 

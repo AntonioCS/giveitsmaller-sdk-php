@@ -9,6 +9,7 @@ use Gisl\Sdk\Ergonomic\BuilderInternals;
 use Gisl\Sdk\Ergonomic\Handle;
 use Gisl\Sdk\Ergonomic\MaxWait;
 use Gisl\Sdk\Ergonomic\OperationBuilder;
+use Gisl\Sdk\Ergonomic\OptionValidation;
 use Gisl\Sdk\Ergonomic\PresetResolver;
 use Gisl\Sdk\Ergonomic\UploadProgressEvent;
 use Gisl\Sdk\Cancellation;
@@ -90,26 +91,31 @@ final class Recipe
      */
     public function convert(string $format, array $options = []): self
     {
+        // Eager pre-upload key validation (rejects unknown keys + a user-supplied
+        // output_format/format, which this verb owns via the `$format` argument).
+        OptionValidation::validateVerbOptions('convert', $options);
         // The convert op's wire key is `output_format` (contract: convert.yaml,
-        // required, all media), NOT `format`. Spread options FIRST so the explicit
-        // shorthand wins over an `output_format` key in the bag.
-        // The shorthand owns the format → a stray legacy `format` key in the bag
-        // is not a valid convert option; drop it so the wire never carries both.
-        unset($options['format']);
+        // required, all media), NOT `format`. Validation above guarantees the bag
+        // carries neither `format` nor `output_format`, so no drop is needed.
         return $this->withStep(new RecipeStep('convert', [...$options, 'output_format' => $format]));
     }
 
     /**
-     * Generate a preview. Width and/or height in pixels; any additional per-op
-     * thumbnail options pass through. A null value is dropped from the wire
-     * options (not sent as null). Takes an options shape to mirror the TS
-     * `thumbnail({ width?, height? })` and the operation-first
-     * `GislErgonomicClient::thumbnail($input, $options)`.
+     * Generate a preview / resize. `width` AND `height` (in pixels) are BOTH
+     * required (the contract marks both required for image/video/document); an
+     * unknown key or a missing/null dimension throws `GislConfigError` before any
+     * upload. Any additional per-op thumbnail option (fit/format/quality/…) passes
+     * through; a null OPTIONAL value is dropped from the wire options. Mirrors the
+     * TS `thumbnail({ width, height })`.
      *
      * @param array<string, mixed> $options
      */
     public function thumbnail(array $options = []): self
     {
+        // Eager pre-upload validation: unknown keys rejected; width AND height
+        // required (contract marks both required for image/video/document).
+        OptionValidation::validateVerbOptions('thumbnail', $options);
+        OptionValidation::assertThumbnailDimensions($options);
         $wire = [];
         foreach ($options as $key => $value) {
             if ($value !== null) {
@@ -128,7 +134,9 @@ final class Recipe
      */
     public function textWatermark(string $text, array $options = []): self
     {
-        // Spread options FIRST so the explicit `$text` argument is authoritative.
+        // Eager pre-upload validation (rejects unknown keys + a user-supplied
+        // `text`, which this verb owns via the first argument).
+        OptionValidation::validateVerbOptions('textWatermark', $options);
         return $this->withStep(new RecipeStep('text_watermark', [...$options, 'text' => $text]));
     }
 
@@ -149,6 +157,9 @@ final class Recipe
      */
     public function watermark(Recipe $overlay, array $options = []): WatermarkedRecipe
     {
+        // Eager pre-upload key validation (against image_watermark ∪ video_watermark,
+        // since the base media may be undetectable here; routing is gated separately).
+        OptionValidation::validateVerbOptions('watermark', $options);
         // Eager gate when the base media is KNOWN (unit-testable pre-upload); an
         // undetectable base is DEFERRED — re-checked pre-upload in run()/submit().
         [$media, $mime] = WatermarkGate::effectiveBase($this->input, $this->steps);

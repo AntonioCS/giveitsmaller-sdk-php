@@ -7,10 +7,13 @@ namespace Gisl\Sdk\Tests\Unit\Conformance;
 use Gisl\Generated\Operations\ArchiveMetadata;
 use Gisl\Generated\Operations\CompressMetadata;
 use Gisl\Generated\Operations\ConvertMetadata;
+use Gisl\Generated\Operations\ImageWatermarkMetadata;
 use Gisl\Generated\Operations\MergeMetadata;
 use Gisl\Generated\Operations\OperationMetadata;
 use Gisl\Generated\Operations\TextWatermarkMetadata;
 use Gisl\Generated\Operations\ThumbnailMetadata;
+use Gisl\Generated\Operations\VideoWatermarkMetadata;
+use Gisl\Sdk\Ergonomic\OptionValidation;
 use Gisl\Sdk\Ergonomic\ArchiveFormat;
 use Gisl\Sdk\Ergonomic\MergeOptions;
 use Gisl\Sdk\Ergonomic\PresetResolver;
@@ -410,5 +413,41 @@ final class WireKeyConformanceTest extends TestCase
             'by_job',
         ))->toWorkflowPayload(['f0', 'f1'], null);
         $this->assertKeysConform('archive', $this->optionKeysOf($payload, 'archive'), $contract);
+    }
+
+    // --- eager option-key validator conformance (card Dhje3Faq) -------------
+
+    /**
+     * The eager verb-option validator's allowed-key set per verb must equal the
+     * op-wide contract option set, so a typo is rejected pre-upload but every real
+     * contract key passes. `watermark` = image_watermark ∪ video_watermark (the
+     * base media may be undetectable at the `.watermark()` call). Mirrors the TS
+     * `option-key validation conformance` suite.
+     *
+     * @return iterable<string, array{0: string, 1: array<string, true>}>
+     */
+    public static function validatedVerbProvider(): iterable
+    {
+        $watermark = OptionValidation::operationOptionKeys(ImageWatermarkMetadata::instance())
+            + OptionValidation::operationOptionKeys(VideoWatermarkMetadata::instance());
+
+        yield 'convert' => ['convert', OptionValidation::operationOptionKeys(ConvertMetadata::instance())];
+        yield 'thumbnail' => ['thumbnail', OptionValidation::operationOptionKeys(ThumbnailMetadata::instance())];
+        yield 'textWatermark' => ['textWatermark', OptionValidation::operationOptionKeys(TextWatermarkMetadata::instance())];
+        yield 'watermark' => ['watermark', $watermark];
+    }
+
+    /**
+     * @param array<string, true> $expectedContract
+     */
+    #[Test]
+    #[DataProvider('validatedVerbProvider')]
+    public function validator_allowed_key_set_equals_the_contract_option_set(string $verb, array $expectedContract): void
+    {
+        $allowed = array_keys(OptionValidation::allowedKeysFor($verb));
+        $expected = array_keys($expectedContract);
+        sort($allowed);
+        sort($expected);
+        self::assertSame($expected, $allowed, "validator allowed-key set for '{$verb}' must equal the contract option set");
     }
 }

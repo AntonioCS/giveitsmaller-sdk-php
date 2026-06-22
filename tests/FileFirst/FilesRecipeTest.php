@@ -79,7 +79,7 @@ final class FilesRecipeTest extends TestCase
     {
         $base = $this->filesRecipe(['a.mov', 'b.mov']);
         $branchA = $base->convert('mp4')->compress(OptimizeFor::Size);
-        $branchB = $base->thumbnail(['width' => 320]);
+        $branchB = $base->thumbnail(['width' => 320, 'height' => 240]);
 
         self::assertSame(0, $base->stepCount());
         self::assertSame(2, $branchA->stepCount());

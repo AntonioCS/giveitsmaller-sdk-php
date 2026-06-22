@@ -96,23 +96,27 @@ final class RecipeChainOptionsTest extends TestCase
     #[Test]
     public function thumbnail_carries_all_defined_keys(): void
     {
+        // Both dims are required now; the extra keys (fit/format) still pass through.
         $ops = $this->operations(
-            $this->recipe('photo.jpg')->thumbnail(['width' => 200, 'fit' => 'cover', 'format' => 'webp']),
+            $this->recipe('photo.jpg')->thumbnail(['width' => 200, 'height' => 150, 'fit' => 'cover', 'format' => 'webp']),
         );
         self::assertSame(
-            [['type' => 'thumbnail', 'options' => ['width' => 200, 'fit' => 'cover', 'format' => 'webp']]],
+            [['type' => 'thumbnail', 'options' => ['width' => 200, 'height' => 150, 'fit' => 'cover', 'format' => 'webp']]],
             $ops,
         );
     }
 
     #[Test]
-    public function thumbnail_drops_a_null_value(): void
+    public function thumbnail_drops_a_null_value_on_an_optional_key(): void
     {
+        // Both required dims are present; a null OPTIONAL key (format) is dropped.
+        // The both-required gate forbids dropping a dimension via null — so the
+        // null-drop is exercised on an optional key. PHP drops `null` (TS drops
+        // `undefined`); the lowered wire stays byte-identical across languages.
         $ops = $this->operations(
-            $this->recipe('photo.jpg')->thumbnail(['width' => 200, 'height' => null, 'format' => null]),
+            $this->recipe('photo.jpg')->thumbnail(['width' => 200, 'height' => 150, 'format' => null]),
         );
-        self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 200]]], $ops);
-        self::assertArrayNotHasKey('height', $ops[0]['options']);
+        self::assertSame([['type' => 'thumbnail', 'options' => ['width' => 200, 'height' => 150]]], $ops);
         self::assertArrayNotHasKey('format', $ops[0]['options']);
     }
 
@@ -120,66 +124,75 @@ final class RecipeChainOptionsTest extends TestCase
     public function text_watermark_merges_the_options_bag_after_text(): void
     {
         $ops = $this->operations(
-            $this->recipe('photo.jpg')->textWatermark('hi', ['position' => 'bottom-right', 'opacity' => 0.5]),
+            $this->recipe('photo.jpg')->textWatermark('hi', ['anchor' => 'bottom_right', 'opacity' => 0.5]),
         );
         // The explicit $text is spread LAST (authoritative); assert membership
         // order-independently rather than coupling to insertion order.
         self::assertCount(1, $ops);
         self::assertSame('text_watermark', $ops[0]['type']);
         self::assertEqualsCanonicalizing(
-            ['text' => 'hi', 'position' => 'bottom-right', 'opacity' => 0.5],
+            ['text' => 'hi', 'anchor' => 'bottom_right', 'opacity' => 0.5],
             $ops[0]['options'],
         );
     }
 
-    // --- 1b. Explicit shorthand arg is AUTHORITATIVE over a bag key (codex r2) ---
+    // --- 1b. Positional-owned bag keys are REJECTED (Dhje3Faq) ---------------
+    // These verbs OWN their output via a positional argument; supplying the same
+    // key in the options bag now THROWS at the verb call (was silently
+    // overridden/dropped before). Eager + pre-upload — the throw fires
+    // synchronously at the chain method, no network.
 
     #[Test]
-    public function convert_explicit_format_arg_wins_over_a_bag_output_format_key(): void
+    public function convert_rejects_an_output_format_bag_key(): void
     {
-        // The shorthand lowers to output_format and is spread LAST, so an
-        // `output_format` key in the bag CANNOT override the call's explicit arg.
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['output_format' => 'webm']));
-        self::assertCount(1, $ops);
-        self::assertSame('convert', $ops[0]['type']);
-        self::assertSame('mp4', $ops[0]['options']['output_format'], 'the explicit format arg wins; the bag output_format is overridden');
+        try {
+            $this->recipe('clip.mov')->convert('mp4', ['output_format' => 'webm']);
+            self::fail('convert() with an output_format bag key must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['output_format'], $err->conflictingFields);
+        }
     }
 
     #[Test]
-    public function convert_drops_a_stray_legacy_format_bag_key(): void
+    public function convert_rejects_a_legacy_format_bag_key(): void
     {
-        // A `format` key in the bag is the OLD (wrong) wire key — the shorthand
-        // now owns output_format, so the stray `format` must NOT leak onto the wire.
-        $ops = $this->operations($this->recipe('clip.mov')->convert('mp4', ['format' => 'legacy', 'crf' => 23]));
-        self::assertEqualsCanonicalizing(['output_format' => 'mp4', 'crf' => 23], $ops[0]['options']);
-        self::assertArrayNotHasKey('format', $ops[0]['options']);
+        try {
+            $this->recipe('clip.mov')->convert('mp4', ['format' => 'legacy', 'crf' => 23]);
+            self::fail('convert() with a stray format bag key must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['format'], $err->conflictingFields);
+        }
     }
 
     #[Test]
-    public function text_watermark_explicit_text_arg_wins_over_a_bag_text_key(): void
+    public function text_watermark_rejects_a_text_bag_key(): void
     {
-        $ops = $this->operations($this->recipe('photo.jpg')->textWatermark('real', ['text' => 'fake']));
-        self::assertCount(1, $ops);
-        self::assertSame('text_watermark', $ops[0]['type']);
-        self::assertSame('real', $ops[0]['options']['text'], 'the explicit text arg wins; the bag text is overridden');
+        try {
+            $this->recipe('photo.jpg')->textWatermark('real', ['text' => 'fake']);
+            self::fail('textWatermark() with a text bag key must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['text'], $err->conflictingFields);
+        }
     }
 
     #[Test]
-    public function merged_convert_explicit_format_arg_wins_over_a_bag_format_key(): void
+    public function merged_convert_rejects_an_output_format_bag_key(): void
     {
-        // MergedRecipe arm of bug 1 — the post-combine convert is equally authoritative.
-        $payload = (new MergedRecipe(
+        // MergedRecipe arm — the duplicated post-combine convert body validates too.
+        $merged = new MergedRecipe(
             [FileInput::path('a.mp4'), FileInput::path('b.mp4')],
             new MergeOptions(mediaKind: 'video'),
-        ))
-            ->convert('mp4', ['output_format' => 'webm'])
-            ->toWorkflowPayload(['f0', 'f1'], null);
-
-        $mergeJob = $payload->jobs[2]; // 2 src jobs + the merge job
-        self::assertSame('convert', $mergeJob->operations[1]->type);
-        $options = $mergeJob->operations[1]->options;
-        self::assertIsArray($options);
-        self::assertSame('mp4', $options['output_format'], 'the explicit format arg wins on the merge job convert');
+        );
+        try {
+            $merged->convert('mp4', ['output_format' => 'webm']);
+            self::fail('MergedRecipe::convert() with an output_format bag key must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('unknown_field', $err->reason);
+            self::assertSame(['output_format'], $err->conflictingFields);
+        }
     }
 
     // --- 2. compress precedence mirrors the op-first resolver ----------------
@@ -403,8 +416,8 @@ final class RecipeChainOptionsTest extends TestCase
     public function thumbnail_with_no_extra_keys_is_unchanged(): void
     {
         self::assertSame(
-            [['type' => 'thumbnail', 'options' => ['width' => 100]]],
-            $this->operations($this->recipe('photo.jpg')->thumbnail(['width' => 100])),
+            [['type' => 'thumbnail', 'options' => ['width' => 100, 'height' => 100]]],
+            $this->operations($this->recipe('photo.jpg')->thumbnail(['width' => 100, 'height' => 100])),
         );
     }
 
@@ -465,7 +478,7 @@ final class RecipeChainOptionsTest extends TestCase
     public function files_thumbnail_carries_extra_keys_into_every_job(): void
     {
         $jobs = (new FilesRecipe([FileInput::path('a.jpg'), FileInput::path('b.jpg')]))
-            ->thumbnail(['width' => 200, 'fit' => 'cover'])
+            ->thumbnail(['width' => 200, 'height' => 150, 'fit' => 'cover'])
             ->toWorkflowPayload(['f0', 'f1'])
             ->toWire()['jobs'];
 
@@ -473,7 +486,7 @@ final class RecipeChainOptionsTest extends TestCase
         foreach ($jobs as $job) {
             self::assertIsArray($job);
             self::assertSame(
-                [['type' => 'thumbnail', 'options' => ['width' => 200, 'fit' => 'cover']]],
+                [['type' => 'thumbnail', 'options' => ['width' => 200, 'height' => 150, 'fit' => 'cover']]],
                 $job['operations'],
             );
         }
@@ -526,12 +539,12 @@ final class RecipeChainOptionsTest extends TestCase
             [FileInput::path('a.mp4'), FileInput::path('b.mp4')],
             new MergeOptions(mediaKind: 'video'),
         ))
-            ->thumbnail(['width' => 320, 'format' => 'jpeg'])
+            ->thumbnail(['width' => 320, 'height' => 240, 'format' => 'jpeg'])
             ->toWorkflowPayload(['f0', 'f1'], null);
 
         $mergeJob = $payload->jobs[2];
         self::assertSame('thumbnail', $mergeJob->operations[1]->type);
-        self::assertSame(['width' => 320, 'format' => 'jpeg'], $mergeJob->operations[1]->options);
+        self::assertSame(['width' => 320, 'height' => 240, 'format' => 'jpeg'], $mergeJob->operations[1]->options);
     }
 
     // --- chain media inference from prior step output (56N4chXY / N8eESzQN) ------
