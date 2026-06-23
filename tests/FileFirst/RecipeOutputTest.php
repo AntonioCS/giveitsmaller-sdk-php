@@ -238,6 +238,51 @@ final class RecipeOutputTest extends TestCase
         self::assertSame('keep', $op['options']['metadata'] ?? null);
     }
 
+    // --- output(): target-size (v2.104.0; quality live / target_size planned) --
+
+    #[Test]
+    public function encoding_mode_quality_honored_on_same_format_jpeg_and_webp(): void
+    {
+        // `quality` is the live default mode (the optimiser quality-slider path).
+        self::assertSame('quality', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['encoding_mode' => 'quality']))['options']['encoding_mode'] ?? null);
+        self::assertSame('quality', $this->soleOp($this->recipe('a.webp')->output('webp', ['encoding_mode' => 'quality']))['options']['encoding_mode'] ?? null);
+    }
+
+    #[Test]
+    public function encoding_mode_target_size_planned_value_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['encoding_mode' => 'target_size']));
+            self::fail('the planned target_size value must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function target_size_bytes_planned_key_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['target_size_bytes' => 50_000]));
+            self::fail('a planned target_size_bytes option must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function encoding_mode_on_a_format_change_throws_option_not_on_route(): void
+    {
+        // encoding_mode is an optimiser (same_format) knob; a format-change routes
+        // via convert, which does not honor it.
+        try {
+            $this->operations($this->recipe('a.png')->output('webp', ['encoding_mode' => 'quality']));
+            self::fail('encoding_mode is not honored on a format-change route');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+        }
+    }
+
     // --- output(): unrepresentable routes + svg (vector, no resize) ---------
 
     #[Test]

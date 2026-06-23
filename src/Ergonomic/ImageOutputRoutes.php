@@ -21,11 +21,12 @@ use Gisl\Generated\Operations\CompressMetadata;
  *
  * Each route cell lists the options the worker HONORS (live) and PLANS
  * (advertised, not yet honored — gated unavailable). Resize (`width`/`height`/
- * `fit`) is INPUT-keyed: it lives only on the `same_format[input]` cell but
- * applies on EITHER route, gated by input resizability (raster only — `svg` is
- * vector and carries no resize). So a `png → webp + resize` request reads its
- * resize capability from `same_format.png` and its transcoder options from
- * `format_change.webp`.
+ * `fit`) is INPUT-gated: since v2.103.0 convert is the resize engine, so the
+ * projection lists resize on every `format_change` cell too — but resizability
+ * is keyed to the INPUT (raster only — `svg` is vector and carries no resize).
+ * The lowering reads resize capability from `same_format[input]` on BOTH routes,
+ * so a `png → webp + resize` request resizes (png is raster) while an `svg → png
+ * + resize` request does NOT (svg's same_format cell has no resize keys).
  *
  * This hand table MIRRORS the generated projection and is PINNED to it by the
  * output-route conformance test (the watermark-capability-gate precedent) — a
@@ -82,21 +83,21 @@ final class ImageOutputRoutes
      */
     public const IMAGE_OUTPUT_ROUTES = [
         'same_format' => [
-            'avif' => ['honored' => ['avif_speed', 'fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
+            'avif' => ['honored' => ['avif_speed', 'encoding_mode', 'fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => ['target_size_bytes']],
             'gif' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
-            'jpeg' => ['honored' => ['fit', 'height', 'lossless', 'metadata', 'output_format', 'progressive', 'quality', 'width'], 'planned' => []],
+            'jpeg' => ['honored' => ['encoding_mode', 'fit', 'height', 'lossless', 'metadata', 'output_format', 'progressive', 'quality', 'width'], 'planned' => ['target_size_bytes']],
             'png' => ['honored' => ['fit', 'height', 'metadata', 'optimization_level', 'output_format', 'quality', 'width'], 'planned' => ['lossy']],
             'svg' => ['honored' => ['metadata', 'output_format', 'quality'], 'planned' => []],
             'tiff' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
-            'webp' => ['honored' => ['fit', 'height', 'lossless', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
+            'webp' => ['honored' => ['encoding_mode', 'fit', 'height', 'lossless', 'metadata', 'output_format', 'quality', 'width'], 'planned' => ['target_size_bytes']],
         ],
         'format_change' => [
-            'avif' => ['honored' => ['output_format', 'quality'], 'planned' => []],
-            'gif' => ['honored' => ['output_format'], 'planned' => []],
-            'jpeg' => ['honored' => ['background', 'output_format', 'quality'], 'planned' => []],
-            'png' => ['honored' => ['output_format'], 'planned' => []],
-            'tiff' => ['honored' => ['output_format'], 'planned' => []],
-            'webp' => ['honored' => ['output_format', 'quality'], 'planned' => []],
+            'avif' => ['honored' => ['fit', 'height', 'output_format', 'quality', 'width'], 'planned' => []],
+            'gif' => ['honored' => ['fit', 'height', 'output_format', 'width'], 'planned' => []],
+            'jpeg' => ['honored' => ['background', 'fit', 'height', 'output_format', 'quality', 'width'], 'planned' => []],
+            'png' => ['honored' => ['fit', 'height', 'output_format', 'width'], 'planned' => []],
+            'tiff' => ['honored' => ['fit', 'height', 'output_format', 'width'], 'planned' => []],
+            'webp' => ['honored' => ['fit', 'height', 'output_format', 'quality', 'width'], 'planned' => []],
         ],
     ];
 
@@ -169,9 +170,16 @@ final class ImageOutputRoutes
         if ($cell === null) {
             return null;
         }
-        // Input-keyed resize: the format_change cell carries only transcoder
-        // options; resize capability comes from the INPUT's same_format cell
-        // (raster only).
+        // Resize is INPUT-gated. Since v2.103.0 convert is the resize engine, so
+        // the projection lists width/height/fit on EVERY format_change cell — but
+        // an SVG INPUT cannot be raster-resized (the convert worker rejects it).
+        // So strip the cell's resize keys and re-add only those the INPUT's
+        // same_format cell honors: raster inputs carry them, svg does not. The
+        // transcoder options (output_format/quality/background) ride the cell.
+        $transcoderHonored = \array_values(\array_filter(
+            $cell['honored'],
+            static fn (string $k): bool => !\in_array($k, self::RESIZE_KEYS, true),
+        ));
         $inCell = self::IMAGE_OUTPUT_ROUTES['same_format'][$inputToken] ?? null;
         $resize = $inCell !== null
             ? \array_values(\array_filter(self::RESIZE_KEYS, static fn (string $k): bool => \in_array($k, $inCell['honored'], true)))
@@ -181,7 +189,7 @@ final class ImageOutputRoutes
             'sourceOp' => 'convert',
             'outputFormatWire' => $outToken,
             'inputToken' => $inputToken,
-            'honored' => self::keySet([...$cell['honored'], ...$resize]),
+            'honored' => self::keySet([...$transcoderHonored, ...$resize]),
             'planned' => self::keySet($cell['planned']),
         ];
     }

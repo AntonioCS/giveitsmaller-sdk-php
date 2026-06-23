@@ -94,6 +94,20 @@ final class RecipeChainOptionsTest extends TestCase
     }
 
     #[Test]
+    public function convert_carries_image_resize_keys_to_the_wire(): void
+    {
+        // convert.image is the resize engine since v2.103.0: width/height/fit are
+        // first-class convert options (stable, honored_on format_change).
+        $ops = $this->operations($this->recipe('photo.png')->convert('jpeg', ['width' => 800, 'height' => 600, 'fit' => 'max', 'quality' => 85]));
+        self::assertCount(1, $ops);
+        self::assertSame('convert', $ops[0]['type']);
+        self::assertEqualsCanonicalizing(
+            ['output_format' => 'jpeg', 'width' => 800, 'height' => 600, 'fit' => 'max', 'quality' => 85],
+            $ops[0]['options'],
+        );
+    }
+
+    #[Test]
     public function thumbnail_carries_all_defined_keys(): void
     {
         // Both dims are required now; the extra keys (fit/format) still pass through.
