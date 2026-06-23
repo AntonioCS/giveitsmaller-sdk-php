@@ -194,18 +194,27 @@ final class RecipeOutputTest extends TestCase
         }
     }
 
-    // --- output(): planned options gated unavailable ------------------------
+    // --- output(): lossless (stable on jpeg/webp since v2.101.0) ------------
 
     #[Test]
-    public function planned_lossless_throws_feature_not_available(): void
+    public function lossless_honored_on_same_format_jpeg_and_webp(): void
+    {
+        self::assertSame(true, $this->soleOp($this->recipe('photo.jpg')->output('jpeg', ['lossless' => true]))['options']['lossless'] ?? null);
+        self::assertSame(true, $this->soleOp($this->recipe('photo.webp')->output('webp', ['lossless' => true]))['options']['lossless'] ?? null);
+    }
+
+    #[Test]
+    public function lossless_not_honored_on_png_throws_option_not_on_route(): void
     {
         try {
-            $this->operations($this->recipe('photo.jpg')->output('jpeg', ['lossless' => true]));
-            self::fail('a planned lossless option must throw');
+            $this->operations($this->recipe('photo.png')->output('png', ['lossless' => true]));
+            self::fail('lossless is not honored on png');
         } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
+            self::assertSame('option_not_on_route', $err->reason);
         }
     }
+
+    // --- output(): still-planned options gated unavailable -------------------
 
     #[Test]
     public function planned_lossy_on_png_throws_feature_not_available(): void
@@ -219,19 +228,14 @@ final class RecipeOutputTest extends TestCase
     }
 
     #[Test]
-    public function metadata_all_is_honored_but_keep_throws_per_value_planned(): void
+    public function metadata_all_and_keep_both_honored_since_v2_102_0(): void
     {
         $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'all']));
         self::assertSame('all', $op['options']['metadata'] ?? null);
 
-        // `metadata: 'keep'` is planned at the VALUE level even though the
-        // `metadata` key is honored.
-        try {
-            $this->operations($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'keep']));
-            self::fail("metadata: 'keep' (planned per-value) must throw");
-        } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
-        }
+        // keep/strip un-parked in v2.102.0 — `keep` is no longer planned per-value.
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'keep']));
+        self::assertSame('keep', $op['options']['metadata'] ?? null);
     }
 
     // --- output(): unrepresentable routes + svg (vector, no resize) ---------

@@ -17,7 +17,7 @@ namespace Gisl\Sdk\Generated\SdkSpec;
  */
 final class Version
 {
-    public const SDK_SPEC_VERSION = '2.0.0';
+    public const SDK_SPEC_VERSION = '2.1.0';
     public const PRESET_VERSION = '1.4';
     public const PRESET_CONFIG_HASH = 'sha256:62fbada24e33f983dacb0f717b0c9bb80824a208c3dc7f9af8523026e783543a';
 

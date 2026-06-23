@@ -84,11 +84,11 @@ final class ImageOutputRoutes
         'same_format' => [
             'avif' => ['honored' => ['avif_speed', 'fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
             'gif' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
-            'jpeg' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'progressive', 'quality', 'width'], 'planned' => ['lossless']],
+            'jpeg' => ['honored' => ['fit', 'height', 'lossless', 'metadata', 'output_format', 'progressive', 'quality', 'width'], 'planned' => []],
             'png' => ['honored' => ['fit', 'height', 'metadata', 'optimization_level', 'output_format', 'quality', 'width'], 'planned' => ['lossy']],
             'svg' => ['honored' => ['metadata', 'output_format', 'quality'], 'planned' => []],
             'tiff' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
-            'webp' => ['honored' => ['fit', 'height', 'metadata', 'output_format', 'quality', 'width'], 'planned' => ['lossless']],
+            'webp' => ['honored' => ['fit', 'height', 'lossless', 'metadata', 'output_format', 'quality', 'width'], 'planned' => []],
         ],
         'format_change' => [
             'avif' => ['honored' => ['output_format', 'quality'], 'planned' => []],
