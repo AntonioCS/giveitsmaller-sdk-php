@@ -247,6 +247,7 @@ final class WireKeyConformanceTest extends TestCase
             'progressive', 'optimization_level', 'avif_speed',
             'width', 'height', 'fit', 'lossless', 'lossy',
             'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'keep_metadata',
+            'color_profile', 'auto_orient',
         ],
         'audio' => ['output_format'],
         'video' => ['output_format'],

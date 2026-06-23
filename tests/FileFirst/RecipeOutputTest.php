@@ -314,6 +314,30 @@ final class RecipeOutputTest extends TestCase
         }
     }
 
+    // --- output(): color_profile + auto_orient (v2.112.0, planned) ----------
+
+    #[Test]
+    public function color_profile_planned_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'srgb']));
+            self::fail('color_profile is planned');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function auto_orient_planned_throws_feature_not_available_on_format_change(): void
+    {
+        try {
+            $this->operations($this->recipe('a.png')->output('webp', ['auto_orient' => true]));
+            self::fail('auto_orient is planned');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
     // --- output(): unrepresentable routes + svg (vector, no resize) ---------
 
     #[Test]

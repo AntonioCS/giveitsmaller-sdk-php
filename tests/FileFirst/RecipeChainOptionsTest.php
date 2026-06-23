@@ -108,15 +108,18 @@ final class RecipeChainOptionsTest extends TestCase
     }
 
     #[Test]
-    public function convert_carries_the_metadata_key_to_the_wire(): void
+    public function convert_carries_the_planned_image_keys_to_the_wire(): void
     {
-        // convert.image gained `metadata` (strip/keep) in v2.106.0 (PLANNED on
-        // convert); convert() is a raw passthrough, so the key reaches the wire.
-        $ops = $this->operations($this->recipe('photo.png')->convert('jpeg', ['metadata' => 'strip']));
+        // convert.image gained `metadata` (v2.106.0) + `color_profile`/`auto_orient`
+        // (v2.112.0) — all PLANNED on convert; convert() is a raw passthrough, so the
+        // keys reach the wire verbatim (the API gates the planned values).
+        $ops = $this->operations($this->recipe('photo.png')->convert('jpeg', ['metadata' => 'strip', 'color_profile' => 'srgb', 'auto_orient' => true]));
         self::assertCount(1, $ops);
         self::assertSame('convert', $ops[0]['type']);
-        self::assertEqualsCanonicalizing(
-            ['output_format' => 'jpeg', 'metadata' => 'strip'],
+        // assertEquals (not Canonicalizing): assoc-array compare is order-independent,
+        // and the `auto_orient` boolean would break Canonicalizing's value sort.
+        self::assertEquals(
+            ['output_format' => 'jpeg', 'metadata' => 'strip', 'color_profile' => 'srgb', 'auto_orient' => true],
             $ops[0]['options'],
         );
     }

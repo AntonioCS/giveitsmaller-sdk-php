@@ -157,6 +157,8 @@ final class Recipe
      *   avif_speed?: int,
      *   metadata?: 'strip'|'keep',
      *   keep_metadata?: list<string>,
+     *   color_profile?: 'keep'|'srgb'|'strip',
+     *   auto_orient?: bool,
      *   lossless?: bool,
      *   lossy?: bool,
      * } $options
