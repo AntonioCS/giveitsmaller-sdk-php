@@ -108,6 +108,20 @@ final class RecipeChainOptionsTest extends TestCase
     }
 
     #[Test]
+    public function convert_carries_the_metadata_key_to_the_wire(): void
+    {
+        // convert.image gained `metadata` (strip/keep) in v2.106.0 (PLANNED on
+        // convert); convert() is a raw passthrough, so the key reaches the wire.
+        $ops = $this->operations($this->recipe('photo.png')->convert('jpeg', ['metadata' => 'strip']));
+        self::assertCount(1, $ops);
+        self::assertSame('convert', $ops[0]['type']);
+        self::assertEqualsCanonicalizing(
+            ['output_format' => 'jpeg', 'metadata' => 'strip'],
+            $ops[0]['options'],
+        );
+    }
+
+    #[Test]
     public function thumbnail_carries_all_defined_keys(): void
     {
         // Both dims are required now; the extra keys (fit/format) still pass through.

@@ -228,46 +228,45 @@ final class RecipeOutputTest extends TestCase
     }
 
     #[Test]
-    public function metadata_all_and_keep_both_honored_since_v2_102_0(): void
+    public function metadata_strip_and_keep_honored_on_same_format_jpeg(): void
     {
-        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'all']));
-        self::assertSame('all', $op['options']['metadata'] ?? null);
+        // v2.107.0 rename: all -> strip (strip = remove EXIF/IPTC/XMP, default).
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'strip']));
+        self::assertSame('strip', $op['options']['metadata'] ?? null);
 
-        // keep/strip un-parked in v2.102.0 — `keep` is no longer planned per-value.
         $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['metadata' => 'keep']));
         self::assertSame('keep', $op['options']['metadata'] ?? null);
     }
 
-    // --- output(): target-size (v2.104.0; quality live / target_size planned) --
+    #[Test]
+    public function metadata_on_a_format_change_throws_feature_not_available(): void
+    {
+        // v2.106.0: convert.image metadata is PLANNED → planned on format_change.
+        try {
+            $this->operations($this->recipe('a.png')->output('webp', ['metadata' => 'strip']));
+            self::fail('metadata is planned on a format-change route');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+    }
+
+    // --- output(): target-size (v2.108.0; encoding_mode + target_size_bytes STABLE) --
 
     #[Test]
     public function encoding_mode_quality_honored_on_same_format_jpeg_and_webp(): void
     {
-        // `quality` is the live default mode (the optimiser quality-slider path).
+        // `quality` is the default mode (the optimiser quality-slider path).
         self::assertSame('quality', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['encoding_mode' => 'quality']))['options']['encoding_mode'] ?? null);
         self::assertSame('quality', $this->soleOp($this->recipe('a.webp')->output('webp', ['encoding_mode' => 'quality']))['options']['encoding_mode'] ?? null);
     }
 
     #[Test]
-    public function encoding_mode_target_size_planned_value_throws_feature_not_available(): void
+    public function encoding_mode_target_size_honored_since_v2_108_0(): void
     {
-        try {
-            $this->operations($this->recipe('a.jpg')->output('jpeg', ['encoding_mode' => 'target_size']));
-            self::fail('the planned target_size value must throw');
-        } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
-        }
-    }
-
-    #[Test]
-    public function target_size_bytes_planned_key_throws_feature_not_available(): void
-    {
-        try {
-            $this->operations($this->recipe('a.jpg')->output('jpeg', ['target_size_bytes' => 50_000]));
-            self::fail('a planned target_size_bytes option must throw');
-        } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
-        }
+        // STABLE since v2.108.0 — target_size is emitted, not gated.
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['encoding_mode' => 'target_size', 'target_size_bytes' => 50_000]));
+        self::assertSame('target_size', $op['options']['encoding_mode'] ?? null);
+        self::assertSame(50_000, $op['options']['target_size_bytes'] ?? null);
     }
 
     #[Test]
@@ -280,6 +279,38 @@ final class RecipeOutputTest extends TestCase
             self::fail('encoding_mode is not honored on a format-change route');
         } catch (GislConfigError $err) {
             self::assertSame('option_not_on_route', $err->reason);
+        }
+    }
+
+    // --- output(): chroma_subsampling (v2.110.0 stable) + keep_metadata (planned) --
+
+    #[Test]
+    public function chroma_subsampling_honored_on_same_format_jpeg(): void
+    {
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['chroma_subsampling' => '420']));
+        self::assertSame('420', $op['options']['chroma_subsampling'] ?? null);
+    }
+
+    #[Test]
+    public function chroma_subsampling_on_webp_throws_option_not_on_route(): void
+    {
+        // chroma_subsampling is jpeg-only (same_format).
+        try {
+            $this->operations($this->recipe('a.webp')->output('webp', ['chroma_subsampling' => '420']));
+            self::fail('chroma_subsampling is jpeg-only');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
+        }
+    }
+
+    #[Test]
+    public function keep_metadata_planned_throws_feature_not_available(): void
+    {
+        try {
+            $this->operations($this->recipe('a.jpg')->output('jpeg', ['keep_metadata' => ['copyright']]));
+            self::fail('keep_metadata is planned');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
         }
     }
 

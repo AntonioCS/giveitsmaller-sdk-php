@@ -145,6 +145,9 @@ final class Recipe
      *
      * @param array{
      *   quality?: int,
+     *   encoding_mode?: 'quality'|'target_size',
+     *   target_size_bytes?: int,
+     *   chroma_subsampling?: '420'|'422'|'444',
      *   width?: int,
      *   height?: int,
      *   fit?: 'max'|'crop'|'scale',
@@ -152,7 +155,8 @@ final class Recipe
      *   progressive?: bool,
      *   optimization_level?: int,
      *   avif_speed?: int,
-     *   metadata?: 'all'|'keep',
+     *   metadata?: 'strip'|'keep',
+     *   keep_metadata?: list<string>,
      *   lossless?: bool,
      *   lossy?: bool,
      * } $options

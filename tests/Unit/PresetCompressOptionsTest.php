@@ -107,7 +107,7 @@ final class PresetCompressOptionsTest extends TestCase
         // metadata / outputFormat. `mode` + `iccProfile` were removed.
         $dto = ImageCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
         $this->assertSame(65, $dto->quality);
-        $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
+        $this->assertSame(ImageMetadataPolicy::Strip, $dto->metadata);
         // VcPeRWdD (contracts v2.73.0): Size outputFormat re-pointed Smallest -> Original
         // (`smallest` is now per_value_availability:planned — facade self-422 guard).
         $this->assertSame(ImageFormat::Original, $dto->outputFormat);
@@ -120,7 +120,7 @@ final class PresetCompressOptionsTest extends TestCase
         // removed mode:lossless gate).
         $dto = ImageCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Quality);
         $this->assertSame(92, $dto->quality);
-        $this->assertSame(ImageMetadataPolicy::All, $dto->metadata);
+        $this->assertSame(ImageMetadataPolicy::Strip, $dto->metadata);
         $this->assertSame(ImageFormat::Original, $dto->outputFormat);
     }
 

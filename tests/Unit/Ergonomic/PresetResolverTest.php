@@ -71,7 +71,8 @@ final class PresetResolverTest extends TestCase
         // v2.80.0 honesty pass: image wire surface is only {quality, metadata,
         // output_format} — mode / icc_profile / progressive are gone.
         $this->assertSame(65, $out['wireOptions']['quality']);
-        $this->assertSame('all', $out['wireOptions']['metadata']);
+        // v2.107.0 metadata rename: the shipped Size cell now ships `strip` (was `all`).
+        $this->assertSame('strip', $out['wireOptions']['metadata']);
         // Every shipped field is attributed to sdkDefault (wire names, sorted).
         $this->assertSame(
             ['metadata', 'output_format', 'quality'],
@@ -450,7 +451,8 @@ final class PresetResolverTest extends TestCase
         $ro = $out['resolvedOptions'];
 
         $this->assertSame(75, $out['wireOptions']['quality']);
-        $this->assertSame('all', $out['wireOptions']['metadata']);
+        // v2.107.0 metadata rename: the surviving shipped `metadata` is now `strip`.
+        $this->assertSame('strip', $out['wireOptions']['metadata']);
         $this->assertSame(['quality'], $ro->sources->clientDefault);
         $this->assertContains('metadata', $ro->sources->sdkDefault);
     }

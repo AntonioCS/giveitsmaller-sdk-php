@@ -27,17 +27,17 @@ final class Presets
         'image_compress' => [
             'Size' => [
                 'quality' => 65,
-                'metadata' => 'All',
+                'metadata' => 'Strip',
                 'outputFormat' => 'Original',
             ],
             'Balanced' => [
                 'quality' => 80,
-                'metadata' => 'All',
+                'metadata' => 'Strip',
                 'outputFormat' => 'Original',
             ],
             'Quality' => [
                 'quality' => 92,
-                'metadata' => 'All',
+                'metadata' => 'Strip',
                 'outputFormat' => 'Original',
             ],
         ],

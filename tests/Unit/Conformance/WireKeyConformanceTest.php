@@ -235,17 +235,18 @@ final class WireKeyConformanceTest extends TestCase
      * @var array<string, list<string>>
      */
     private const INTENTIONALLY_OMITTED = [
-        // image Output-facade knobs (contracts v2.97.0 tewB37Jg + v2.104.0 target-size):
-        // compress.image* carries width/height/fit (Resize-inside-Output), lossless/lossy,
-        // and the v2.104.0 target-size pair (encoding_mode + target_size_bytes). These are
-        // the image OUTPUT facade surface — exposed/gated by the ergonomic output()/resize()
-        // verbs (RecipeOutputTest), NOT the preset compress() verb. Their availability +
-        // route gating is pinned by ImageOutputRouteConformanceTest (the projection
-        // honored/planned), so they are omitted from compress() here.
+        // image Output-facade knobs (contracts v2.97.0 tewB37Jg → v2.110.0): compress.image*
+        // carries width/height/fit (Resize-inside-Output), lossless/lossy, encoding_mode +
+        // target_size_bytes (target-size, STABLE since v2.108.0), chroma_subsampling (jpeg,
+        // stable v2.110.0), and keep_metadata (planned, v2.106.0). These are the image OUTPUT
+        // facade surface — exposed/gated by the ergonomic output()/resize() verbs
+        // (RecipeOutputTest), NOT the preset compress() verb. Their availability + route
+        // gating is pinned by ImageOutputRouteConformanceTest (the projection honored/planned),
+        // so they are omitted from compress() here.
         'image' => [
             'progressive', 'optimization_level', 'avif_speed',
             'width', 'height', 'fit', 'lossless', 'lossy',
-            'encoding_mode', 'target_size_bytes',
+            'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'keep_metadata',
         ],
         'audio' => ['output_format'],
         'video' => ['output_format'],
