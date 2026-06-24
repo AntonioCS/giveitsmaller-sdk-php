@@ -232,6 +232,20 @@ final class WatermarkRecipeTest extends TestCase
         $this->recipe('loop.gif')->watermark($this->overlay());
     }
 
+    public function test_throws_for_tiff_base_planned(): void
+    {
+        // image_tiff is planned (v2.123.0).
+        $this->expectExceptionMessageMatches('/not yet available|planned/');
+        $this->recipe('scan.tiff')->watermark($this->overlay());
+    }
+
+    public function test_throws_for_bmp_base_planned(): void
+    {
+        // image_bmp is planned (v2.123.0).
+        $this->expectExceptionMessageMatches('/not yet available|planned/');
+        $this->recipe('pic.bmp')->watermark($this->overlay());
+    }
+
     public function test_throws_for_unsupported_image_subtype_avif(): void
     {
         $this->expectExceptionMessageMatches('/does not support/');
