@@ -232,6 +232,16 @@ final class CredentialsTest extends TestCase
         }
         $profilePath = $this->writeProfile("[default]\napi_key = readable-value\n");
         chmod($profilePath, 0);
+        // chmod(0) does not make a file unreadable to root, and the POSIX euid
+        // guard above misses CI runners that lack the `posix` extension
+        // (function_exists() is false → guard skipped → test runs as root and
+        // the file stays readable). Skip when the precondition the test needs —
+        // an actually-unreadable file — isn't met, regardless of how we got there.
+        clearstatcache(true, $profilePath);
+        if (is_readable($profilePath)) {
+            chmod($profilePath, 0600);
+            self::markTestSkipped('chmod 0 did not make the profile unreadable (running as root?).');
+        }
         try {
             Credentials::resolveApiKey(profilePath: $profilePath);
             self::fail('Expected GislConfigError');
