@@ -322,12 +322,17 @@ final class RecipeOutputTest extends TestCase
         // Un-gated v2.128.0: keep/strip honored on same_format jpeg/png/webp.
         self::assertSame('keep', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
         self::assertSame('keep', $this->soleOp($this->recipe('a.webp')->output('webp', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
-        // jpeg srgb is live (only webp same-format srgb is contract-planned).
+        // jpeg srgb is live (jpeg/png groups carry no srgb-planned entry).
         self::assertSame('srgb', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'srgb']))['options']['color_profile'] ?? null);
-        // KNOWN GAP (Trello WSXsczZd): webp srgb is contract-planned, but the per-value
-        // gate reads the coarse `image` group, so the SDK passes it through pre-upload
-        // (server-gated). Locks the current passthrough until the group-mapping fix lands.
-        self::assertSame('srgb', $this->soleOp($this->recipe('a.webp')->output('webp', ['color_profile' => 'srgb']))['options']['color_profile'] ?? null);
+        // v2.134 added `srgb: planned` to the generic compress `image` group, so the
+        // coarse per-value gate (webp/gif/tiff -> 'image') now gates srgb pre-upload —
+        // resolving the WSXsczZd symptom contract-side.
+        try {
+            $this->operations($this->recipe('a.webp')->output('webp', ['color_profile' => 'srgb']));
+            self::fail('webp srgb is planned per-value');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
     }
 
     #[Test]
