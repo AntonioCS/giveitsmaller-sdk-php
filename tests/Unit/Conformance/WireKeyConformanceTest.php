@@ -236,7 +236,7 @@ final class WireKeyConformanceTest extends TestCase
      */
     private const INTENTIONALLY_OMITTED = [
         // image Output-facade knobs (contracts v2.97.0 tewB37Jg → v2.110.0): compress.image*
-        // carries width/height/fit (Resize-inside-Output), lossless/lossy, encoding_mode +
+        // carries width/height/fit (Resize-inside-Output), lossless, encoding_mode +
         // target_size_bytes (target-size, STABLE since v2.108.0), chroma_subsampling (jpeg,
         // stable v2.110.0), and keep_metadata (planned, v2.106.0). These are the image OUTPUT
         // facade surface — exposed/gated by the ergonomic output()/resize() verbs
@@ -245,7 +245,7 @@ final class WireKeyConformanceTest extends TestCase
         // so they are omitted from compress() here.
         'image' => [
             'progressive', 'optimization_level', 'avif_speed',
-            'width', 'height', 'fit', 'lossless', 'lossy',
+            'width', 'height', 'fit', 'lossless',
             'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'keep_metadata',
             'color_profile', 'auto_orient',
         ],

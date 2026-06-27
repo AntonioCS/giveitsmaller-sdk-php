@@ -160,7 +160,6 @@ final class Recipe
      *   color_profile?: 'keep'|'srgb'|'strip',
      *   auto_orient?: bool,
      *   lossless?: bool,
-     *   lossy?: bool,
      * } $options
      */
     public function output(?string $format = null, array $options = []): self

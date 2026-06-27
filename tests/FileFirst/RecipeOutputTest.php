@@ -214,16 +214,16 @@ final class RecipeOutputTest extends TestCase
         }
     }
 
-    // --- output(): still-planned options gated unavailable -------------------
+    // --- output(): removed and still-planned options gated locally -----------
 
     #[Test]
-    public function planned_lossy_on_png_throws_feature_not_available(): void
+    public function removed_lossy_on_png_throws_unknown_field(): void
     {
         try {
-            $this->operations($this->recipe('photo.png')->output('png', ['lossy' => true]));
-            self::fail('a planned lossy option must throw');
+            $this->recipe('photo.png')->output('png', ['lossy' => true]);
+            self::fail('a removed lossy option must throw');
         } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
+            self::assertSame('unknown_field', $err->reason);
         }
     }
 
@@ -320,16 +320,24 @@ final class RecipeOutputTest extends TestCase
     public function color_profile_un_gated_on_proven_raster_routes_v2_128_0(): void
     {
         // Un-gated v2.128.0: keep/strip honored on same_format jpeg/png/webp.
+        // v2.137.0 adds same_format avif to the live key set.
         self::assertSame('keep', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
         self::assertSame('keep', $this->soleOp($this->recipe('a.webp')->output('webp', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
+        self::assertSame('keep', $this->soleOp($this->recipe('a.avif')->output('avif', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
         // jpeg srgb is live (jpeg/png groups carry no srgb-planned entry).
         self::assertSame('srgb', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'srgb']))['options']['color_profile'] ?? null);
-        // v2.134 added `srgb: planned` to the generic compress `image` group, so the
-        // coarse per-value gate (webp/gif/tiff -> 'image') now gates srgb pre-upload —
-        // resolving the WSXsczZd symptom contract-side.
+        // v2.134 added `srgb: planned` to the generic compress `image` group, and
+        // v2.137 keeps AVIF `srgb` planned in the image_avif group even while
+        // un-gating the key itself. The per-value gate catches both pre-upload.
         try {
             $this->operations($this->recipe('a.webp')->output('webp', ['color_profile' => 'srgb']));
             self::fail('webp srgb is planned per-value');
+        } catch (GislConfigError $err) {
+            self::assertSame('feature_not_available', $err->reason);
+        }
+        try {
+            $this->operations($this->recipe('a.avif')->output('avif', ['color_profile' => 'srgb']));
+            self::fail('avif srgb is planned per-value');
         } catch (GislConfigError $err) {
             self::assertSame('feature_not_available', $err->reason);
         }
@@ -366,6 +374,17 @@ final class RecipeOutputTest extends TestCase
         } catch (GislConfigError $err) {
             self::assertSame('option_not_on_route', $err->reason);
             self::assertStringContainsString('not honored', $err->getMessage());
+        }
+    }
+
+    #[Test]
+    public function svg_input_quality_is_no_longer_honored_so_quality_throws_not_on_route(): void
+    {
+        try {
+            $this->operations($this->recipe('logo.svg')->output('svg', ['quality' => 80]));
+            self::fail('quality on an svg route must throw');
+        } catch (GislConfigError $err) {
+            self::assertSame('option_not_on_route', $err->reason);
         }
     }
 
