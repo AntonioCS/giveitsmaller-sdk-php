@@ -43,6 +43,14 @@ final class RunResult
     public readonly bool $ok;
 
     /**
+     * Whether any output missed its requested byte target. Derived from the
+     * per-output {@see OutputFile::$targetSizeMet}: null when NO artifact
+     * reports a target-size outcome (not a target_size run); otherwise true iff
+     * some artifact's `targetSizeMet === false`.
+     */
+    public readonly ?bool $targetSizeMissed;
+
+    /**
      * @param list<OutputFile>  $artifacts All outputs produced by the run.
      * @param list<ItemResult>  $succeeded Per-input successes (always present;
      *                                     one entry for a single-recipe run).
@@ -60,6 +68,21 @@ final class RunResult
     ) {
         $this->url = \count($artifacts) === 1 ? $artifacts[0]->url : null;
         $this->ok = $failed === [];
+        // Derive the target-size signal: null when NO artifact reports an
+        // outcome (every targetSizeMet null — not a target_size run); otherwise
+        // true iff some artifact's targetSizeMet === false. Mirrors the TS
+        // RunResult constructor exactly.
+        $anyReported = false;
+        $anyMissed = false;
+        foreach ($artifacts as $artifact) {
+            if ($artifact->targetSizeMet !== null) {
+                $anyReported = true;
+                if ($artifact->targetSizeMet === false) {
+                    $anyMissed = true;
+                }
+            }
+        }
+        $this->targetSizeMissed = $anyReported ? $anyMissed : null;
     }
 
     /**
@@ -98,6 +121,8 @@ final class RunResult
                     filename: BuilderInternals::coerceString($file->getFilename()),
                     sizeBytes: (int) ($file->getSizeBytes() ?? 0),
                     operation: BuilderInternals::coerceString($file->getOperation()),
+                    chosenQuality: $file->getChosenQuality(),
+                    targetSizeMet: $file->getTargetSizeMet(),
                 );
             }
         }
@@ -192,6 +217,8 @@ final class RunResult
                     filename: BuilderInternals::coerceString($file->getFilename()),
                     sizeBytes: (int) ($file->getSizeBytes() ?? 0),
                     operation: BuilderInternals::coerceString($file->getOperation()),
+                    chosenQuality: $file->getChosenQuality(),
+                    targetSizeMet: $file->getTargetSizeMet(),
                 );
             }
             // The flat artifacts[] keeps every job's outputs in job order.
@@ -456,9 +483,10 @@ final class RunResult
      *     workflowId: string,
      *     state: string,
      *     ok: bool,
+     *     targetSizeMissed?: bool,
      *     url?: string,
-     *     artifacts: list<array{url: string, filename: string, sizeBytes: int, operation: string}>,
-     *     succeeded: list<array{key: string|null, outputs: list<array{url: string, filename: string, sizeBytes: int, operation: string}>}>,
+     *     artifacts: list<array{url: string, filename: string, sizeBytes: int, operation: string, chosenQuality?: int, targetSizeMet?: bool}>,
+     *     succeeded: list<array{key: string|null, outputs: list<array{url: string, filename: string, sizeBytes: int, operation: string, chosenQuality?: int, targetSizeMet?: bool}>}>,
      *     failed: list<array{key: string|null, error: string, state: string, errorMessage?: string, errorCode?: string}>
      * }
      */
@@ -469,6 +497,12 @@ final class RunResult
             'state' => $this->state,
             'ok' => $this->ok,
         ];
+        // Omit `targetSizeMissed` when null so non-target-size runs keep the
+        // common-case shape (TS omits undefined). Emitted immediately after
+        // `ok`, before `url`, to match the TS toJSON() field order.
+        if ($this->targetSizeMissed !== null) {
+            $out['targetSizeMissed'] = $this->targetSizeMissed;
+        }
         // Omit `url` when null so the serialised shape matches the TS
         // reference, where `undefined` is dropped by `JSON.stringify` (same
         // convention as Ergonomic\Artifact::toArray()).

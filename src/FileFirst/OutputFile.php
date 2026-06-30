@@ -17,11 +17,23 @@ namespace Gisl\Sdk\FileFirst;
  */
 final class OutputFile
 {
+    /**
+     * @param int|null  $chosenQuality For a `target_size` encode: the quality the
+     *                                 encode-measure loop settled on. Projected from
+     *                                 the generated OperationDownload; null (omitted)
+     *                                 for non-target-size outputs.
+     * @param bool|null $targetSizeMet For a `target_size` encode: whether the output
+     *                                 landed at or under the requested byte target.
+     *                                 `false` is an honest best-effort outcome, NOT a
+     *                                 failure. Null for non-target-size outputs.
+     */
     public function __construct(
         public readonly string $url,
         public readonly string $filename,
         public readonly int $sizeBytes,
         public readonly string $operation,
+        public readonly ?int $chosenQuality = null,
+        public readonly ?bool $targetSizeMet = null,
     ) {
     }
 
@@ -29,16 +41,25 @@ final class OutputFile
      * Plain-array projection for tests + JSON-serialise paths. Field order
      * is fixed so the serialised shape matches the TS reference exactly
      * (cross-language shape assertion, FF1; harness parity fixture, FF2b).
+     * The target-size fields are OMITTED when null, mirroring TS's
+     * omit-when-undefined so non-target-size outputs stay byte-identical.
      *
-     * @return array{url: string, filename: string, sizeBytes: int, operation: string}
+     * @return array{url: string, filename: string, sizeBytes: int, operation: string, chosenQuality?: int, targetSizeMet?: bool}
      */
     public function toArray(): array
     {
-        return [
+        $out = [
             'url' => $this->url,
             'filename' => $this->filename,
             'sizeBytes' => $this->sizeBytes,
             'operation' => $this->operation,
         ];
+        if ($this->chosenQuality !== null) {
+            $out['chosenQuality'] = $this->chosenQuality;
+        }
+        if ($this->targetSizeMet !== null) {
+            $out['targetSizeMet'] = $this->targetSizeMet;
+        }
+        return $out;
     }
 }
