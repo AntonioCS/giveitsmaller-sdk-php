@@ -66,8 +66,8 @@ final class OptionValidation
      * @var list<string>
      */
     private const OUTPUT_OPTION_KEYS = [
-        'quality', 'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'width', 'height', 'fit',
-        'background', 'progressive', 'optimization_level', 'avif_speed', 'metadata', 'keep_metadata',
+        'quality', 'quality_preset', 'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'width', 'height', 'fit',
+        'background', 'progressive', 'optimization_level', 'avif_speed', 'metadata',
         'color_profile', 'auto_orient', 'lossless',
     ];
 

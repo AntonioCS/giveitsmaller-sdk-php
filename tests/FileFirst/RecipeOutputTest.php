@@ -282,7 +282,7 @@ final class RecipeOutputTest extends TestCase
         }
     }
 
-    // --- output(): chroma_subsampling (v2.110.0 stable) + keep_metadata (planned) --
+    // --- output(): chroma_subsampling (v2.110.0 stable) + quality_preset (v2.148.0 stable) --
 
     #[Test]
     public function chroma_subsampling_honored_on_same_format_jpeg(): void
@@ -304,13 +304,21 @@ final class RecipeOutputTest extends TestCase
     }
 
     #[Test]
-    public function keep_metadata_planned_throws_feature_not_available(): void
+    public function quality_preset_honored_on_same_format_jpeg(): void
     {
+        $op = $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['quality_preset' => 'good']));
+        self::assertSame('good', $op['options']['quality_preset'] ?? null);
+    }
+
+    #[Test]
+    public function quality_preset_not_on_png_route_throws_option_not_on_route(): void
+    {
+        // quality_preset is honored only on same_format avif/jpeg/webp.
         try {
-            $this->operations($this->recipe('a.jpg')->output('jpeg', ['keep_metadata' => ['copyright']]));
-            self::fail('keep_metadata is planned');
+            $this->operations($this->recipe('a.png')->output('png', ['quality_preset' => 'good']));
+            self::fail('quality_preset is avif/jpeg/webp-only');
         } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
+            self::assertSame('option_not_on_route', $err->reason);
         }
     }
 
@@ -326,21 +334,16 @@ final class RecipeOutputTest extends TestCase
         self::assertSame('keep', $this->soleOp($this->recipe('a.avif')->output('avif', ['color_profile' => 'keep']))['options']['color_profile'] ?? null);
         // jpeg srgb is live (jpeg/png groups carry no srgb-planned entry).
         self::assertSame('srgb', $this->soleOp($this->recipe('a.jpg')->output('jpeg', ['color_profile' => 'srgb']))['options']['color_profile'] ?? null);
-        // v2.134 added `srgb: planned` to the generic compress `image` group, and
-        // v2.137 keeps AVIF `srgb` planned in the image_avif group even while
-        // un-gating the key itself. The per-value gate catches both pre-upload.
+        // v2.134 added `srgb: planned` to the generic compress `image` group, through
+        // which webp/gif/svg/tiff route — so webp srgb stays gated pre-upload. AVIF
+        // routes through image_avif, where srgb flipped planned->stable in v2.148.
         try {
             $this->operations($this->recipe('a.webp')->output('webp', ['color_profile' => 'srgb']));
             self::fail('webp srgb is planned per-value');
         } catch (GislConfigError $err) {
             self::assertSame('feature_not_available', $err->reason);
         }
-        try {
-            $this->operations($this->recipe('a.avif')->output('avif', ['color_profile' => 'srgb']));
-            self::fail('avif srgb is planned per-value');
-        } catch (GislConfigError $err) {
-            self::assertSame('feature_not_available', $err->reason);
-        }
+        self::assertSame('srgb', $this->soleOp($this->recipe('a.avif')->output('avif', ['color_profile' => 'srgb']))['options']['color_profile'] ?? null);
     }
 
     #[Test]

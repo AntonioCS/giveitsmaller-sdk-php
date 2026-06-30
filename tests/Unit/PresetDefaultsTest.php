@@ -161,9 +161,9 @@ final class PresetDefaultsTest extends TestCase
             ->audioCompress($level, new AudioCompressPresetOptions(channels: 2))
             ->videoCompress($level, new VideoCompressPresetOptions(crf: 18))
             ->pdfCompress($level, new DocumentPdfCompressPresetOptions(grayscale: true))
-            ->officeCompress($level, new DocumentOfficeCompressPresetOptions(imageQuality: 60))
-            ->odfCompress($level, new DocumentOdfCompressPresetOptions(imageQuality: 61))
-            ->epubCompress($level, new DocumentEpubCompressPresetOptions(imageQuality: 62));
+            ->officeCompress($level, new DocumentOfficeCompressPresetOptions(stripHiddenData: true))
+            ->odfCompress($level, new DocumentOdfCompressPresetOptions(stripUnusedStyles: true))
+            ->epubCompress($level, new DocumentEpubCompressPresetOptions(stripUnusedCss: true));
 
         $m = PresetDefaults::merge($parent, $child);
 
@@ -189,17 +189,17 @@ final class PresetDefaultsTest extends TestCase
 
         $office = $m->cellFor('document_office_compress', $level);
         $this->assertInstanceOf(DocumentOfficeCompressPresetOptions::class, $office);
-        $this->assertSame(60, $office->imageQuality);  // child
+        $this->assertTrue($office->stripHiddenData);   // child
         $this->assertTrue($office->stripMacros);       // parent
 
         $odf = $m->cellFor('document_odf_compress', $level);
         $this->assertInstanceOf(DocumentOdfCompressPresetOptions::class, $odf);
-        $this->assertSame(61, $odf->imageQuality);     // child
+        $this->assertTrue($odf->stripUnusedStyles);    // child
         $this->assertTrue($odf->stripMetadata);        // parent
 
         $epub = $m->cellFor('document_epub_compress', $level);
         $this->assertInstanceOf(DocumentEpubCompressPresetOptions::class, $epub);
-        $this->assertSame(62, $epub->imageQuality);    // child
+        $this->assertTrue($epub->stripUnusedCss);      // child
         $this->assertTrue($epub->fontSubsetting);      // parent
     }
 }

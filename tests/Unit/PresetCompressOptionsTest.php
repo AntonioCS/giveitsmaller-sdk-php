@@ -167,7 +167,6 @@ final class PresetCompressOptionsTest extends TestCase
     public function testOfficeShippedDefaultsForSize(): void
     {
         $dto = DocumentOfficeCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(60, $dto->imageQuality);
         $this->assertTrue($dto->stripMacros);
         $this->assertTrue($dto->stripHiddenData);
         $this->assertTrue($dto->stripUnusedFonts);
@@ -176,7 +175,6 @@ final class PresetCompressOptionsTest extends TestCase
     public function testOdfShippedDefaultsForSize(): void
     {
         $dto = DocumentOdfCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(60, $dto->imageQuality);
         $this->assertTrue($dto->stripMetadata);
         $this->assertTrue($dto->stripUnusedStyles);
     }
@@ -184,7 +182,6 @@ final class PresetCompressOptionsTest extends TestCase
     public function testEpubShippedDefaultsForSize(): void
     {
         $dto = DocumentEpubCompressPresetOptions::shippedDefaultsFor(OptimizeFor::Size);
-        $this->assertSame(60, $dto->imageQuality);
         $this->assertTrue($dto->fontSubsetting);
         $this->assertTrue($dto->stripUnusedCss);
     }

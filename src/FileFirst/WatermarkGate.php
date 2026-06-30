@@ -35,8 +35,8 @@ final class WatermarkGate
         self::OP_IMAGE => [
             'image' => ['mimes' => ['image/jpeg', 'image/png', 'image/webp'], 'availability' => 'stable'],
             'image_gif' => ['mimes' => ['image/gif'], 'availability' => 'planned'],
-            'image_tiff' => ['mimes' => ['image/tiff'], 'availability' => 'planned'],
-            'image_bmp' => ['mimes' => ['image/bmp'], 'availability' => 'planned'],
+            'image_tiff' => ['mimes' => ['image/tiff'], 'availability' => 'stable'],
+            'image_bmp' => ['mimes' => ['image/bmp'], 'availability' => 'stable'],
         ],
         self::OP_VIDEO => [
             'video' => ['mimes' => ['video/mp4', 'video/webm'], 'availability' => 'beta'],

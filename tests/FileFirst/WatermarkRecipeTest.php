@@ -70,6 +70,22 @@ final class WatermarkRecipeTest extends TestCase
         self::assertSame('image_watermark', $this->watermarkJob($wire)['operations'][0]['type']);
     }
 
+    public function test_tiff_base_routes_to_image_watermark(): void
+    {
+        // image_tiff flipped planned->stable (v2.148.0).
+        $wire = $this->recipe('scan.tiff')->watermark($this->overlay())
+            ->toWorkflowPayload(['base', 'ovl'])->toWire();
+        self::assertSame('image_watermark', $this->watermarkJob($wire)['operations'][0]['type']);
+    }
+
+    public function test_bmp_base_routes_to_image_watermark(): void
+    {
+        // image_bmp flipped planned->stable (v2.148.0).
+        $wire = $this->recipe('pic.bmp')->watermark($this->overlay())
+            ->toWorkflowPayload(['base', 'ovl'])->toWire();
+        self::assertSame('image_watermark', $this->watermarkJob($wire)['operations'][0]['type']);
+    }
+
     public function test_video_base_routes_to_video_watermark(): void
     {
         $wire = $this->recipe('clip.mp4')->watermark($this->overlay(), ['anchor' => 'top_right'])
@@ -230,20 +246,6 @@ final class WatermarkRecipeTest extends TestCase
     {
         $this->expectExceptionMessageMatches('/not yet available|planned/');
         $this->recipe('loop.gif')->watermark($this->overlay());
-    }
-
-    public function test_throws_for_tiff_base_planned(): void
-    {
-        // image_tiff is planned (v2.123.0).
-        $this->expectExceptionMessageMatches('/not yet available|planned/');
-        $this->recipe('scan.tiff')->watermark($this->overlay());
-    }
-
-    public function test_throws_for_bmp_base_planned(): void
-    {
-        // image_bmp is planned (v2.123.0).
-        $this->expectExceptionMessageMatches('/not yet available|planned/');
-        $this->recipe('pic.bmp')->watermark($this->overlay());
     }
 
     public function test_throws_for_unsupported_image_subtype_avif(): void

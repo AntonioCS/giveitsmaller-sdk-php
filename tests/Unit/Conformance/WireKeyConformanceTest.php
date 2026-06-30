@@ -222,7 +222,7 @@ final class WireKeyConformanceTest extends TestCase
      * Document `quality` (contracts v2.83.0 document-compress honesty pass): a
      * stable per-document-group quality knob the ergonomic document-compress
      * preset path does not expose yet (the document preset DTOs carry
-     * profile/grayscale/image_quality/strip_* but not `quality`) — omitted until
+     * profile/grayscale/strip_* but not `quality`) — omitted until
      * a document-quality ergonomic option ships (tracked follow-up).
      *
      * document_pdf `image_dpi` (contracts v2.96.0 Acrobat-PDF realignment
@@ -238,7 +238,7 @@ final class WireKeyConformanceTest extends TestCase
         // image Output-facade knobs (contracts v2.97.0 tewB37Jg → v2.110.0): compress.image*
         // carries width/height/fit (Resize-inside-Output), lossless, encoding_mode +
         // target_size_bytes (target-size, STABLE since v2.108.0), chroma_subsampling (jpeg,
-        // stable v2.110.0), and keep_metadata (planned, v2.106.0). These are the image OUTPUT
+        // stable v2.110.0), and quality_preset (stable, v2.148.0). These are the image OUTPUT
         // facade surface — exposed/gated by the ergonomic output()/resize() verbs
         // (RecipeOutputTest), NOT the preset compress() verb. Their availability + route
         // gating is pinned by ImageOutputRouteConformanceTest (the projection honored/planned),
@@ -246,7 +246,7 @@ final class WireKeyConformanceTest extends TestCase
         'image' => [
             'progressive', 'optimization_level', 'avif_speed',
             'width', 'height', 'fit', 'lossless',
-            'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'keep_metadata',
+            'encoding_mode', 'target_size_bytes', 'chroma_subsampling', 'quality_preset',
             'color_profile', 'auto_orient',
         ],
         'audio' => ['output_format'],

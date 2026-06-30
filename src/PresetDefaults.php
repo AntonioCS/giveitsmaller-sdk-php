@@ -173,20 +173,17 @@ final class PresetDefaults
                 ),
             $parent instanceof DocumentOfficeCompressPresetOptions && $child instanceof DocumentOfficeCompressPresetOptions
                 => new DocumentOfficeCompressPresetOptions(
-                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
                     stripMacros: $child->stripMacros ?? $parent->stripMacros,
                     stripHiddenData: $child->stripHiddenData ?? $parent->stripHiddenData,
                     stripUnusedFonts: $child->stripUnusedFonts ?? $parent->stripUnusedFonts,
                 ),
             $parent instanceof DocumentOdfCompressPresetOptions && $child instanceof DocumentOdfCompressPresetOptions
                 => new DocumentOdfCompressPresetOptions(
-                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
                     stripMetadata: $child->stripMetadata ?? $parent->stripMetadata,
                     stripUnusedStyles: $child->stripUnusedStyles ?? $parent->stripUnusedStyles,
                 ),
             $parent instanceof DocumentEpubCompressPresetOptions && $child instanceof DocumentEpubCompressPresetOptions
                 => new DocumentEpubCompressPresetOptions(
-                    imageQuality: $child->imageQuality ?? $parent->imageQuality,
                     fontSubsetting: $child->fontSubsetting ?? $parent->fontSubsetting,
                     stripUnusedCss: $child->stripUnusedCss ?? $parent->stripUnusedCss,
                 ),

@@ -103,7 +103,6 @@ final class PresetResolver
         'sampleRate' => 'sample_rate',
         'audioCodec' => 'audio_codec',
         'audioBitrate' => 'audio_bitrate',
-        'imageQuality' => 'image_quality',
         'stripMacros' => 'strip_macros',
         'stripHiddenData' => 'strip_hidden_data',
         'stripUnusedFonts' => 'strip_unused_fonts',
@@ -133,9 +132,9 @@ final class PresetResolver
         'audio' => ['bitrate', 'channels', 'sampleRate', 'normalize'],
         'video' => ['codec', 'targetSize', 'crf', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audioCodec', 'audioBitrate'],
         'document_pdf' => ['profile', 'grayscale'],
-        'document_office' => ['imageQuality', 'stripMacros', 'stripHiddenData', 'stripUnusedFonts'],
-        'document_odf' => ['imageQuality', 'stripMetadata', 'stripUnusedStyles'],
-        'document_epub' => ['imageQuality', 'fontSubsetting', 'stripUnusedCss'],
+        'document_office' => ['stripMacros', 'stripHiddenData', 'stripUnusedFonts'],
+        'document_odf' => ['stripMetadata', 'stripUnusedStyles'],
+        'document_epub' => ['fontSubsetting', 'stripUnusedCss'],
     ];
 
     /**
@@ -153,9 +152,9 @@ final class PresetResolver
         'audio' => ['bitrate', 'channels', 'sample_rate', 'normalize', 'trim_start', 'trim_end'],
         'video' => ['codec', 'encoding_mode', 'crf', 'target_size_bytes', 'preset', 'width', 'height', 'fit', 'fps', 'faststart', 'audio_codec', 'audio_bitrate', 'trim_start', 'trim_end'],
         'document_pdf' => ['profile', 'grayscale'],
-        'document_office' => ['image_quality', 'strip_macros', 'strip_hidden_data', 'strip_unused_fonts'],
-        'document_odf' => ['image_quality', 'strip_metadata', 'strip_unused_styles'],
-        'document_epub' => ['image_quality', 'font_subsetting', 'strip_unused_css'],
+        'document_office' => ['strip_macros', 'strip_hidden_data', 'strip_unused_fonts'],
+        'document_odf' => ['strip_metadata', 'strip_unused_styles'],
+        'document_epub' => ['font_subsetting', 'strip_unused_css'],
     ];
 
     private function __construct()

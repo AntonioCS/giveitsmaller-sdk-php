@@ -145,6 +145,7 @@ final class Recipe
      *
      * @param array{
      *   quality?: int,
+     *   quality_preset?: 'best'|'good'|'fair'|'low',
      *   encoding_mode?: 'quality'|'target_size',
      *   target_size_bytes?: int,
      *   chroma_subsampling?: '420'|'422'|'444',
@@ -156,7 +157,6 @@ final class Recipe
      *   optimization_level?: int,
      *   avif_speed?: int,
      *   metadata?: 'strip'|'keep',
-     *   keep_metadata?: list<string>,
      *   color_profile?: 'keep'|'srgb'|'strip',
      *   auto_orient?: bool,
      *   lossless?: bool,

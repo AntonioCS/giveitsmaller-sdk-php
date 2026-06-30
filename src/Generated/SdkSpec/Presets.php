@@ -88,19 +88,16 @@ final class Presets
         ],
         'document_office_compress' => [
             'Size' => [
-                'imageQuality' => 60,
                 'stripMacros' => true,
                 'stripHiddenData' => true,
                 'stripUnusedFonts' => true,
             ],
             'Balanced' => [
-                'imageQuality' => 80,
                 'stripMacros' => true,
                 'stripHiddenData' => false,
                 'stripUnusedFonts' => false,
             ],
             'Quality' => [
-                'imageQuality' => 92,
                 'stripMacros' => false,
                 'stripHiddenData' => false,
                 'stripUnusedFonts' => false,
@@ -108,34 +105,28 @@ final class Presets
         ],
         'document_odf_compress' => [
             'Size' => [
-                'imageQuality' => 60,
                 'stripMetadata' => true,
                 'stripUnusedStyles' => true,
             ],
             'Balanced' => [
-                'imageQuality' => 80,
                 'stripMetadata' => true,
                 'stripUnusedStyles' => false,
             ],
             'Quality' => [
-                'imageQuality' => 92,
                 'stripMetadata' => false,
                 'stripUnusedStyles' => false,
             ],
         ],
         'document_epub_compress' => [
             'Size' => [
-                'imageQuality' => 60,
                 'fontSubsetting' => true,
                 'stripUnusedCss' => true,
             ],
             'Balanced' => [
-                'imageQuality' => 80,
                 'fontSubsetting' => true,
                 'stripUnusedCss' => false,
             ],
             'Quality' => [
-                'imageQuality' => 92,
                 'fontSubsetting' => false,
                 'stripUnusedCss' => false,
             ],
